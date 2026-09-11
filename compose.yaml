@@ -1,0 +1,20 @@
+services:
+  gateway:
+    build:
+      context: .
+      target: production
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      MCP_MANAGER_HOME: /data
+      PUBLIC_URL: "${PUBLIC_URL:-http://127.0.0.1:8765}"
+      DATABASE_URL: "${DATABASE_URL:-}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+    volumes:
+      - mcp-manager-data:/data
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+
+volumes:
+  mcp-manager-data:

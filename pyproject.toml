@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-manager-gateway"
+version = "0.1.0"
+description = "Multi-user MCP management and lazy proxy gateway"
+readme = "README.md"
+keywords = ["mcp", "gateway", "fastapi", "proxy"]
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115", "uvicorn[standard]>=0.34",
+  "sqlalchemy[asyncio]>=2.0", "aiosqlite>=0.21", "asyncmy>=0.2",
+  "alembic>=1.15", "pydantic-settings>=2.8", "httpx>=0.28",
+  "mcp>=2.2,<3", "PyJWT>=2.10", "argon2-cffi>=23.1",
+  "cryptography>=44", "jsonschema>=4.23", "apscheduler>=3.11,<4",
+  "filelock>=3.17", "python-multipart>=0.0.20", "pyyaml>=6.0.3",
+  "pywin32>=308; sys_platform == 'win32'"
+]
+
+[project.scripts]
+mcp-manager = "mcp_manager.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.25", "ruff>=0.9", "playwright>=1.50"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_manager"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/README.md", "/pyproject.toml", "/uv.lock", "/.env.example", "/Dockerfile", "/compose.yaml", "/alembic.ini", "/deploy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
