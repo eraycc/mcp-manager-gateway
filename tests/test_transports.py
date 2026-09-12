@@ -42,5 +42,5 @@ async def test_real_stdio_fixture():
     result = await runtime.call(server, lease.id, "echo", {"value": "你好"})
     assert result["content"][0]["text"] == "你好"
     await runtime.release(lease.id)
-    assert runtime.status()[0]["phase"] == "stopped"
+    assert runtime.status() == []
     await runtime.close()

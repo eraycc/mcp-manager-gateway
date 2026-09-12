@@ -33,7 +33,7 @@ class Fake:
         return {"content": [{"type": "text", "text": arguments.get("value", "ok")}]}
 
     async def discover(self):
-        return [{"name": "echo", "inputSchema": {"type": "object"}}]
+        return {"tools": [{"name": "echo", "inputSchema": {"type": "object"}}], "resources": [], "prompts": [], "templates": []}
 
 
 def spec(**kwargs):

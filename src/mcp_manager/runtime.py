@@ -6,6 +6,9 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from weakref import WeakValueDictionary
+
+from .protocol_errors import is_request_error
 
 
 class GatewayError(Exception):
@@ -63,7 +66,9 @@ class Runtime:
         self.idle_seconds = idle_seconds
         self.leases: dict[str, Lease] = {}
         self.instances: dict[tuple, Instance] = {}
-        self._locks: dict[tuple, asyncio.Lock] = {}
+        # Waiters keep strong references; inactive session/revision keys can disappear.
+        self._locks: WeakValueDictionary[tuple, asyncio.Lock] = WeakValueDictionary()
+        self.on_connect = None
         self._closing = False
         self.holds: set[str] = set()
         self.versions: dict[str, int] = {}
@@ -99,12 +104,17 @@ class Runtime:
     async def _owner(self, instance: Instance):
         """Enter and exit SDK/AnyIO transport contexts in this one task."""
         try:
-            async with self.connector(instance.spec) as connection:
-                instance.connection = connection
-                if instance.phase == "starting":
-                    instance.phase = "ready"
-                instance.ready.set()
-                await instance.stop.wait()
+            timeout = float(instance.spec.config.get("startup_timeout", 30))
+            async with asyncio.timeout(timeout) as startup:
+                async with self.connector(instance.spec) as connection:
+                    instance.connection = connection
+                    if self.on_connect is not None:
+                        await self.on_connect(instance.spec, connection)
+                    startup.reschedule(None)
+                    if instance.phase == "starting":
+                        instance.phase = "ready"
+                    instance.ready.set()
+                    await instance.stop.wait()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -116,6 +126,8 @@ class Runtime:
                 instance.phase = "stopped"
             instance.ready.set()
             instance.closed.set()
+            if self.instances.get(instance.key) is instance:
+                self.instances.pop(instance.key, None)
 
     def _available(self, spec):
         if self._closing:
@@ -220,6 +232,8 @@ class Runtime:
             if not dispatched:
                 instance.refs.discard(lease_id)
                 raise
+            if is_request_error(exc):
+                raise GatewayError("downstream_error", str(exc)) from exc
             instance.phase = "draining"
             instance.refs.clear()
             code = "outcome_unknown" if dispatched and business else "connection_error"
@@ -230,7 +244,9 @@ class Runtime:
             instance.in_flight -= 1
             if instance.in_flight == 0:
                 instance.drained.set()
-                if not instance.refs and instance.spec.mode == "lazy":
+                if instance.phase == "draining":
+                    await self._stop_instance(instance)
+                elif not instance.refs and (instance.spec.mode == "lazy" or instance.spec.isolation == "session"):
                     await self._stop_instance(instance, only_unreferenced=True)
 
     async def call(self, spec, lease_id, name, arguments, *, authorize=None):
@@ -261,20 +277,26 @@ class Runtime:
                 instance.owner.cancel()
                 await asyncio.gather(instance.owner, return_exceptions=True)
 
-    async def release(self, lease_id: str):
+    async def release(self, lease_id: str, *, keep_alive=False):
         self.leases.pop(lease_id, None)
         for instance in list(self.instances.values()):
+            if lease_id not in instance.refs:
+                continue
             instance.refs.discard(lease_id)
-            if not instance.refs and instance.spec.mode == "lazy":
+            if not keep_alive and not instance.refs and (instance.spec.mode == "lazy" or instance.spec.isolation == "session"):
                 await self._stop_instance(instance, only_unreferenced=True)
 
-    async def stop_server(self, server_id: str, *, hold=False, force=False):
+    async def stop_server(self, server_id: str, *, hold=False, force=False, require_idle=False):
+        instances = [i for i in self.instances.values() if i.spec.id == server_id]
+        # No await before admission is blocked: a rejected edit leaves the old
+        # generation and any pre-existing manual hold untouched.
+        if require_idle and any(i.in_flight or i.phase == "starting" for i in instances):
+            raise GatewayError("busy", "MCP has active calls or is starting; retry after completion")
         if hold:
             self.holds.add(server_id)
-        for instance in list(self.instances.values()):
-            if instance.spec.id == server_id:
-                instance.refs.clear()
-                await self._stop_instance(instance, force=force)
+        for instance in instances:
+            instance.refs.clear()
+            await self._stop_instance(instance, force=force)
 
     async def invalidate_credential(self, server_id, owner):
         self.credential_versions[(server_id, owner)] = None
@@ -287,14 +309,26 @@ class Runtime:
         for instance in list(self.instances.values()):
             if lease_id in instance.refs and instance.spec.id not in allowed:
                 instance.refs.discard(lease_id)
-                if not instance.refs and instance.spec.mode == "lazy":
+                if not instance.refs and (instance.spec.mode == "lazy" or instance.spec.isolation == "session"):
                     await self._stop_instance(instance, only_unreferenced=True)
 
     async def revoke(self, *, user_id: str | None = None, token_id: str | None = None):
+        owned = []
+        if user_id is not None and token_id is None:
+            # Eager personal connections outlive their maintenance leases.
+            owned = [i for i in self.instances.values()
+                     if i.spec.credential_owner == user_id
+                     or (i.spec.isolation == "user" and i.key[-1] == user_id)]
+            for instance in owned:
+                if instance.spec.credential_owner == user_id:
+                    self.credential_versions[(instance.spec.id, user_id)] = None
         for lease in list(self.leases.values()):
             if (user_id is None or lease.user_id == user_id) and (
                     token_id is None or lease.token_id == token_id):
                 await self.release(lease.id)
+        for instance in owned:
+            instance.refs.clear()
+            await self._stop_instance(instance)
 
     async def reap(self):
         now = self.clock()
@@ -320,8 +354,13 @@ class Runtime:
         result = []
         for instance in self.instances.values():
             visible = [self.leases[l] for l in instance.refs if l in self.leases]
-            if user_id is not None and not any(l.user_id == user_id for l in visible):
-                continue
+            if user_id is not None:
+                shared = (instance.spec.isolation == "service"
+                          and instance.spec.credential_owner in {"", "service"})
+                owned = (instance.spec.credential_owner == user_id
+                         or (instance.spec.isolation == "user" and instance.key[-1] == user_id))
+                if not shared and not owned and not any(l.user_id == user_id for l in visible):
+                    continue
             result.append({"server_id": instance.spec.id, "generation": instance.generation,
                            "phase": instance.phase, "lease_count": len(instance.refs),
                            "in_flight": instance.in_flight, "last_error": instance.error,

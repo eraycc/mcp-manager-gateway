@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
 
 from .database import McpServer, SystemSetting, get_setting
 from .identity import current_user, revalidate_user
@@ -48,6 +48,9 @@ class OAuth:
                     if not current or current.value != stored or not server or server.revision != row.revision:
                         raise GatewayError("auth_required", "OAuth authorization changed during refresh")
                     current.value = self.catalog.seal(value)
+                    owner = user_id if auth.get("scope") == "user" else "service"
+                    self.catalog.runtime.credential_versions[(row.id, owner)] = hashlib.sha256(
+                        value["access_token"].encode()).hexdigest()[:16]
             return value
 
     async def exchange(self, auth, data):
@@ -75,7 +78,7 @@ class OAuth:
 USER = Depends(current_user)
 
 
-async def oauth_actor(request, session, server_id, *, revision=None):
+async def oauth_actor(request, session, server_id, *, revision=None, read_only=False):
     user = await revalidate_user(request, session)
     row = await session.get(McpServer, server_id, populate_existing=True)
     if not row:
@@ -88,7 +91,7 @@ async def oauth_actor(request, session, server_id, *, revision=None):
     auth = request.app.state.catalog.unseal(row.config).get("auth", {})
     if auth.get("type") != "oauth":
         raise HTTPException(422, "MCP does not use OAuth")
-    if auth.get("scope", "service") != "user" and user.role != "admin":
+    if not read_only and auth.get("scope", "service") != "user" and user.role != "admin":
         raise HTTPException(403, "Service OAuth requires administrator")
     return user, row, auth
 
@@ -107,6 +110,18 @@ async def store_credentials(session, key, value):
         item.value = value
     else:
         session.add(SystemSetting(key=key, value=value))
+
+
+@router.get("/mcps/{server_id}/oauth/status")
+async def status(server_id: str, request: Request, user=USER):
+    app = request.app.state
+    async with app.db.locked() as s:
+        user, row, auth = await oauth_actor(request, s, server_id, read_only=True)
+        item = await s.get(SystemSetting, app.oauth.key(row, user.id))
+        value = app.catalog.unseal(item.value) if item and item.value else {}
+        authorized = bool(value.get("access_token") and (
+            value.get("refresh_token") or value.get("expires_at", float("inf")) > time.time()))
+        return {"authorized": authorized, "scope": auth.get("scope", "service")}
 
 
 @router.post("/mcps/{server_id}/oauth/start")
@@ -154,10 +169,16 @@ async def callback(request: Request, state: str, code: str = "", error: str = ""
         if pending["expires"] < time.time() or pending["session_id"] != request.state.session_id:
             raise HTTPException(403, "OAuth state is invalid or expired")
         await store_credentials(s, app.oauth.key(row, user.id), app.catalog.seal(value))
-    await app.catalog.refresh(row.id, user.id,
-                              authorize=oauth_authorizer(request, row.id, pending["revision"]))
-    return HTMLResponse('<!doctype html><meta charset="utf-8"><title>OAuth</title>'
-                        '<p>授权成功，工具缓存已刷新。可以关闭此窗口并返回管理台。</p>')
+        owner = user.id if auth.get("scope") == "user" else "service"
+        app.runtime.credential_versions[(row.id, owner)] = hashlib.sha256(
+            value["access_token"].encode()).hexdigest()[:16]
+    try:
+        await app.catalog.refresh(row.id, user.id,
+                                  authorize=oauth_authorizer(request, row.id, pending["revision"]))
+    except GatewayError:
+        # Authorization succeeded; the service list shows the discovery failure.
+        pass
+    return RedirectResponse(app.config.public_url.rstrip("/") + "/#/mcps", status_code=303)
 
 
 @router.post("/mcps/{server_id}/oauth/disconnect")
@@ -169,4 +190,6 @@ async def disconnect(server_id: str, request: Request, user=USER):
         owner = user.id if auth.get("scope") == "user" else "service"
         app.runtime.credential_versions[(row.id, owner)] = None
     await app.runtime.invalidate_credential(server_id, owner)
+    app.catalog.cache_failure(row, GatewayError("auth_required",
+        "请在 MCP 服务更多或个人资料内点击 OAuth 授权完成 MCP 认证"), user.id)
     return {"ok": True}

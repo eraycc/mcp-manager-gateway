@@ -1,15 +1,21 @@
 """Authenticated MCP wire endpoint and lease extension shared by the stdio bridge."""
+import hashlib
 import json
+import secrets
+import time
 from urllib.parse import urlsplit
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.transport_security import TransportSecuritySettings
+from sqlalchemy import select
 from starlette.responses import JSONResponse
 
 from .catalog import alias
-from .identity import authenticate_token
+from .database import ApiToken, User
+from .identity import authenticate_token, expired
 from .runtime import GatewayError
 
 router = APIRouter(prefix="/gateway/v1")
@@ -24,21 +30,33 @@ DISCOVERY = [
 ]
 
 
-def owner(user, token):
-    return user.id if user else "anonymous", token.id if token else ""
+def owner(user, token, request=None):
+    if user:
+        return user.id, token.id if token else ""
+    client = request.headers.get("X-MCP-Manager-Client", "") if request else ""
+    if client:
+        return "anonymous", hashlib.sha256(client.encode()).hexdigest()
+    session = request.headers.get("Mcp-Session-Id", "") if request else ""
+    return "anonymous", "session:" + session if session else secrets.token_urlsafe(24)
 
 
 @router.post("/leases")
 async def create_lease(request: Request):
     user, token, _ = await authenticate_token(request)
-    lease = request.app.state.runtime.create_lease(*owner(user, token), ttl=90, kind="bridge")
-    return {"id": lease.id, "heartbeat_seconds": 30, "expires_in": 90}
+    client_secret = secrets.token_urlsafe(32) if user is None else None
+    identity = owner(user, token, request) if user else (
+        "anonymous", hashlib.sha256(client_secret.encode()).hexdigest())
+    lease = request.app.state.runtime.create_lease(*identity, ttl=90, kind="bridge")
+    result = {"id": lease.id, "heartbeat_seconds": 30, "expires_in": 90}
+    if client_secret:
+        result["client_secret"] = client_secret
+    return result
 
 
 @router.post("/leases/{lease_id}/heartbeat")
 async def heartbeat(lease_id: str, request: Request):
     user, token, _ = await authenticate_token(request)
-    request.app.state.runtime.heartbeat(lease_id, *owner(user, token))
+    request.app.state.runtime.heartbeat(lease_id, *owner(user, token, request))
     return {"ok": True}
 
 
@@ -46,8 +64,16 @@ async def heartbeat(lease_id: str, request: Request):
 async def release(lease_id: str, request: Request):
     user, token, _ = await authenticate_token(request)
     runtime = request.app.state.runtime
-    runtime.check_lease(lease_id, *owner(user, token))
+    lease = runtime.leases.get(lease_id)
+    if lease and (lease.user_id, lease.token_id) != owner(user, token, request):
+        raise HTTPException(403, "Lease belongs to a different caller")
     await runtime.release(lease_id)
+    gateway = request.app.state.gateway
+    for sid, bound in list(gateway.sessions.items()):
+        if bound.get("explicit_lease") == lease_id:
+            if bound["owner"] != owner(user, token, request):
+                raise HTTPException(403, "Lease belongs to a different caller")
+            await gateway.close_session(sid)
     return {"ok": True}
 
 
@@ -57,13 +83,74 @@ class Gateway:
         self.sessions = {}
         self.retention = {}
 
+    async def close_session(self, sid):
+        bound = self.sessions.pop(sid, None)
+        if bound:
+            await self.app.state.runtime.release(bound["lease"])
+        protocol = getattr(self.app.state, "protocol", None)
+        if protocol:
+            # Use the SDK public ASGI interface so its transport/task maps are
+            # cleaned too; this is an internal revocation, not an authenticated call.
+            transport = httpx.ASGITransport(app=protocol.session_manager.handle_request)
+            async with httpx.AsyncClient(transport=transport, base_url=self.app.state.config.public_url) as client:
+                response = await client.delete("/mcp", headers={"Mcp-Session-Id": sid})
+                if response.status_code not in {200, 204, 404}:
+                    response.raise_for_status()
+
+    async def revoke(self, *, token_id):
+        for sid, bound in list(self.sessions.items()):
+            if bound["owner"][1] == token_id:
+                await self.close_session(sid)
+        for key, lease_id in list(self.retention.items()):
+            if key[1] == token_id:
+                self.retention.pop(key, None)
+                await self.app.state.runtime.release(lease_id)
+
+    async def reap(self):
+        runtime = self.app.state.runtime
+        idle = runtime.idle_seconds
+        sessions = list(self.sessions.items())
+        retention = list(self.retention.items())
+        identities = {bound["owner"] for _, bound in sessions} | {identity for identity, _ in retention}
+        token_ids = {identity[1] for identity in identities if identity[0] != "anonymous"}
+        valid = set()
+        if token_ids:
+            async with self.app.state.db.session() as session:
+                rows = await session.execute(select(ApiToken, User).join(User, User.id == ApiToken.user_id)
+                                             .where(ApiToken.id.in_(token_ids)))
+                valid = {(user.id, token.id) for token, user in rows
+                         if not user.disabled and not token.disabled and not expired(token.expires_at)}
+        # Validate only the snapshot included in the query. A connection can
+        # arrive while the database yields and must be checked on the next pass.
+        for sid, bound in sessions:
+            if (self.sessions.get(sid) is bound and bound["owner"][0] != "anonymous"
+                    and bound["owner"] not in valid):
+                await self.close_session(sid)
+        for identity, lease_id in retention:
+            if (self.retention.get(identity) == lease_id and identity[0] != "anonymous"
+                    and identity not in valid):
+                self.retention.pop(identity, None)
+                await runtime.release(lease_id)
+        active = {lease_id for instance in runtime.instances.values() if instance.in_flight
+                  for lease_id in instance.refs}
+        for sid, bound in list(self.sessions.items()):
+            if (idle > 0 and bound["lease"] not in active and bound.get("explicit_lease") not in active
+                    and time.monotonic() - bound.get("touched", 0) >= idle):
+                await self.close_session(sid)
+        for key, lease_id in list(self.retention.items()):
+            lease = runtime.leases.get(lease_id)
+            if lease and idle > 0 and lease_id not in active and runtime.clock() - lease.touched >= idle:
+                await runtime.release(lease_id)
+            if lease_id not in runtime.leases:
+                self.retention.pop(key, None)
+
     async def principal(self, request):
         return await authenticate_token(request)
 
     async def directory(self, request):
         user, token, allowed = await self.principal(request)
         cat = self.app.state.catalog
-        rows = [r for r in await cat.rows() if r.id in allowed]
+        rows = await cat.rows(ids=allowed)
         entries = []
         for row in rows:
             for tool in cat.cached(row, user.id if user else None)["tools"]:
@@ -72,7 +159,7 @@ class Gateway:
 
     def lease(self, request, user, token):
         runtime = self.app.state.runtime
-        identity = owner(user, token)
+        identity = owner(user, token, request)
         explicit = request.headers.get("X-MCP-Manager-Lease")
         if explicit:
             return runtime.check_lease(explicit, *identity)
@@ -83,6 +170,7 @@ class Gateway:
                 raise HTTPException(403, "MCP session belongs to another principal")
             lease = runtime.leases.get(bound["lease"])
             if lease:
+                lease.touched = runtime.clock()
                 return lease
             lease = runtime.create_lease(*identity, kind="retention")
             bound["lease"] = lease.id
@@ -92,6 +180,7 @@ class Gateway:
         if not lease:
             lease = runtime.create_lease(*identity, kind="retention")
             self.retention[key] = lease.id
+        lease.touched = runtime.clock()
         return lease
 
     async def list_tools(self, ctx, params):
@@ -212,7 +301,7 @@ class MCPAuthMiddleware:
         request = Request(scope, receive)
         try:
             user, token, _ = await authenticate_token(request)
-            identity = owner(user, token)
+            identity = owner(user, token, request)
             explicit = request.headers.get("X-MCP-Manager-Lease")
             if explicit:
                 self.root_app.state.runtime.check_lease(explicit, *identity)
@@ -223,6 +312,7 @@ class MCPAuthMiddleware:
                     raise HTTPException(404, "Unknown MCP session; initialize again")
                 if bound["owner"] != identity:
                     raise HTTPException(403, "MCP session belongs to another principal")
+                bound["touched"] = time.monotonic()
         except (HTTPException, GatewayError) as exc:
             response = JSONResponse({"error": {"code": -32001, "message": str(getattr(exc, "detail", exc))}},
                                     status_code=getattr(exc, "status_code", 403))
@@ -234,7 +324,13 @@ class MCPAuthMiddleware:
                 sid = headers.get(b"mcp-session-id")
                 if sid and sid.decode() not in self.gateway.sessions:
                     lease = self.root_app.state.runtime.create_lease(*identity, kind="retention")
-                    self.gateway.sessions[sid.decode()] = {"owner": identity, "lease": lease.id}
+                    session_owner = identity
+                    if user is None and not request.headers.get("X-MCP-Manager-Client"):
+                        session_owner = ("anonymous", "session:" + sid.decode())
+                        lease.user_id, lease.token_id = session_owner
+                    self.gateway.sessions[sid.decode()] = {
+                        "owner": session_owner, "lease": lease.id, "explicit_lease": explicit,
+                        "touched": time.monotonic()}
                 if request.method == "DELETE" and session and message["status"] < 300:
                     bound = self.gateway.sessions.pop(session, None)
                     if bound:

@@ -28,6 +28,8 @@ async def maintenance(app):
     while True:
         try:
             await state.runtime.reap()
+            if hasattr(state, "gateway"):
+                await state.gateway.reap()
             # Revocation also releases existing downstream leases promptly.
             async with state.db.session() as s:
                 for lease in list(state.runtime.leases.values()):
@@ -42,6 +44,26 @@ async def maintenance(app):
                         else:
                             allowed = await identity.effective_mcp_ids(state.db, user, token)
                             await state.runtime.restrict_lease(lease.id, allowed)
+                # Eager personal instances can have no leases after warm-up.
+                for instance in list(state.runtime.instances.values()):
+                    owner = (instance.spec.credential_owner if instance.spec.credential_owner not in {"", "service"}
+                             else instance.key[-1] if instance.spec.isolation == "user" else None)
+                    if owner:
+                        user = await s.get(User, owner)
+                        if (not user or user.disabled or (user.role != "admin" and user.scope_mode != "all"
+                                                         and instance.spec.id not in user.mcp_ids)):
+                            instance.refs.clear()
+                            await state.runtime._stop_instance(instance)
+                            if instance.spec.credential_owner:
+                                state.runtime.credential_versions[(instance.spec.id, owner)] = None
+            anonymous_allowed = set()
+            if not await get_setting(state.db, "token_auth_enabled", True):
+                anonymous_allowed = {row.id for row in await state.catalog.rows() if row.mode != "disabled"}
+                if await get_setting(state.db, "anonymous_scope_mode", "selected") != "all":
+                    anonymous_allowed &= set(await get_setting(state.db, "anonymous_mcp_ids", []))
+            for lease in list(state.runtime.leases.values()):
+                if lease.user_id == "anonymous":
+                    await state.runtime.restrict_lease(lease.id, anonymous_allowed)
             if await get_setting(state.db, "refresh_enabled", False):
                 trigger = CronTrigger.from_crontab(await get_setting(state.db, "refresh_cron", "0 3 * * *"),
                                                    timezone=await get_setting(state.db, "timezone", "Asia/Shanghai"))
@@ -55,11 +77,20 @@ async def maintenance(app):
             else:
                 state.refresh_next = None
             if asyncio.get_running_loop().time() >= state.retention_next:
-                days = await get_setting(state.db, "log_retention_days", 0)
-                if days:
-                    from datetime import timedelta
-                    await state.logs.delete(to_time=(now() - timedelta(days=days)).isoformat())
+                # Reserve before yielding so a concurrent settings update can
+                # request another pass without its reset being overwritten.
                 state.retention_next = asyncio.get_running_loop().time() + 3600
+                try:
+                    days = await get_setting(state.db, "log_retention_days", 0)
+                    if days:
+                        from datetime import timedelta
+                        # Log filters are inclusive and timestamps use microseconds.
+                        # Keep records exactly at the retention boundary.
+                        cutoff = now() - timedelta(days=days, microseconds=1)
+                        await state.logs.delete(to_time=cutoff.isoformat())
+                except Exception:
+                    state.retention_next = 0
+                    raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -86,18 +117,26 @@ def create_app(config=None):
         state.catalog = Catalog(state.db, state.runtime, state.logs, config)
         state.oauth = OAuth(state.catalog)
         state.catalog.oauth = state.oauth
+        state.runtime.on_connect = state.catalog.connection_ready
         state.refresh_next = None
         state.retention_next = 0
         task = None
         try:
             await state.db.initialize()
+            state.cors_origins = await get_setting(state.db, "cors_origins", ["*"])
+            from zoneinfo import ZoneInfo
+            state.logs.timezone = ZoneInfo(await get_setting(state.db, "timezone", "Asia/Shanghai"))
             state.runtime.idle_seconds = await get_setting(state.db, "idle_seconds", 86400)
             async with contextlib.AsyncExitStack() as stack:
                 if hasattr(state, "protocol"):
                     await stack.enter_async_context(state.protocol.session_manager.run())
-                for row in await state.catalog.rows():
-                    if row.mode == "eager" and row.isolation == "service":
-                        state.jobs.submit("mcp.startup", [row.id], state.catalog.warm)
+                eager = {row.id for row in await state.catalog.rows()
+                         if row.mode == "eager" and row.isolation != "session"
+                         and (row.isolation == "service" or
+                              state.catalog.unseal(row.config).get("auth", {}).get("scope") == "user")}
+                targets = [target for target in await state.catalog.refresh_targets() if target["server_id"] in eager]
+                if targets:
+                    state.jobs.submit("mcp.startup", targets, state.catalog.warm_target)
                 task = asyncio.create_task(maintenance(app))
                 state.ready = True
                 yield
@@ -149,6 +188,8 @@ def create_app(config=None):
     except ModuleNotFoundError as exc:
         if exc.name != "mcp_manager.gateway":
             raise
+    from .cors import GatewayCORSMiddleware
+    app.add_middleware(GatewayCORSMiddleware, root_app=app)
     frontend = PACKAGE_ROOT / "static"
     if frontend.exists():
         app.mount("/", StaticFiles(directory=frontend, html=True), name="console")

@@ -67,8 +67,11 @@ def substitute(value, args, *, url=False):
     exact = re.fullmatch(r"\{([A-Za-z0-9_.-]+)\}", value)
     def lookup(key):
         current = args
-        for piece in key.split("."):
-            current = current[piece]
+        try:
+            for piece in key.split("."):
+                current = current[int(piece)] if isinstance(current, list) else current[piece]
+        except (KeyError, TypeError, IndexError, ValueError) as exc:
+            raise ValueError("Missing or invalid REST argument path: " + key) from exc
         return current
     if exact and not url:
         return copy.deepcopy(lookup(exact[1]))
@@ -111,6 +114,23 @@ def validate_config(transport, config):
             raise ValueError(key + " must be a string-to-string object")
     if config.get("auth", {}).get("type", "none") not in {"none", "bearer", "basic", "api_key", "oauth"}:
         raise ValueError("Unsupported authentication type")
+    auth = config.get("auth", {})
+    if auth.get("type") == "oauth":
+        for field in ("authorization_url", "token_url"):
+            try:
+                check_url(auth.get(field, ""))
+            except ValueError as exc:
+                raise ValueError("OAuth " + field + ": " + str(exc)) from exc
+        if auth.get("scope", "service") not in {"user", "service"}:
+            raise ValueError("OAuth scope must be user or service")
+    auth_header = (auth.get("header", "X-API-Key") if auth.get("type") == "api_key" else
+                   "Authorization" if auth.get("type") in {"oauth", "basic", "bearer"} else None)
+    if auth_header:
+        if not isinstance(auth_header, str) or not re.fullmatch(r"[!#$%&'*+.^_\x60|~0-9A-Za-z-]+", auth_header):
+            raise ValueError("Authentication header name is invalid")
+        if any(key.lower() == auth_header.lower() for key in
+               list(config.get("headers", {})) + list(config.get("env_headers", {}))):
+            raise ValueError("Authentication header conflicts with custom headers; configure it in one place")
     if transport in PLUGINS:
         PLUGINS[transport].validate(config)
         return

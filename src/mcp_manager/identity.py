@@ -4,6 +4,7 @@ import math
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Literal
+from urllib.parse import urlsplit
 
 import jwt
 from argon2 import PasswordHasher
@@ -34,7 +35,25 @@ def public(obj):
 
 def origin_check(request):
     origin = request.headers.get("origin")
-    if origin and origin.rstrip("/") != request.app.state.config.public_url.rstrip("/"):
+    if not origin:
+        return
+
+    def origin_key(value):
+        try:
+            parsed = urlsplit(value)
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username or parsed.password or parsed.path not in {"", "/"}
+                    or parsed.query or parsed.fragment):
+                return None
+            return parsed.scheme, parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == "https" else 80)
+        except ValueError:
+            return None
+
+    # The console can be reached through localhost, LAN IPs or deployment domains.
+    # PUBLIC_URL remains an optional external origin for reverse-proxy deployments.
+    actual = str(request.url.replace(path="", query="", fragment=""))
+    allowed = {origin_key(actual), origin_key(request.app.state.config.public_url)} - {None}
+    if origin_key(origin) not in allowed:
         raise HTTPException(403, "Origin is not allowed")
 
 
@@ -82,15 +101,15 @@ async def admin_user(request: Request) -> User:
 
 
 async def effective_mcp_ids(db: Database, user: User, token: ApiToken | None = None) -> set[str]:
-    async with db.session() as s:
-        ids = set((await s.scalars(select(McpServer.id).where(McpServer.mode != "disabled"))).all())
     if user.disabled:
         return set()
+    statement = select(McpServer.id).where(McpServer.mode != "disabled")
     if user.role != "admin" and user.scope_mode != "all":
-        ids &= set(user.mcp_ids)
+        statement = statement.where(McpServer.id.in_(user.mcp_ids))
     if token and token.scope_mode != "all":
-        ids &= set(token.mcp_ids)
-    return ids
+        statement = statement.where(McpServer.id.in_(token.mcp_ids))
+    async with db.session() as s:
+        return set((await s.scalars(statement)).all())
 
 
 async def authenticate_token(request: Request):
@@ -249,7 +268,11 @@ async def login(data: Login, request: Request, response: Response):
         if not user or user.disabled or not verify_password(data.password, user.password_hash):
             raise HTTPException(401, "Invalid username or password")
         expiry = now() + timedelta(days=float(days)) if days else None
-        session = AuthSession(id=uid(), user_id=user.id, auth_version=user.auth_version, expires_at=expiry)
+        session = AuthSession(
+            id=uid(), user_id=user.id, auth_version=user.auth_version, expires_at=expiry,
+            ip_address=request.client.host[:64] if request.client else None,
+            user_agent=(request.headers.get("user-agent") or "")[:1024] or None,
+        )
         s.add(session)
         payload = {"sub": user.id, "jti": session.id, "iss": ISSUER, "aud": AUDIENCE, "iat": now()}
         if expiry:
@@ -307,7 +330,9 @@ async def update_me(data: ProfilePatch, request: Request, user=CURRENT_USER):
 async def sessions(request: Request, user=CURRENT_USER):
     async with request.app.state.db.session() as s:
         rows = (await s.scalars(select(AuthSession).where(AuthSession.user_id == user.id))).all()
-        return [dict(public(row), current=row.id == request.state.session_id) for row in rows]
+        return [dict(public(row), current=row.id == request.state.session_id,
+                     active=not row.revoked and not expired(row.expires_at)
+                     and row.auth_version == user.auth_version) for row in rows]
 
 
 @router.delete("/me/sessions/{session_id}")
@@ -318,6 +343,19 @@ async def revoke_session(session_id: str, request: Request, user=CURRENT_USER):
         if not item or item.user_id != user.id:
             raise HTTPException(404, "Session not found")
         item.revoked = True
+    return {"ok": True}
+
+
+@router.delete("/me/sessions/{session_id}/permanent")
+async def delete_session(session_id: str, request: Request, user=CURRENT_USER):
+    async with request.app.state.db.locked() as s:
+        user = await revalidate_user(request, s)
+        item = await s.get(AuthSession, session_id)
+        if not item or item.user_id != user.id:
+            raise HTTPException(404, "Session not found")
+        if item.id == request.state.session_id:
+            raise HTTPException(409, "Cannot delete the current session")
+        await s.delete(item)
     return {"ok": True}
 
 
@@ -465,6 +503,14 @@ async def create_token(data: TokenCreate, request: Request, user=CURRENT_USER):
         return dict(public(token), token=secret)
 
 
+async def revoke_token_leases(request, token_id):
+    state = request.app.state
+    if hasattr(state, "runtime"):
+        await state.runtime.revoke(token_id=token_id)
+    if hasattr(state, "gateway"):
+        await state.gateway.revoke(token_id=token_id)
+
+
 @router.patch("/tokens/{token_id}")
 async def patch_token(token_id: str, data: TokenPatch, request: Request, user=CURRENT_USER):
     db = request.app.state.db
@@ -481,7 +527,11 @@ async def patch_token(token_id: str, data: TokenPatch, request: Request, user=CU
         if scope_changed:
             await scope_check(db, owner, token.scope_mode, token.mcp_ids)
         await s.flush()
-        return public(token)
+        result = public(token)
+        revoke = token.disabled or expired(token.expires_at) or scope_changed
+    if revoke:
+        await revoke_token_leases(request, token_id)
+    return result
 
 
 @router.delete("/tokens/{token_id}")
@@ -490,6 +540,7 @@ async def delete_token(token_id: str, request: Request, user=CURRENT_USER):
         user = await revalidate_user(request, s)
         token = await owned_token(s, token_id, user)
         await s.delete(token)
+    await revoke_token_leases(request, token_id)
     return {"ok": True}
 
 
@@ -499,4 +550,6 @@ async def rotate_token(token_id: str, request: Request, user=CURRENT_USER):
         user = await revalidate_user(request, s)
         token = await owned_token(s, token_id, user)
         secret, token.token_hash, token.prefix = mint_token()
-        return dict(public(token), token=secret)
+        result = dict(public(token), token=secret)
+    await revoke_token_leases(request, token_id)
+    return result

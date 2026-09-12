@@ -34,7 +34,8 @@ async def test_personal_oauth_pkce_refresh_and_disconnect_race(tmp_path, monkeyp
                 return {"access_token": "access-user-1", "refresh_token": "refresh-1", "expires_at": time.time() + 3600}
             monkeypatch.setattr(app.state.oauth, "exchange", exchange)
             callback = await web.get("/api/v1/oauth/callback", params={"state": params["state"][0], "code": "code"})
-            assert callback.status_code == 200, callback.text
+            assert callback.status_code == 303, callback.text
+            assert callback.headers["location"].endswith("/#/mcps")
             assert (await app.state.oauth.credentials(row, user["id"]))["access_token"] == "access-user-1"
             with pytest.raises(GatewayError):
                 await app.state.oauth.credentials(row, "another-user")

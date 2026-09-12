@@ -19,7 +19,7 @@ ADMIN = Depends(admin_user)
 DEFAULTS = {"title": "MCP Manager", "registration_enabled": True, "jwt_days": 30,
             "token_auth_enabled": True, "anonymous_scope_mode": "selected", "anonymous_mcp_ids": [],
             "idle_seconds": 86400, "refresh_enabled": False, "refresh_cron": "0 3 * * *",
-            "timezone": "Asia/Shanghai", "log_retention_days": 0}
+            "timezone": "Asia/Shanghai", "log_retention_days": 0, "cors_origins": ["*"]}
 FILTERS = {"q", "user_id", "token_id", "mcp_id", "tool_name", "status", "source", "from_time", "to_time"}
 
 
@@ -37,7 +37,8 @@ async def dashboard(request: Request, user=USER):
     stats = await state.logs.stats(**scope)
     allowed = None if user.role == "admin" else await effective_mcp_ids(state.db, user)
     rows = [r for r in await state.catalog.rows() if allowed is None or r.id in allowed]
-    runtime = state.runtime.status(**scope)
+    visible_ids = {r.id for r in rows}
+    runtime = [r for r in state.runtime.status(**scope) if r["server_id"] in visible_ids]
     running = {r["server_id"] for r in runtime if r["phase"] == "ready"}
     async with state.db.session() as s:
         query = select(func.count()).select_from(ApiToken)
@@ -72,22 +73,27 @@ async def logs(request: Request, page: int = 1, page_size: int = 20, user=USER):
 async def export_logs(request: Request, user=USER):
     filters = log_filters(request, user)
     store = request.app.state.logs
+    # Freeze the upper time boundary; keyset pagination remains stable as older
+    # records are deleted or newer calls arrive during export.
+    from .database import now
+    filters.setdefault("to_time", now().isoformat())
     async def stream():
-        yield "["
-        first = True
-        page = 1
-        while True:
-            result = await store.query(page=page, page_size=200, **filters)
-            for item in result["items"]:
-                detail = await store.detail(item["id"], user_id=None if user.role == "admin" else user.id)
-                if not first:
-                    yield ","
-                first = False
-                yield json.dumps(detail, ensure_ascii=False)
-            if page >= result["total_pages"]:
-                break
-            page += 1
-        yield "]"
+        async with store.export_capacity:
+            yield "["
+            first, cursor = True, None
+            while not await request.is_disconnected():
+                await current_user(request)
+                items, cursor = await store.export_batch(filters, cursor=cursor)
+                for detail in items:
+                    if await request.is_disconnected():
+                        return
+                    if not first:
+                        yield ","
+                    first = False
+                    yield json.dumps(detail, ensure_ascii=False)
+                if not items:
+                    break
+            yield "]"
     return StreamingResponse(stream(), media_type="application/json",
                              headers={"Content-Disposition": 'attachment; filename="mcp-logs.json"'})
 
@@ -124,6 +130,12 @@ async def log_detail(log_id: str, request: Request, user=USER):
     return result
 
 
+@router.get("/about")
+async def about(user=USER):
+    from .about import PROJECT
+    return PROJECT
+
+
 @router.get("/settings")
 async def settings(request: Request, user=ADMIN):
     async with request.app.state.db.session() as s:
@@ -146,6 +158,8 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
         raise HTTPException(422, "Title must contain 1–128 characters")
     if result["anonymous_scope_mode"] not in ("selected", "all") or not isinstance(result["anonymous_mcp_ids"], list):
         raise HTTPException(422, "Invalid anonymous scope")
+    from .cors import validate_origins
+    validate_origins(result["cors_origins"])
     ZoneInfo(result["timezone"])
     CronTrigger.from_crontab(result["refresh_cron"], timezone=result["timezone"])
     async with request.app.state.db.locked() as s:
@@ -157,9 +171,12 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
             else:
                 s.add(SystemSetting(key=key, value=value))
     result = await settings(request, user)
+    request.app.state.cors_origins = result["cors_origins"]
     request.app.state.runtime.idle_seconds = result["idle_seconds"]
     request.app.state.logs.timezone = ZoneInfo(result["timezone"])
     request.app.state.refresh_next = None
+    if "log_retention_days" in data:
+        request.app.state.retention_next = 0
     await request.app.state.logs.audit("settings.update", user.id, data)
     return result
 

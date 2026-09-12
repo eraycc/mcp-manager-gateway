@@ -7,11 +7,11 @@ Python MCP 管理与代理网关，提供独立 Web 管理台、Token 授权、�
 需要 [uv](https://docs.astral.sh/uv/)。从本地构建好的 wheel 安装（Windows / Linux）：
 
 ```console
-uv tool install ./dist/mcp_manager_gateway-0.1.0-py3-none-any.whl
+uv tool install ./dist/mcp_manager_gateway-0.1.1-py3-none-any.whl
 mcp-manager
 ```
 
-`mcp-manager` 默认启动 Web 服务，也可执行 `mcp-manager serve`。无需进入源码目录。包发布到 PyPI 后，可使用 `uv tool install mcp-manager-gateway`；本仓库的构建操作不会自动发布到 PyPI。
+安装后提供三个等价命令：`mmg`、`mcp-manager`、`mcp-manager-gateway`，均支持本文的全部子命令和参数。`mcp-manager` 默认启动 Web 服务，也可执行 `mcp-manager serve`。使用 `-h` / `--help` 查看帮助，`-v` / `--version` 查看安装版本。无需进入源码目录。包发布到 PyPI 后，可使用 `uv tool install mcp-manager-gateway`；本仓库的构建操作不会自动发布到 PyPI。
 
 打开 http://127.0.0.1:8765 。首次注册账户为管理员，密码至少 10 个字符。
 
@@ -22,18 +22,18 @@ mcp-manager
 
 环境变量优先于用户目录内的 .env；源码目录和当前工作目录的 .env 不会被自动读取。可设置 `MCP_MANAGER_HOME`，或执行 `mcp-manager --home /自定义目录 serve` 指定另一份配置与数据。
 
-修改用户目录下的 .env 后重启服务，例如端口改为 8766 时，PORT 与 PUBLIC_URL 应一起调整。也可执行：
+修改用户目录下的 .env 后重启服务。更换端口可修改 PORT；使用 OAuth 时还需同步 PUBLIC_URL 中的回调地址。也可执行：
 
 ```console
 mcp-manager serve --port 8766
 ```
 
-PUBLIC_URL 用于 Origin 检查与 OAuth 回调。远程访问设置 HOST=0.0.0.0，HTTPS 反向代理场景设置 PUBLIC_URL=https://你的域名、COOKIE_SECURE=true。配置示例见 [.env.example](.env.example)。
+控制台按浏览器实际访问地址识别同源请求，可使用 localhost、内网 IP 或域名登录，无需把每个地址加入白名单。PUBLIC_URL 用于 OAuth 回调，也作为反向代理场景的额外可信来源。远程访问设置 HOST=0.0.0.0，例如通过 http://192.168.2.111:8765 打开控制台。HTTPS 反向代理场景设置 PUBLIC_URL=https://你的域名、COOKIE_SECURE=true。配置示例见 [.env.example](.env.example)。
 
 ## 使用顺序
 
 1. 管理员添加 MCP。支持 stdio、Streamable HTTP、旧 SSE、REST 转 MCP；http 是 Streamable HTTP 的导入别名。
-2. 对 stdio/远程 MCP 执行“诊断连接”或添加后“刷新工具缓存”，读取其真实工具定义。REST 定义可以直接形成缓存。
+2. 添加或修改启用中的 MCP 后自动发现工具；连接启动时再次更新缓存。lazy 的维护发现完成后释放实例。OAuth 未授权会显示待授权状态，完成授权后自动刷新；也可手动诊断或刷新。REST 定义可以直接形成缓存。
 3. 给普通用户分配可用 MCP；用户只能在自己的授权范围创建 Token。
 4. 在 Token 页面创建凭据，保存只显示一次的完整 Token，然后配置客户端。
 5. 实际调用才启动按需服务。查询工具目录不会启动下游进程。
@@ -54,9 +54,21 @@ Authorization: Bearer mcpm_你的Token
 
 关闭 Token 鉴权只影响 MCP 调用，Web 管理仍需登录。匿名范围由管理员单独设置，默认不公开任何服务。请求提供了无效 Token 时，不会退回匿名权限。
 
+系统设置中的跨域来源默认 `*`，作用于 `/mcp` 与 `/gateway/v1`，支持浏览器 Bearer 请求和预检；可改为指定来源列表，保存后立即生效。管理 API 的 Cookie、CSRF 与同源检查保持独立。
+
+匿名客户端如果显式创建 `/gateway/v1/leases` 租约，需要保存响应中的 `client_secret`，并在后续调用、心跳、释放时携带 `X-MCP-Manager-Client`。stdio 桥接会自动处理。
+
 ## 本地 stdio 接入
 
 网关服务必须已经运行。桥接进程只连接网关，全部下游 MCP 仍由同一个网关运行时管理。
+
+以下三个命令完全等价，客户端 JSON 的 `command` 也可任选其中一个：
+
+```console
+mmg stdio --url http://127.0.0.1:8765
+mcp-manager stdio --url http://127.0.0.1:8765
+mcp-manager-gateway stdio --url http://127.0.0.1:8765
+```
 
 Windows PowerShell：
 
@@ -90,13 +102,13 @@ MCP_MANAGER_TOKEN=mcpm_你的Token mcp-manager stdio --url http://127.0.0.1:8765
 ## 生命周期
 
 - lazy：首次工具调用启动；同一共享范围的并发调用只创建一个实例。
-- eager：服务共享实例在启动时预热；用户/会话隔离实例需要对应身份首次接入后建立。
+- eager：服务共享实例在启动时预热；已有授权的个人 OAuth 按用户预热。其他用户/会话隔离实例需要对应身份首次接入后建立。会话隔离实例在最后引用释放后关闭。
 - disabled：不进入可用工具目录，也不接受业务调用。
 - 手动停止会设置临时停止状态，直到显式启动或保存新的启用策略。
 - 公共服务共享实例；个人 OAuth 按用户隔离；其他有状态服务可选服务、用户、会话隔离。
-- stdio 桥接有独立租约，每 30 秒心跳、90 秒失联到期，正常退出主动释放。
+- stdio 桥接有独立租约，每 30 秒心跳、90 秒失联到期，正常退出主动释放。心跳异常或连接失效后，在下一次新请求前重建连接，已经派发的业务调用不会重放。
 - 支持 MCP 会话的 HTTP 客户端可用 DELETE 释放；未报告退出的通用 HTTP 客户端采用保留租约。
-- 只有所有引用释放后，按需实例才停止。默认 24 小时没有业务调用也会回收；心跳和目录刷新不算业务调用。活动调用不会被空闲回收杀死。
+- 只有所有引用释放后，按需实例才停止。默认 24 小时没有业务调用也会回收；心跳和目录刷新不算业务调用。活动调用不会被空闲回收杀死。系统设置中的空闲回收时间设为 `0` 时，关闭业务空闲超时回收；主动断开和桥接失联租约仍正常释放。
 - 单实例并发、排队、启动、调用与停止超时可配置；停止和配置换代会阻止继续派发排队请求。
 - 发送后失去结果标记为 outcome_unknown，不自动重放调用。
 
@@ -104,7 +116,7 @@ Windows 使用 MCP SDK 的 Job Object 清理子进程树；Linux 使用独立进
 
 ## OAuth
 
-在 MCP 认证配置中选择 oauth，填写 authorization_url、token_url、client_id、client_secret（可选）、scopes 和 scope（user/service）。支持授权码、PKCE、一次性 state、Token 刷新及 client_secret_post/client_secret_basic。
+在 MCP 认证配置中选择 oauth，填写 authorization_url、token_url、client_id、client_secret（可选）、scopes 和 scope（user/service）。其中 `scopes` 是 OAuth 权限列表（例如 `mcp:read`），`scope` 仅决定网关凭据归属（`user` / `service`），两者互不覆盖。支持授权码、PKCE、一次性 state、Token 刷新及 client_secret_post/client_secret_basic。
 
 回调地址为 PUBLIC_URL/api/v1/oauth/callback。个人用户在个人中心授权自己的服务；共享服务 OAuth 由管理员授权。凭据加密保存，撤销、配置变化和刷新并发会重新验证。
 
@@ -133,6 +145,12 @@ MySQL 数据库需要提前创建；系统自动执行表结构升级。SQLite �
 | ~/.mcp-manager/logs/audit/ | 管理审计 |
 | ~/.mcp-manager/logs/deletions/ | 防止删除记录恢复的删除日志 |
 | ~/.mcp-manager/indexes/logs.sqlite | 可重建的日志查询与统计索引 |
+
+日志保留天数默认为 `0`（无限保留）。设为 `7` 时，后台自动清理超过 7 天的调用日志原文和查询索引；保存设置后在下一轮维护中检查（通常 5 秒内），之后每小时检查。审计日志独立保留。
+
+个人资料的登录会话显示登录 IP 和设备 UA，支持撤销或彻底删除其他登录会话；旧会话未采集的信息显示为未知。
+
+系统设置的关于页面提供安装版本、[项目主页](https://github.com/eraycc/mcp-manager-gateway)、[发布地址](https://github.com/eraycc/mcp-manager-gateway/release)、[Issue 反馈](https://github.com/eraycc/mcp-manager-gateway/issues)和[作者主页](https://github.com/eraycc)。
 
 备份时保留用户目录内的 .env、整个 DATA_DIR 及系统数据库；SECRET_KEY 或 secret.key 必须保留，否则原凭据无法解密。
 
@@ -165,7 +183,7 @@ Compose 使用单个网关进程，数据持久化到命名卷 mcp-manager-data�
 
 构建环境无法访问 PyPI 时，可通过 `docker build --build-arg UV_DEFAULT_INDEX=https://你的镜像/simple --target production -t mcp-manager .` 指定 Python 包索引；默认仍使用 PyPI。
 
-原生 Linux 服务示例见 deploy/mcp-manager.service。按示例安装 wheel 到服务虚拟环境，调整运行账户和 MCP_MANAGER_HOME 后使用。每个部署只运行一个网关实例，不使用多 worker 或多副本共享进程调度。
+原生 Linux 服务运行时，网关自身会管理 Windows/Linux 子进程清理（Job Object / 进程组）。每个部署只运行一个网关实例，不使用多 worker 或多副本共享进程调度。
 
 ## 开发
 

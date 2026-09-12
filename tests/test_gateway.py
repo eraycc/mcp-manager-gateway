@@ -31,7 +31,8 @@ async def running_gateway(tmp_path):
         await asyncio.sleep(.02)
     assert server.started
     try:
-        async with httpx.AsyncClient(base_url=url, trust_env=False) as web:
+        # Service creation includes discovery with a 30-second startup budget.
+        async with httpx.AsyncClient(base_url=url, trust_env=False, timeout=35) as web:
             response = await web.post("/api/v1/auth/register", json={"username": "admin", "password": "password12345"})
             assert response.status_code == 200
             await web.post("/api/v1/auth/login", json={"username": "admin", "password": "password12345"})
@@ -42,8 +43,10 @@ async def running_gateway(tmp_path):
             assert response.status_code == 200, response.text
             row = response.json()
             assert app.state.runtime.status() == []
-            response = await web.post("/api/v1/mcps/" + row["id"] + "/refresh")
-            assert response.status_code == 200, response.text
+            # Creation already discovers and caches tools, then releases lazy
+            # instances. Refresh behavior has its own catalog tests.
+            assert row["cache_status"] == "ready"
+            assert row["tool_count"] > 0
             response = await web.post("/api/v1/tokens", json={"name": "agent", "scope_mode": "all"})
             token = response.json()["token"]
             yield app, web, url, token, row

@@ -33,6 +33,7 @@ class LogStore:
         self.timezone = ZoneInfo(timezone_name)
         self.lock = threading.RLock()
         self.capacity = asyncio.Semaphore(256)
+        self.export_capacity = asyncio.Semaphore(4)
         self.active = set()
         self.deleted = set()
         tombstones = self.root / "deletions"
@@ -45,6 +46,7 @@ class LogStore:
                     continue
         self.conn = sqlite3.connect(index / "logs.sqlite", check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.create_function("local_day", 1, lambda stamp: datetime.fromisoformat(stamp).astimezone(self.timezone).date().isoformat())
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS calls (
             id TEXT PRIMARY KEY, path TEXT NOT NULL, offset INTEGER NOT NULL,
@@ -65,6 +67,7 @@ class LogStore:
         event.setdefault("id", uuid.uuid4().hex)
         event["event_id"] = uuid.uuid4().hex
         event.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+        event["timestamp"] = self.normalize_time(event["timestamp"], default_timezone=timezone.utc)
         event.setdefault("source", "gateway")
         event.setdefault("duration_ms", 0)
         stamp = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
@@ -100,7 +103,9 @@ class LogStore:
         fields = ("timestamp", "user_id", "username", "token_id", "token_name", "mcp_id",
                   "mcp_name", "tool_name", "status", "source", "duration_ms")
         self.conn.execute("INSERT OR REPLACE INTO calls VALUES(" + ",".join("?" * 15) + ")",
-                          [event["id"], path.name, offset, size] + [event.get(f) for f in fields])
+                          [event["id"], path.name, offset, size] + [
+                              self.normalize_time(event["timestamp"], default_timezone=timezone.utc)
+                              if f == "timestamp" else event.get(f) for f in fields])
 
     def _rebuild(self):
         with self.lock:
@@ -129,7 +134,16 @@ class LogStore:
         await asyncio.to_thread(self._rebuild)
 
     @staticmethod
-    def _where(filters):
+    def normalize_time(value, *, default_timezone):
+        try:
+            stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("Log time must be a valid ISO 8601 date/time") from exc
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=default_timezone)
+        return stamp.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+    def _where(self, filters):
         sql, values = [], []
         for key in ("user_id", "token_id", "mcp_id", "tool_name", "status", "source"):
             if filters.get(key) is not None and filters[key] != "":
@@ -142,7 +156,7 @@ class LogStore:
         for key, op in (("from_time", ">="), ("to_time", "<=")):
             if filters.get(key):
                 sql.append("timestamp " + op + " ?")
-                values.append(filters[key])
+                values.append(self.normalize_time(filters[key], default_timezone=self.timezone))
         return (" WHERE " + " AND ".join(sql)) if sql else "", values
 
     async def query(self, *, page=1, page_size=20, **filters):
@@ -176,6 +190,30 @@ class LogStore:
                 raise RuntimeError("Log index does not match source; rebuild required")
             event["status"] = row["status"]
             return event
+
+    async def export_batch(self, filters, *, cursor=None, limit=100):
+        return await asyncio.to_thread(self._export_batch, filters, cursor, min(200, max(1, limit)))
+
+    def _export_batch(self, filters, cursor, limit):
+        where, values = self._where(filters)
+        if cursor:
+            where += (" AND " if where else " WHERE ") + "(timestamp < ? OR (timestamp = ? AND id < ?))"
+            values += [cursor[0], cursor[0], cursor[1]]
+        with self.lock:
+            rows = self.conn.execute("SELECT * FROM calls" + where +
+                " ORDER BY timestamp DESC, id DESC LIMIT ?", values + [limit]).fetchall()
+            result = []
+            for row in rows:
+                # One indexed batch read, no additional SQL query per log detail.
+                with (self.root / row["path"]).open("rb") as source:
+                    source.seek(row["offset"])
+                    event = json.loads(source.read(row["size"]))
+                if event.get("id") != row["id"]:
+                    raise RuntimeError("Log index does not match source; rebuild required")
+                event["status"] = row["status"]
+                result.append(event)
+            next_cursor = (rows[-1]["timestamp"], rows[-1]["id"]) if rows else None
+            return result, next_cursor
 
     async def delete(self, ids=None, **filters):
         return await asyncio.to_thread(self._delete, ids, filters)
@@ -228,7 +266,7 @@ class LogStore:
             rows = self.conn.execute("SELECT status,count(*) n FROM calls" + where + " GROUP BY status", args)
             counts = {r["status"]: r["n"] for r in rows}
             daily = [dict(r) for r in self.conn.execute(
-                "SELECT substr(timestamp,1,10) day,count(*) calls,"
+                "SELECT local_day(timestamp) day,count(*) calls,"
                 "sum(CASE WHEN status='success' THEN 1 ELSE 0 END) success "
                 "FROM calls" + where + " GROUP BY day ORDER BY day DESC LIMIT 30", args)]
         return {"calls": sum(v for k, v in counts.items() if k != "running"),

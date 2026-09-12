@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-manager-gateway"
-version = "0.1.0"
+version = "0.1.1"
 description = "Multi-user MCP management and lazy proxy gateway"
 readme = "README.md"
 keywords = ["mcp", "gateway", "fastapi", "proxy"]
@@ -21,6 +21,8 @@ dependencies = [
 
 [project.scripts]
 mcp-manager = "mcp_manager.cli:main"
+mcp-manager-gateway = "mcp_manager.cli:main"
+mmg = "mcp_manager.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8.3", "pytest-asyncio>=0.25", "ruff>=0.9", "playwright>=1.50"]

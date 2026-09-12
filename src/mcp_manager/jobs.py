@@ -42,31 +42,69 @@ class Jobs:
         self.items[job["id"]] = job
         self.persist(job)
 
+        recorded = set()
+
+        def record(index, result):
+            if index in recorded:
+                return
+            recorded.add(index)
+            job["results"].append(result)
+            job["completed"] = len(job["results"])
+            self.persist(job)
+
+        def cancelled(index, item):
+            record(index, {"item": item, "ok": False, "cancelled": True, "error": "Operation cancelled"})
+
+        def finish_cancelled():
+            # Tasks cancelled before their coroutine starts cannot record an outcome.
+            for index, item in enumerate(items):
+                if index not in recorded:
+                    cancelled(index, item)
+            job["status"] = "cancelled"
+            self.persist(job)
+
         async def run():
             job["status"] = "running"
             self.persist(job)
-            async def one(item):
-                async with self.limit:
-                    try:
+
+            async def one(index, item):
+                try:
+                    async with self.limit:
                         result = await operation(item)
-                        job["results"].append({"item": item, "ok": True, "result": result})
-                    except Exception as exc:
-                        job["results"].append({"item": item, "ok": False, "error": str(exc)})
-                    finally:
-                        job["completed"] += 1
-                        self.persist(job)
+                    record(index, {"item": item, "ok": True, "result": result})
+                except asyncio.CancelledError:
+                    cancelled(index, item)
+                    raise
+                except Exception as exc:
+                    record(index, {"item": item, "ok": False, "error": str(exc)})
+
+            children = [asyncio.create_task(one(index, item)) for index, item in enumerate(items)]
             try:
-                await asyncio.gather(*(one(item) for item in items))
+                await asyncio.gather(*children)
                 job["status"] = "completed" if all(x["ok"] for x in job["results"]) else "completed_with_errors"
             except asyncio.CancelledError:
-                job["status"] = "cancelled"
+                # gather does not cancel siblings when just one child is cancelled.
+                for child in children:
+                    if not child.done():
+                        child.cancel()
+                await asyncio.gather(*children, return_exceptions=True)
+                finish_cancelled()
             finally:
                 self.persist(job)
-        self.tasks[job["id"]] = asyncio.create_task(run())
+
+        def done(task):
+            self.tasks.pop(job["id"], None)
+            if task.cancelled():
+                finish_cancelled()
+
+        task = asyncio.create_task(run())
+        self.tasks[job["id"]] = task
+        task.add_done_callback(done)
         return job
 
     async def close(self):
-        for task in self.tasks.values():
+        tasks = list(self.tasks.values())
+        for task in tasks:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)

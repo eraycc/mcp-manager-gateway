@@ -32,7 +32,7 @@ async def listing(request: Request, q: str = "", page: int = 1, page_size: int =
     rows = [r for r in await cat.rows() if (allowed is None or r.id in allowed)
             and (not mode or r.mode == mode) and (not transport or r.transport == transport)
             and (not q or q.lower() in (r.name + " " + r.description + " " + " ".join(r.tags)).lower())]
-    return {"items": [cat.public(r, user_id=None if user.role == "admin" else user.id)
+    return {"items": [cat.public(r, user_id=user.id, runtime_user_id=None if user.role == "admin" else user.id)
                       for r in rows[(page - 1) * page_size:page * page_size]],
             "total": len(rows), "page": page, "page_size": page_size,
             "total_pages": (len(rows) + page_size - 1) // page_size}
@@ -41,9 +41,9 @@ async def listing(request: Request, q: str = "", page: int = 1, page_size: int =
 @router.post("/mcps")
 async def create(data: dict, request: Request, user=ADMIN):
     cat = request.app.state.catalog
-    row = await cat.create(data, authorize=web_authorizer(request))
+    row = await cat.create(data, authorize=web_authorizer(request), user_id=user.id)
     await request.app.state.logs.audit("mcp.create", user.id, {"mcp_id": row.id})
-    return cat.public(row, detail=True)
+    return cat.public(row, detail=True, user_id=user.id)
 
 
 @router.post("/mcps/import-preview")
@@ -90,11 +90,11 @@ async def import_mcps(data: dict, request: Request, user=ADMIN):
                 results.append({"name": item["name"], "status": "skipped"})
                 continue
             if existing and conflict == "replace":
-                row = await cat.update(existing.id, item, authorize=web_authorizer(request))
+                row = await cat.update(existing.id, item, authorize=web_authorizer(request), user_id=user.id)
             else:
                 if existing:
                     item["slug"] = item["slug"][:57].rstrip("_") + "_" + uuid4().hex[:6]
-                row = await cat.create(item, authorize=web_authorizer(request))
+                row = await cat.create(item, authorize=web_authorizer(request), user_id=user.id)
             results.append({"name": row.name, "id": row.id, "status": "imported"})
             if row.mode != "disabled":
                 refresh_ids.append(row.id)
@@ -122,7 +122,7 @@ async def export_mcps(data: dict, request: Request, user=ADMIN):
     for row in await cat.rows():
         if data.get("ids") and row.id not in data["ids"]:
             continue
-        public = cat.public(row, detail=True)
+        public = cat.public(row, detail=True, user_id=user.id)
         result[row.slug] = {k: public[k] for k in ("name", "description", "tags", "transport", "mode", "isolation", "config")}
         if data.get("include_secrets", False):
             result[row.slug]["config"] = cat.unseal(row.config)
@@ -164,10 +164,10 @@ async def batch(data: dict, request: Request, user=ADMIN):
         if action == "start":
             return await cat.warm(server_id, actor.id, explicit=True, authorize=web_authorizer(request))
         if action == "stop":
-            return await cat.runtime.stop_server(server_id, hold=True)
+            return await stop(server_id, request, actor)
         row = await cat.update(server_id, {"mode": {"enable": "eager", "disable": "disabled", "lazy": "lazy"}[action]},
-                               authorize=web_authorizer(request))
-        return cat.public(row)
+                               authorize=web_authorizer(request), user_id=user.id)
+        return cat.public(row, user_id=user.id)
     return request.app.state.jobs.submit("mcp." + action, ids, operation, user.id)
 
 
@@ -175,14 +175,14 @@ async def batch(data: dict, request: Request, user=ADMIN):
 async def detail(server_id: str, request: Request, user=USER):
     row = await permitted(request, server_id, user)
     return request.app.state.catalog.public(row, detail=user.role == "admin",
-                                            user_id=None if user.role == "admin" else user.id)
+                                            user_id=user.id, runtime_user_id=None if user.role == "admin" else user.id)
 
 
 @router.patch("/mcps/{server_id}")
 async def update(server_id: str, data: dict, request: Request, user=ADMIN):
-    row = await request.app.state.catalog.update(server_id, data, authorize=web_authorizer(request))
+    row = await request.app.state.catalog.update(server_id, data, authorize=web_authorizer(request), user_id=user.id)
     await request.app.state.logs.audit("mcp.update", user.id, {"mcp_id": row.id, "revision": row.revision})
-    return request.app.state.catalog.public(row, detail=True)
+    return request.app.state.catalog.public(row, detail=True, user_id=user.id)
 
 
 @router.delete("/mcps/{server_id}")
@@ -200,7 +200,7 @@ async def duplicate(server_id: str, request: Request, user=ADMIN):
     values = cat.public(row)
     values.update(slug=row.slug[:56] + "_" + uuid4().hex[:6], name=row.name[:120] + " Copy",
                   config=cat.unseal(row.config), mode="lazy")
-    return cat.public(await cat.create(values, authorize=web_authorizer(request)), detail=True)
+    return cat.public(await cat.create(values, authorize=web_authorizer(request), user_id=user.id), detail=True, user_id=user.id)
 
 
 @router.get("/mcps/{server_id}/tools")
@@ -222,6 +222,7 @@ async def start(server_id: str, request: Request, user=ADMIN):
 
 @router.post("/mcps/{server_id}/stop")
 async def stop(server_id: str, request: Request, user=ADMIN):
+    await request.app.state.catalog.get(server_id)
     await web_authorizer(request)()
     await request.app.state.runtime.stop_server(server_id, hold=True)
     return {"ok": True}
@@ -268,6 +269,7 @@ async def save_cases(server_id: str, data: dict, request: Request, user=ADMIN):
 @router.post("/mcps/{server_id}/test-all")
 async def test_all(server_id: str, request: Request, user=ADMIN):
     user = await web_authorizer(request)()
+    await request.app.state.catalog.get(server_id)
     cases = await get_setting(request.app.state.db, "tests:" + server_id, [])
     cases = [c for c in cases if c.get("enabled", True)]
     async def operation(case):

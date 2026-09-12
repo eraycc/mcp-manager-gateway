@@ -8,6 +8,7 @@ import uvicorn
 from filelock import FileLock
 from sqlalchemy import func, select
 
+from .about import VERSION
 from .config import Settings, default_home
 from .home_migration import initialize_home, migrate_home
 from .database import Base, Database, SystemSetting
@@ -41,14 +42,20 @@ async def migrate_database(config, target_url):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="mcp-manager")
+    parser = argparse.ArgumentParser(
+        prog="mcp-manager",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="MCP management gateway. Equivalent commands:\n  mmg\n  mcp-manager\n  mcp-manager-gateway",
+        epilog="All three commands support serve and stdio. Use -v / --version to show the installed version.")
     parser.add_argument("--home", help="User configuration directory (default: ~/.mcp-manager)")
-    parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
+    parser.add_argument("-v", "--version", action="version", version="%(prog)s " + VERSION)
     commands = parser.add_subparsers(dest="command")
     serve = commands.add_parser("serve", help="Run the Web console and MCP gateway")
     serve.add_argument("--host")
     serve.add_argument("--port", type=int)
-    bridge = commands.add_parser("stdio", help="Bridge local stdio to the running gateway")
+    bridge = commands.add_parser("stdio", help="Bridge local stdio to the running gateway",
+        description="Local stdio bridge: mmg stdio, mcp-manager stdio, or mcp-manager-gateway stdio.",
+        epilog="Authentication: --token or MCP_MANAGER_TOKEN. URL: --url or MCP_MANAGER_URL.")
     bridge.add_argument("--url", default=os.environ.get("MCP_MANAGER_URL", "http://127.0.0.1:8765"))
     bridge.add_argument("--token", default=os.environ.get("MCP_MANAGER_TOKEN", ""))
     commands.add_parser("upgrade", help="Apply database schema migrations")

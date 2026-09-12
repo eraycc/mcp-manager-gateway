@@ -10,3 +10,4 @@ dist/
 docs/
 *.egg-info/
 .git/
+example/

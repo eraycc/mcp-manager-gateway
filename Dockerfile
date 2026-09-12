@@ -23,6 +23,6 @@ CMD ["mcp-manager", "serve"]
 FROM build AS test
 COPY tests ./tests
 RUN uv sync --frozen --group dev
-CMD ["uv", "run", "--no-sync", "pytest", "-q", "--ignore=tests/test_browser.py", "--ignore=tests/test_browser_workflows.py", "--ignore=tests/test_browser_imports.py", "--ignore=tests/test_browser_controls.py"]
+CMD ["uv", "run", "--no-sync", "pytest", "-q", "--ignore=tests/test_browser.py", "--ignore=tests/test_browser_workflows.py", "--ignore=tests/test_browser_imports.py", "--ignore=tests/test_browser_controls.py", "--ignore=tests/test_browser_bug1.py"]
 
 FROM base AS production

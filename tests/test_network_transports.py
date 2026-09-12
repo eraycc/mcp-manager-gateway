@@ -24,10 +24,13 @@ async def test_real_network_transport_preserves_structured_and_image_content(tra
     protocol = Server("fixture", on_list_tools=tools, on_call_tool=call)
     if transport == "sse":
         sse = SseServerTransport("/messages/")
-        async def handle(request):
-            async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-                await protocol.run(*streams, protocol.create_initialization_options())
-        app = Starlette(routes=[Route("/sse", handle), Mount("/messages/", app=sse.handle_post_message)])
+        class HandleSSE:
+            async def __call__(self, scope, receive, send):
+                async with sse.connect_sse(scope, receive, send) as streams:
+                    await protocol.run(*streams, protocol.create_initialization_options())
+        # The SDK sends ASGI frames itself; a Request endpoint would try to send
+        # its None return as a second response when the SSE session ends.
+        app = Starlette(routes=[Route("/sse", HandleSSE()), Mount("/messages/", app=sse.handle_post_message)])
         endpoint = "/sse"
     else:
         app = protocol.streamable_http_app()

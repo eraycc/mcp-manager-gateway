@@ -6,7 +6,7 @@ from mcp_manager.database import User, set_setting
 async def test_schedule_expands_personal_oauth_only_for_authorized_owners(tmp_path):
     app = create_app(Settings(data_dir=tmp_path, secret_key="schedule-test"))
     async with app.router.lifespan_context(app):
-        config = {"auth": {"type": "oauth", "scope": "user"},
+        config = {"auth": {"type": "oauth", "scope": "user", "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"},
                   "tools": [{"name": "read", "request": {"url": "https://example.test"}}]}
         personal = await app.state.catalog.create({"name": "personal", "transport": "rest", "config": config})
         public = await app.state.catalog.create({"name": "public", "transport": "stdio", "config": {"command": "fake"}})

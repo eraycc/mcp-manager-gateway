@@ -43,3 +43,29 @@ html,body,#app{min-height:100vh}html:has(body.dark){background:#101726}.shell{mi
  .nav-tooltip:not([hidden]){display:block}
 }
 @media(prefers-reduced-motion:reduce){.sidebar,.shell,.brand-text,.nav-text,.collapse-text,.collapse-toggle .icon{transition:none}}
+
+/* Profile session details and settings information. */
+.session-row{align-items:flex-start;justify-content:space-between;gap:16px}
+.session-details{display:grid;gap:6px;flex:1 1 320px;min-width:0}
+.session-agent{overflow-wrap:anywhere;word-break:break-word}
+.session-actions{flex-shrink:0}
+.settings-form>div{min-width:0}
+.settings-grid{align-items:start;grid-template-columns:repeat(2,minmax(0,1fr))}
+.settings-basic{display:grid;gap:18px}.settings-basic>h2{margin:0}.settings-duration{grid-column:1/-1;max-width:420px;width:100%}
+.settings-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+.settings-row>label{grid-column:1/-1;min-width:0}
+.settings-grid>label:not(.check){display:grid;gap:6px;grid-template-rows:auto auto;align-content:start}
+.settings-grid>label:not(.check):has(>small){grid-template-rows:auto auto auto}
+.settings-grid>label:not(.check)>.field-label{grid-row:1}
+.settings-grid>label:not(.check)>input,.settings-grid>label:not(.check)>textarea,.settings-grid>label:not(.check)>select{grid-row:2}
+.settings-grid>label:not(.check)>small{grid-row:3}
+.site-title-field{width:100%;max-width:420px}
+.about-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;flex-wrap:wrap}
+.about-heading h2{margin-bottom:8px}
+.about-version{display:grid;gap:4px;padding:12px 18px;border:1px solid var(--line);border-radius:8px;background:var(--bg);min-width:140px}
+.about-version strong{font-size:20px;overflow-wrap:anywhere}
+.about-links{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;max-width:640px;margin-top:20px}
+.about-link{display:flex;align-items:center;min-height:48px;padding:12px 16px;border:1px solid var(--line);border-radius:8px;background:var(--panel);transition:background .15s}
+.about-link:hover{background:var(--hover)}
+.settings-form:has(#settings_tab-panel-about:not([hidden])) .settings-save{display:none}
+@media(max-width:720px){.settings-grid,.settings-row{grid-template-columns:minmax(0,1fr)}.about-links{grid-template-columns:minmax(0,1fr)}.about-version{width:100%}.session-actions{width:100%}.session-actions button{flex:1}}
