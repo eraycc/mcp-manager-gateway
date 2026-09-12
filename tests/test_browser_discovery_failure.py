@@ -39,3 +39,24 @@ async def test_refresh_failure_replaces_open_cached_tool_list(bug1_browser):
     await expect(dialog).to_contain_text("已自动禁用")
     await expect(dialog).to_contain_text("upstream offline")
     await expect(page.locator("#toast")).to_have_attribute("data-status", "fail")
+
+
+async def test_personal_oauth_recheck_and_explicit_recovery(bug1_browser):
+    page, url = bug1_browser
+    state = {"authorized": False, "starts": 0}
+    await page.route("**/api/v1/mcps/personal/oauth/status",
+        lambda r: r.fulfill(json={"scope": "user", "authorized": state["authorized"]}))
+    await page.route("**/api/v1/mcps/personal/oauth/start",
+        lambda r: r.fulfill(json={"authorization_url": "https://auth.test/authorize"}))
+    async def start(route):
+        state["starts"] += 1
+        await route.fulfill(json={"ok": True})
+    await page.route("**/api/v1/mcps/personal/start", start)
+    await page.evaluate("async()=>{const m=await import('/mcps.js');await m.oauthDialog({id:'personal'},true)}")
+    await expect(page.get_by_role("dialog")).to_contain_text("其他用户的个人授权不可复用")
+    state["authorized"] = True
+    await page.get_by_role("button", name="重新检查授权状态").click()
+    await expect(page.get_by_role("dialog")).to_contain_text("当前登录用户已完成")
+    await page.get_by_role("button", name="验证并启动").click()
+    await expect(page.locator("#toast")).to_contain_text("验证成功")
+    assert state["starts"] == 1

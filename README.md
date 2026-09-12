@@ -7,7 +7,7 @@ Python MCP 管理与代理网关，提供独立 Web 管理台、Token 授权、�
 需要 [uv](https://docs.astral.sh/uv/)。从本地构建好的 wheel 安装（Windows / Linux）：
 
 ```console
-uv tool install ./dist/mcp_manager_gateway-0.1.2-py3-none-any.whl
+uv tool install ./dist/mcp_manager_gateway-0.1.3-py3-none-any.whl
 mcp-manager
 ```
 
@@ -19,6 +19,8 @@ mcp-manager
 
 - Windows：`C:\Users\用户名\.mcp-manager`
 - Linux：`~/.mcp-manager`
+
+工具目录集中保存在 `cache/catalog.jsonl`，后台任务状态集中保存在 `jobs/jobs.jsonl`。缓存文件缺失时，启动后会在后台为已启用服务重建目录，按需服务发现完成即释放实例；仍会禁用发现失败的服务。更新采用追加写入，自动合并重复快照；缓存按服务和授权用户保存最新版本，不再按版本创建文件。启动时会迁移可读取的旧 `.json` 快照，持久化成功后删除旧文件；无法读取的文件会保留并记录迁移错误。日志仍按日期保存为 JSONL，系统数据库、日志 SQLite 索引与 `.env` 保持各自格式。
 
 环境变量优先于用户目录内的 .env；源码目录和当前工作目录的 .env 不会被自动读取。可设置 `MCP_MANAGER_HOME`，或执行 `mcp-manager --home /自定义目录 serve` 指定另一份配置与数据。
 
@@ -33,7 +35,7 @@ mcp-manager serve --port 8766
 ## 使用顺序
 
 1. 管理员添加 MCP。支持 stdio、Streamable HTTP、旧 SSE、REST 转 MCP；http 是 Streamable HTTP 的导入别名。
-2. 添加或修改启用中的 MCP 后自动发现工具；连接启动时再次更新缓存。lazy 的维护发现完成后释放实例。启动、连接或发现失败（包括 OAuth 未授权、过期）会自动将运行策略设为 disabled，移除可用工具目录并保留失败原因。配置仍会保存，便于修复；修复后由管理员重新设为 lazy 或 eager，验证成功才恢复工具目录。已禁用的 OAuth 服务仍可完成授权，但授权不会自动启用服务。REST 刷新会先探测 HTTP 连接，不能仅凭本地定义生成可用缓存。
+2. 添加或修改启用中的 MCP 后自动发现工具；连接启动时再次更新缓存。lazy 的维护发现完成后释放实例。启动、连接或发现失败（包括 OAuth 未授权、过期）会自动将运行策略设为 disabled，移除可用工具目录并保留失败原因。配置仍会保存，便于修复；修复后管理员可点击启动、刷新自动禁用的服务，或重新设置 lazy/eager，读取最新工具成功才恢复可用目录。自动禁用后的重试恢复此前策略；旧记录未保存此前策略时默认 lazy。手动禁用的服务仅在显式启动或设置启用策略后恢复，刷新不会自行启用。已禁用的 OAuth 服务仍可完成授权，但授权不会自动启用服务。REST 刷新会先探测 HTTP 连接，不能仅凭本地定义生成可用缓存。
 3. 给普通用户分配可用 MCP；用户只能在自己的授权范围创建 Token。
 4. 在 Token 页面创建凭据，保存只显示一次的完整 Token，然后配置客户端。
 5. 实际调用才启动按需服务。查询工具目录不会启动下游进程。

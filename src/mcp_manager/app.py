@@ -136,7 +136,10 @@ def create_app(config=None):
                          if row.mode == "eager" and row.isolation != "session"
                          and (row.isolation == "service" or
                               state.catalog.unseal(row.config).get("auth", {}).get("scope") == "user")}
-                targets = [target for target in await state.catalog.refresh_targets() if target["server_id"] in eager]
+                rows = {row.id: row for row in await state.catalog.rows()}
+                targets = [target for target in await state.catalog.refresh_targets()
+                           if target["server_id"] in eager or state.catalog.cached(
+                               rows[target["server_id"]], target["user_id"])["cache_status"] == "empty"]
                 if targets:
                     state.jobs.submit("mcp.startup", targets, state.catalog.warm_target)
                 task = asyncio.create_task(maintenance(app))

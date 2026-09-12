@@ -3,9 +3,9 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import re
 import time
-from collections import OrderedDict
 from contextlib import asynccontextmanager
 from weakref import WeakValueDictionary
 from pathlib import Path
@@ -17,6 +17,7 @@ from jsonschema import Draft202012Validator
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
+from .jsonl_store import JsonlStore
 from .database import ApiToken, McpServer, SystemSetting, User, now
 from .identity import public as public_model
 from .identity import revalidate_user
@@ -76,7 +77,14 @@ class Catalog:
         self.locks = WeakValueDictionary()
         self.oauth = None
         self.tasks = set()
-        self._cache_memory = OrderedDict()
+        self.cache_store = JsonlStore(self.cache_dir / "catalog.jsonl", fail_closed=True)
+        self._cache_failures = {}
+        def legacy_cache(path, value):
+            server_id, revision, owner = path.stem.rsplit("-", 2)
+            if not isinstance(value, dict):
+                raise ValueError("Invalid legacy cache")
+            return server_id + "-" + owner, {"revision": int(revision), "data": value}
+        self.cache_store.migrate_json(legacy_cache)
 
     def schedule_warm(self, row, authorize=None, user_id=None):
         task = asyncio.create_task(self.warm(row.id, user_id, authorize=authorize, expected_revision=row.revision))
@@ -127,17 +135,20 @@ class Catalog:
             result["config"] = masked(self.unseal(row.config))
         return result
 
-    def cache_path(self, row, user_id=None):
+    def cache_key(self, row, user_id=None):
         config = self.unseal(row.config)
         scope = user_id if config.get("auth", {}).get("scope") == "user" else "service"
         suffix = hashlib.sha256(str(scope or "anonymous").encode()).hexdigest()[:24]
-        return self.cache_dir / (row.id + "-" + str(row.revision) + "-" + suffix + ".json")
+        return row.id + "-" + suffix
 
     def cached(self, row, user_id=None):
-        path = self.cache_path(row, user_id)
-        if row.mode == "disabled" and not path.exists():
-            # A service-wide disable reason contains no private capability definitions.
-            path = self.cache_path(row)
+        def current(key):
+            saved = self._cache_failures.get(key) or self.cache_store.get(key)
+            return saved["data"] if saved and saved["revision"] == row.revision else None
+        saved = current(self.cache_key(row, user_id))
+        if row.mode == "disabled" and saved is None:
+            # A global disable reason contains no private capability definitions.
+            saved = current(self.cache_key(row))
         empty = {"tools": [], "resources": [], "prompts": [], "templates": [],
                  "cache_at": None, "cache_error": None, "cache_error_code": None,
                  "cache_status": "empty", "cache_attempt_at": None}
@@ -149,29 +160,27 @@ class Catalog:
                 if row.mode == "disabled" and value["cache_status"] != "error":
                     value["cache_status"] = "disabled"
             return value
-        try:
-            stat = path.stat()
-            signature = (stat.st_mtime_ns, stat.st_size)
-            saved = self._cache_memory.get(path)
-            if saved and saved[0] == signature:
-                self._cache_memory.move_to_end(path)
-                return visible(copy.deepcopy(saved[1]))
-            value = empty | json.loads(path.read_text(encoding="utf-8"))
-            if value["cache_status"] == "empty" and value["cache_at"]:
-                value["cache_status"] = "error" if value["cache_error"] else "ready"
-            self._cache_memory[path] = (signature, value)
-            if len(self._cache_memory) > 512:
-                self._cache_memory.popitem(last=False)
-            return visible(copy.deepcopy(value))
-        except (OSError, ValueError):
-            return visible(empty)
+        value = empty | copy.deepcopy(saved or {})
+        if value["cache_status"] == "empty" and value["cache_at"]:
+            value["cache_status"] = "error" if value["cache_error"] else "ready"
+        return visible(value)
 
     def save_cache(self, row, value, user_id=None):
-        path = self.cache_path(row, user_id)
-        temp = path.with_suffix("." + uuid4().hex + ".tmp")
-        temp.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
-        temp.replace(path)
-        self._cache_memory.pop(path, None)
+        key = self.cache_key(row, user_id)
+        try:
+            self.cache_store.set(key, {"revision": row.revision, "data": value})
+        except OSError as exc:
+            error = GatewayError("cache_write_failed", "Local MCP cache write failed: " + str(exc))
+            # Fail closed even when the disk cannot record the failure. Disabled
+            # policy is committed separately, so restart cannot resurrect tools.
+            failure = value | {key: [] for key in ("tools", "resources", "prompts", "templates")}
+            failure.update(cache_status="error", cache_at=None)
+            if not failure.get("cache_error"):
+                failure.update(cache_error=str(error), cache_error_code=error.code,
+                               cache_attempt_at=now().isoformat())
+            self._cache_failures[key] = {"revision": row.revision, "data": failure}
+            raise error from exc
+        self._cache_failures.pop(key, None)
 
     def cache_failure(self, row, exc, user_id=None):
         if (self.runtime.versions.get(row.id, row.revision) != row.revision
@@ -183,7 +192,12 @@ class Catalog:
         value.update(tools=[], resources=[], prompts=[], templates=[], cache_at=None)
         value.update(cache_status="auth_required" if code == "auth_required" else "error",
                      cache_error_code=code, cache_error=str(exc)[:500], cache_attempt_at=now().isoformat())
-        self.save_cache(row, value, user_id)
+        try:
+            self.save_cache(row, value, user_id)
+        except GatewayError as write_error:
+            if write_error.code != "cache_write_failed":
+                raise
+            logging.getLogger(__name__).warning("%s", write_error)
 
     async def discovery_failed(self, row, exc, user_id=None, *, spec=None):
         # Local admission/auth changes do not prove that the upstream is broken.
@@ -200,17 +214,25 @@ class Catalog:
             current = await session.get(McpServer, row.id)
             if not current or current.revision != row.revision or current.mode == "disabled":
                 return
+            recovery_mode = current.mode
             current.mode = "disabled"
             current.revision += 1
             failure = {
                 "tools": [], "resources": [], "prompts": [], "templates": [],
                 "cache_status": "error", "cache_error_code": code,
                 "cache_error": str(exc)[:500], "cache_attempt_at": now().isoformat(),
-                "cache_at": None, "auto_disabled": True,
+                "cache_at": None, "auto_disabled": True, "recovery_mode": recovery_mode,
             }
-            self.save_cache(current, failure, user_id)
-            if self.cache_path(current, user_id) != self.cache_path(current):
-                self.save_cache(current, failure)
+            owners = [user_id]
+            if self.cache_key(current, user_id) != self.cache_key(current):
+                owners.append(None)
+            for owner in owners:
+                try:
+                    self.save_cache(current, failure, owner)
+                except GatewayError as write_error:
+                    if write_error.code != "cache_write_failed":
+                        raise
+                    logging.getLogger(__name__).warning("%s; disabled policy will still be saved", write_error)
             await session.flush()
         self.runtime.versions[row.id] = current.revision
         # The caller is outside the SDK owner task. Stop only the failed revision;
@@ -220,7 +242,7 @@ class Catalog:
     def mark_refreshing(self, row, user_id=None):
         if row.mode != "disabled" and self.runtime.versions.get(row.id, row.revision) == row.revision:
             self.save_cache(row, {"tools": [], "resources": [], "prompts": [], "templates": [],
-                                 "cache_status": "refreshing", "cache_attempt_at": now().isoformat()})
+                                 "cache_status": "refreshing", "cache_attempt_at": now().isoformat()}, user_id)
 
     async def connection_starting(self, spec):
         if spec.id.startswith("diagnose-"):
@@ -415,8 +437,10 @@ class Catalog:
                     anonymous = await s.get(SystemSetting, "anonymous_mcp_ids")
                     if anonymous:
                         anonymous.value = [item for item in anonymous.value if item != server_id]
-                for path in self.cache_dir.glob(server_id + "-*.json"):
-                    path.unlink(missing_ok=True)
+                self.cache_store.delete_prefix(server_id + "-")
+                for key in list(self._cache_failures):
+                    if key.startswith(server_id + "-"):
+                        self._cache_failures.pop(key, None)
 
     async def refresh_targets(self, server_id=None):
         targets = []
@@ -455,13 +479,33 @@ class Catalog:
         return await self.warm(target["server_id"], target["user_id"],
                                authorize=lambda: self.authorize_target(target))
 
+    async def retry_disabled(self, server_id, user_id, *, authorize, allow_manual=False):
+        """Only an explicit administrator operation may retry a disabled policy."""
+        await authorize()
+        row = await self.get(server_id)
+        if row.mode != "disabled":
+            return False
+        cache = self.cached(row, user_id)
+        if not allow_manual and not cache.get("auto_disabled"):
+            raise GatewayError("disabled", "MCP was manually disabled; use Start or select lazy/eager to enable it")
+        mode = cache.get("recovery_mode", "lazy")
+        if mode not in {"lazy", "eager"}:
+            mode = "lazy"
+        row = await self.update(server_id, {"mode": mode, "revision": row.revision},
+                                authorize=authorize, user_id=user_id)
+        cache = self.cached(row, user_id)
+        if row.mode == "disabled" or cache["cache_status"] != "ready":
+            raise GatewayError(cache.get("cache_error_code") or "discovery_failed",
+                               cache.get("cache_error") or "MCP directory verification failed")
+        return True
+
     async def refresh(self, server_id, user_id=None, *, authorize=None):
         if authorize:
             await authorize()
         row = await self.get(server_id)
         lease, spec = None, None
-        self.mark_refreshing(row, user_id)
         try:
+            self.mark_refreshing(row, user_id)
             spec = await self.spec(row, user_id)
             if authorize:
                 await authorize()

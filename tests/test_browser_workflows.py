@@ -1,4 +1,5 @@
 """Frontend workflows against a temporary gateway and real installed Chrome."""
+from contextlib import asynccontextmanager
 from pathlib import Path
 import json
 
@@ -9,8 +10,16 @@ from test_gateway import running_gateway  # noqa: F401
 
 
 @pytest.mark.asyncio
-async def test_frontend_workflows_and_mobile(running_gateway):  # noqa: F811
+async def test_frontend_workflows_and_mobile(running_gateway, monkeypatch):  # noqa: F811
     app, web, url, _token, _row = running_gateway
+    from rest_fixture import rest_connect
+    original = app.state.runtime.connector
+    @asynccontextmanager
+    async def connector(spec):
+        # Browser form tests use a responsive peer, not an unrelated public URL.
+        async with (rest_connect(spec) if spec.transport == "rest" else original(spec)) as peer:
+            yield peer
+    monkeypatch.setattr(app.state.runtime, "connector", connector)
     shots = Path(__file__).parents[1] / "artifacts/qa"
     shots.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as pw:
@@ -103,7 +112,8 @@ async def test_frontend_workflows_and_mobile(running_gateway):  # noqa: F811
         # Seed only this fixture's database, then exercise a normal account's own lists.
         for i in range(11):
             response = await web.post("/api/v1/mcps", json={"name": f"Extra {i:02}", "slug": f"extra-{i}",
-                "transport": "stdio", "mode": "lazy", "config": {"command": "unused"}})
+                "transport": "rest", "mode": "lazy", "config": {"tools": [{"name": "read",
+                    "request": {"method": "GET", "url": "https://example.com/items"}}]}})
             assert response.status_code == 200
         async with httpx.AsyncClient(base_url=url, trust_env=False) as user_web:
             for _ in range(11):

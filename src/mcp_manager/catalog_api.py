@@ -160,9 +160,9 @@ async def batch(data: dict, request: Request, user=ADMIN):
         if action == "delete":
             return await cat.delete(server_id, authorize=web_authorizer(request))
         if action == "refresh":
-            return await cat.refresh(server_id, actor.id, authorize=web_authorizer(request))
+            return await refresh(server_id, request, actor)
         if action == "start":
-            return await cat.warm(server_id, actor.id, explicit=True, authorize=web_authorizer(request))
+            return await start(server_id, request, actor)
         if action == "stop":
             return await stop(server_id, request, actor)
         row = await cat.update(server_id, {"mode": {"enable": "eager", "disable": "disabled", "lazy": "lazy"}[action]},
@@ -215,12 +215,17 @@ async def cached_tools(server_id: str, request: Request, user=USER):
 
 @router.post("/mcps/{server_id}/refresh")
 async def refresh(server_id: str, request: Request, user=ADMIN):
-    return await request.app.state.catalog.refresh(server_id, user.id, authorize=web_authorizer(request))
+    cat = request.app.state.catalog
+    if await cat.retry_disabled(server_id, user.id, authorize=web_authorizer(request)):
+        return cat.cached(await cat.get(server_id), user.id)
+    return await cat.refresh(server_id, user.id, authorize=web_authorizer(request))
 
 
 @router.post("/mcps/{server_id}/start")
 async def start(server_id: str, request: Request, user=ADMIN):
-    await request.app.state.catalog.warm(server_id, user.id, explicit=True, authorize=web_authorizer(request))
+    cat = request.app.state.catalog
+    await cat.retry_disabled(server_id, user.id, authorize=web_authorizer(request), allow_manual=True)
+    await cat.warm(server_id, user.id, explicit=True, authorize=web_authorizer(request))
     return {"ok": True}
 
 

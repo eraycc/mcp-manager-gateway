@@ -1,11 +1,11 @@
 """Bounded background operations with durable, non-replayed progress snapshots."""
 import asyncio
-import json
 import logging
 from pathlib import Path
 from uuid import uuid4
 
 from .logs import redact
+from .jsonl_store import JsonlStore
 
 
 class Jobs:
@@ -15,24 +15,22 @@ class Jobs:
         self.limit = asyncio.Semaphore(4)
         self.directory = Path(data_dir) / "jobs" if data_dir else None
         if self.directory:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            for path in self.directory.glob("*.json"):
-                try:
-                    job = json.loads(path.read_text(encoding="utf-8"))
-                    if job["status"] in {"queued", "running"}:
-                        job.update(status="interrupted", error="Runtime restarted; operations were not replayed")
-                    self.items[job["id"]] = job
-                except (OSError, ValueError, KeyError):
+            self.store = JsonlStore(self.directory / "jobs.jsonl")
+            self.store.migrate_json(lambda path, job: (job["id"], redact(job)))
+            for key in self.store.items:
+                job = self.store.get(key)
+                if not isinstance(job, dict) or not job.get("id") or not job.get("status"):
                     continue
+                if job["status"] in {"queued", "running"}:
+                    job.update(status="interrupted", error="Runtime restarted; operations were not replayed")
+                    self.persist(job)
+                self.items[job["id"]] = job
 
     def persist(self, job):
         if not self.directory:
             return
         try:
-            path = self.directory / (job["id"] + ".json")
-            temp = path.with_suffix(".tmp")
-            temp.write_text(json.dumps(redact(job), ensure_ascii=False, default=str), encoding="utf-8")
-            temp.replace(path)
+            self.store.set(job["id"], redact(job))
         except OSError:
             logging.getLogger(__name__).exception("Job snapshot write failed")
 

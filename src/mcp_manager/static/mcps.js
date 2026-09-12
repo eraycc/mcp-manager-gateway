@@ -24,9 +24,11 @@ export function transportTemplate(transport){const common={startup_timeout:30,ca
 export async function oauthDialog(service,canManage,onChange=()=>{}){
  const state=await api('/mcps/'+service.id+'/oauth/status'),content=el('div',{class:'stack'});
  const shared=state.scope==='service',editable=!shared||canManage;
- content.append(el('p',{class:'notice'},state.authorized?(shared?'服务共享授权已完成。':'此服务已完成 OAuth 授权。'):'此服务尚未完成 OAuth 授权。'));
- content.append(el('p',{class:'muted'},'授权不会自动启用已禁用的服务；完成授权后，请由管理员将运行策略设为按需或常驻，验证成功后才恢复工具目录。'));
+ content.append(el('p',{class:'notice'},state.authorized?(shared?'服务共享授权已完成。':'当前登录用户已完成 OAuth 授权。'):(shared?'服务尚未完成共享 OAuth 授权。':'当前登录用户尚未完成 OAuth 授权，或授权已过期。其他用户的个人授权不可复用。')));
+ content.append(el('p',{class:'muted'},'授权不会自动启用已禁用的服务。授权返回后点击“重新检查授权状态”，管理员可点击“验证并启动”或设置按需/常驻；读取工具成功后才恢复可用目录。列表中的失败时间表示上一次尝试。'));
  const d=dialog('授权服务',content);
+ content.append(button('重新检查授权状态',async()=>{d.close();await oauthDialog(service,canManage,onChange)}));
+ if(state.authorized&&canManage)content.append(button('验证并启动',async()=>{try{await api('/mcps/'+service.id+'/start',{method:'POST'});toast('验证成功，服务已启动','success');d.close()}finally{onChange()}},'primary'));
  if(!editable){content.append(el('p',{class:'muted'},'服务共享授权由管理员管理，请联系管理员完成授权或断开。'));return}
  if(state.authorized)content.append(button('断开 OAuth 授权',()=>formDialog('确认操作',[el('p',{},shared?'断开后，所有使用此共享授权的用户都需要重新授权。':'断开后，需要重新授权才能调用此服务。')],async()=>{await api('/mcps/'+service.id+'/oauth/disconnect',{method:'POST'});d.close();toast('已断开 OAuth 授权');onChange()},{saveLabel:'确认执行'}),'danger'));
  try{const result=await api('/mcps/'+service.id+'/oauth/start',{method:'POST'}),url=new URL(result.authorization_url);if(!['http:','https:'].includes(url.protocol))throw new Error('授权地址不受支持');if(d.isConnected)content.append(el('a',{href:url.href,target:'_blank',rel:'noopener noreferrer'},'打开授权页面'))}catch(e){if(d.isConnected)content.append(el('p',{class:'error',role:'alert'},e.message))}
