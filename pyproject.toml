@@ -4,8 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-manager-gateway"
-version = "0.1.1"
+version = "0.1.2"
 description = "Multi-user MCP management and lazy proxy gateway"
+license = { file = "LICENSE" }
+license-files = ["LICENSE"]
 readme = "README.md"
 keywords = ["mcp", "gateway", "fastapi", "proxy"]
 requires-python = ">=3.12"

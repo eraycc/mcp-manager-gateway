@@ -7,7 +7,7 @@ Python MCP 管理与代理网关，提供独立 Web 管理台、Token 授权、�
 需要 [uv](https://docs.astral.sh/uv/)。从本地构建好的 wheel 安装（Windows / Linux）：
 
 ```console
-uv tool install ./dist/mcp_manager_gateway-0.1.1-py3-none-any.whl
+uv tool install ./dist/mcp_manager_gateway-0.1.2-py3-none-any.whl
 mcp-manager
 ```
 
