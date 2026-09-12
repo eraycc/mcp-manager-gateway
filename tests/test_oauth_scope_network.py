@@ -56,6 +56,7 @@ async def test_oauth_scope_refresh_and_call_over_http(tmp_path):
                         "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"}}})
                 await set_setting(app.state.db, app.state.oauth.key(row, user["id"]), app.state.catalog.seal(
                     {"access_token": "fixture-token", "scope": "mcp:read", "expires_at": 9999999999}))
+                row = await app.state.catalog.update(row.id, {"mode": "lazy"}, user_id=user["id"])
                 cached = await app.state.catalog.refresh(row.id, user["id"])
                 assert cached["cache_status"] == "ready"
                 assert cached["tools"][0]["name"] == "echo"

@@ -22,12 +22,7 @@ async def test_provider_scope_preserves_isolation_cache_and_bearer(tmp_path, own
                 "token_url": "https://auth.test/token"}}})
         value = {"access_token": "test-access", "scope": "mcp:read", "expires_at": 9999999999}
         await set_setting(app.state.db, app.state.oauth.key(row, "alice"), catalog.seal(value))
-        spec = await catalog.spec(row, "alice")
-        assert spec.config["auth"]["scope"] == owner_scope
-        assert spec.config["auth"]["scopes"] == ["mcp:read"]
-        assert spec.config["auth"]["granted_scope"] == "mcp:read"
-        assert spec.credential_owner == ("alice" if owner_scope == "user" else "service")
-        assert spec.isolation == ("user" if owner_scope == "user" else "service")
+
 
         class Connection:
             async def discover(self):
@@ -44,6 +39,13 @@ async def test_provider_scope_preserves_isolation_cache_and_bearer(tmp_path, own
             yield Connection()
 
         app.state.runtime.connector = connect
+        row = await catalog.update(row.id, {"mode": "lazy"}, user_id="alice")
+        spec = await catalog.spec(row, "alice")
+        assert spec.config["auth"]["scope"] == owner_scope
+        assert spec.config["auth"]["scopes"] == ["mcp:read"]
+        assert spec.config["auth"]["granted_scope"] == "mcp:read"
+        assert spec.credential_owner == ("alice" if owner_scope == "user" else "service")
+        assert spec.isolation == ("user" if owner_scope == "user" else "service")
         result = await catalog.refresh(row.id, "alice")
         assert result["cache_status"] == "ready"
         assert catalog.cached(row, "alice")["tools"][0]["name"] == "read"

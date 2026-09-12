@@ -85,8 +85,8 @@ async def oauth_actor(request, session, server_id, *, revision=None, read_only=F
         raise HTTPException(404, "MCP not found")
     if revision is not None and row.revision != revision:
         raise HTTPException(409, "MCP configuration changed; restart authorization")
-    if row.mode == "disabled" or (user.role != "admin" and user.scope_mode != "all"
-                                  and server_id not in user.mcp_ids):
+    # OAuth repair does not start an MCP or change its disabled policy.
+    if user.role != "admin" and user.scope_mode != "all" and server_id not in user.mcp_ids:
         raise HTTPException(403, "MCP access revoked")
     auth = request.app.state.catalog.unseal(row.config).get("auth", {})
     if auth.get("type") != "oauth":
@@ -172,6 +172,8 @@ async def callback(request: Request, state: str, code: str = "", error: str = ""
         owner = user.id if auth.get("scope") == "user" else "service"
         app.runtime.credential_versions[(row.id, owner)] = hashlib.sha256(
             value["access_token"].encode()).hexdigest()[:16]
+    if row.mode == "disabled":
+        return RedirectResponse(app.config.public_url.rstrip("/") + "/#/mcps", status_code=303)
     try:
         await app.catalog.refresh(row.id, user.id,
                                   authorize=oauth_authorizer(request, row.id, pending["revision"]))

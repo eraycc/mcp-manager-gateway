@@ -7,6 +7,8 @@ from mcp_manager.config import Settings
 async def test_mcp_crud_rest_cache_and_user_grants(tmp_path):
     app = create_app(Settings(data_dir=tmp_path, database_url="", secret_key="test-key"))
     async with app.router.lifespan_context(app):
+        from rest_fixture import rest_connect
+        app.state.runtime.connector = rest_connect
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             assert (await client.post("/api/v1/auth/register", json={"username":"admin","password":"password1234"})).status_code < 300
             assert (await client.post("/api/v1/auth/login", json={"username":"admin","password":"password1234"})).status_code == 200

@@ -149,6 +149,8 @@ def validate_config(transport, config):
             url = "https://environment.invalid"
         check_url(url)
     elif transport == "rest":
+        if config.get("healthcheck_url"):
+            check_url(config["healthcheck_url"])
         tools = config.get("tools", [])
         if not isinstance(tools, list) or not tools:
             raise ValueError("REST requires at least one tool")
@@ -211,6 +213,32 @@ class RestConnection:
         self.client = client
 
     async def discover(self):
+        headers = auth_headers(self.config)
+        health = self.config.get("healthcheck_url")
+        targets = [(health, headers)] if health else [
+            (tool["request"]["url"], headers | {
+                key: str(value) for key, value in tool["request"].get("headers", {}).items()
+                if "{" not in str(value)})
+            for tool in self.config.get("tools", []) if tool_allowed(self.config, tool["name"])]
+        seen = set()
+        for url, request_headers in targets:
+            if "{" in url:
+                raise GatewayError("healthcheck_required",
+                                   "REST routes with URL parameters require a fixed healthcheck_url")
+            key = (url, tuple(sorted(request_headers.items())))
+            if key in seen:
+                continue
+            seen.add(key)
+            # Never invoke POST/PUT/DELETE business operations during discovery.
+            method = "GET" if health else "HEAD"
+            try:
+                async with self.client.stream(method, url, headers=request_headers) as response:
+                    status = response.status_code
+            except httpx.RequestError as exc:
+                raise GatewayError("connection_error",
+                                   f"REST {method} connection failed ({type(exc).__name__}): {exc}") from exc
+            if not (200 <= status < 300 or (not health and status == 405)):
+                raise GatewayError("healthcheck_failed", f"REST {method} probe returned HTTP {status}")
         return {"tools": [{k: v for k, v in tool.items() if k in (
             "name", "description", "inputSchema", "outputSchema", "annotations", "title")}
             | {"inputSchema": tool.get("inputSchema", {"type": "object"})}

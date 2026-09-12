@@ -11,6 +11,13 @@ from weakref import WeakValueDictionary
 from .protocol_errors import is_request_error
 
 
+def startup_failure_reason(exc):
+    """Expose transport leaf errors rather than an opaque AnyIO task-group label."""
+    if isinstance(exc, BaseExceptionGroup):
+        return "; ".join(dict.fromkeys(startup_failure_reason(child) for child in exc.exceptions))
+    return str(exc) or type(exc).__name__
+
+
 class GatewayError(Exception):
     def __init__(self, code: str, message: str):
         self.code = code
@@ -50,6 +57,7 @@ class Instance:
     last_activity: float = 0
     connection: Any = None
     error: str | None = None
+    failure: Exception | None = None
     owner: asyncio.Task | None = None
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     stop: asyncio.Event = field(default_factory=asyncio.Event)
@@ -69,6 +77,8 @@ class Runtime:
         # Waiters keep strong references; inactive session/revision keys can disappear.
         self._locks: WeakValueDictionary[tuple, asyncio.Lock] = WeakValueDictionary()
         self.on_connect = None
+        self.on_starting = None
+        self.on_start_failure = None
         self._closing = False
         self.holds: set[str] = set()
         self.versions: dict[str, int] = {}
@@ -106,6 +116,8 @@ class Runtime:
         try:
             timeout = float(instance.spec.config.get("startup_timeout", 30))
             async with asyncio.timeout(timeout) as startup:
+                if self.on_starting is not None:
+                    await self.on_starting(instance.spec)
                 async with self.connector(instance.spec) as connection:
                     instance.connection = connection
                     if self.on_connect is not None:
@@ -118,7 +130,8 @@ class Runtime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            instance.error = str(exc)
+            instance.error = startup_failure_reason(exc)
+            instance.failure = exc
             instance.phase = "failed"
         finally:
             instance.connection = None
@@ -186,7 +199,9 @@ class Runtime:
                 instance.refs.discard(lease_id)
                 raise GatewayError("startup_timeout", "MCP startup timed out") from exc
             if instance.phase == "failed":
-                raise GatewayError("startup_failed", instance.error or "MCP startup failed")
+                if isinstance(instance.failure, GatewayError):
+                    raise instance.failure
+                raise GatewayError("startup_failed", instance.error or "MCP startup failed") from instance.failure
             async with lock:
                 self.check_lease(lease_id)
                 if instance.phase != "ready":
@@ -199,7 +214,12 @@ class Runtime:
                       *args, authorize=None, business=True):
         if authorize is not None:
             await authorize()
-        instance = await self._acquire(spec, lease_id)
+        try:
+            instance = await self._acquire(spec, lease_id)
+        except GatewayError as exc:
+            if self.on_start_failure is not None:
+                await self.on_start_failure(spec, exc)
+            raise
         dispatched = False
         try:
             queue_timeout = float(spec.config.get("queue_timeout", 60))
@@ -286,8 +306,9 @@ class Runtime:
             if not keep_alive and not instance.refs and (instance.spec.mode == "lazy" or instance.spec.isolation == "session"):
                 await self._stop_instance(instance, only_unreferenced=True)
 
-    async def stop_server(self, server_id: str, *, hold=False, force=False, require_idle=False):
-        instances = [i for i in self.instances.values() if i.spec.id == server_id]
+    async def stop_server(self, server_id: str, *, hold=False, force=False, require_idle=False, revision=None):
+        instances = [i for i in self.instances.values() if i.spec.id == server_id
+                     and (revision is None or i.spec.revision == revision)]
         # No await before admission is blocked: a rejected edit leaves the old
         # generation and any pre-existing manual hold untouched.
         if require_idle and any(i.in_flight or i.phase == "starting" for i in instances):

@@ -120,6 +120,7 @@ class Catalog:
                       cache_error=cache.get("cache_error"), cache_status=cache.get("cache_status"),
                       cache_error_code=cache.get("cache_error_code"),
                       cache_attempt_at=cache.get("cache_attempt_at"),
+                      auto_disabled=cache.get("auto_disabled", False),
                       auth_type=self.unseal(row.config).get("auth", {}).get("type", "none"),
                       runtime=[x for x in self.runtime.status(user_id=runtime_user_id) if x["server_id"] == row.id])
         if detail:
@@ -134,27 +135,36 @@ class Catalog:
 
     def cached(self, row, user_id=None):
         path = self.cache_path(row, user_id)
+        if row.mode == "disabled" and not path.exists():
+            # A service-wide disable reason contains no private capability definitions.
+            path = self.cache_path(row)
         empty = {"tools": [], "resources": [], "prompts": [], "templates": [],
                  "cache_at": None, "cache_error": None, "cache_error_code": None,
                  "cache_status": "empty", "cache_attempt_at": None}
-        if row.mode == "disabled":
+        if self.runtime.versions.get(row.id, row.revision) != row.revision:
             return empty | {"cache_status": "disabled"}
+        def visible(value):
+            if row.mode == "disabled" or value["cache_status"] != "ready":
+                value = value | {key: [] for key in ("tools", "resources", "prompts", "templates")}
+                if row.mode == "disabled" and value["cache_status"] != "error":
+                    value["cache_status"] = "disabled"
+            return value
         try:
             stat = path.stat()
             signature = (stat.st_mtime_ns, stat.st_size)
             saved = self._cache_memory.get(path)
             if saved and saved[0] == signature:
                 self._cache_memory.move_to_end(path)
-                return copy.deepcopy(saved[1])
+                return visible(copy.deepcopy(saved[1]))
             value = empty | json.loads(path.read_text(encoding="utf-8"))
             if value["cache_status"] == "empty" and value["cache_at"]:
                 value["cache_status"] = "error" if value["cache_error"] else "ready"
             self._cache_memory[path] = (signature, value)
             if len(self._cache_memory) > 512:
                 self._cache_memory.popitem(last=False)
-            return copy.deepcopy(value)
+            return visible(copy.deepcopy(value))
         except (OSError, ValueError):
-            return empty
+            return visible(empty)
 
     def save_cache(self, row, value, user_id=None):
         path = self.cache_path(row, user_id)
@@ -164,17 +174,75 @@ class Catalog:
         self._cache_memory.pop(path, None)
 
     def cache_failure(self, row, exc, user_id=None):
-        if getattr(exc, "code", "") in {"credential_changed", "revision_changed"}:
+        if (self.runtime.versions.get(row.id, row.revision) != row.revision
+                or getattr(exc, "code", "") in {"credential_changed", "revision_changed"}):
             return
         code = getattr(exc, "code", "discovery_failed")
         value = self.cached(row, user_id)
-        # Retain last-known definitions for temporary connection failures, but never
-        # advertise an identity's tools after its authorization is lost.
-        if code == "auth_required":
-            value.update(tools=[], resources=[], prompts=[], templates=[], cache_at=None)
+        # Failed discovery is never a usable capability directory.
+        value.update(tools=[], resources=[], prompts=[], templates=[], cache_at=None)
         value.update(cache_status="auth_required" if code == "auth_required" else "error",
                      cache_error_code=code, cache_error=str(exc)[:500], cache_attempt_at=now().isoformat())
         self.save_cache(row, value, user_id)
+
+    async def discovery_failed(self, row, exc, user_id=None, *, spec=None):
+        # Local admission/auth changes do not prove that the upstream is broken.
+        code = getattr(exc, "code", "discovery_failed")
+        if isinstance(exc, HTTPException) or code in {
+            "credential_changed", "revision_changed", "permission_revoked", "forbidden",
+            "lease_expired", "queue_timeout", "stopped", "disabled", "shutting_down",
+        }:
+            return
+        if spec and spec.credential_owner and self.runtime.credential_versions.get(
+                (spec.id, spec.credential_owner), spec.credential_scope) != spec.credential_scope:
+            return
+        async with self.db.locked() as session:
+            current = await session.get(McpServer, row.id)
+            if not current or current.revision != row.revision or current.mode == "disabled":
+                return
+            current.mode = "disabled"
+            current.revision += 1
+            failure = {
+                "tools": [], "resources": [], "prompts": [], "templates": [],
+                "cache_status": "error", "cache_error_code": code,
+                "cache_error": str(exc)[:500], "cache_attempt_at": now().isoformat(),
+                "cache_at": None, "auto_disabled": True,
+            }
+            self.save_cache(current, failure, user_id)
+            if self.cache_path(current, user_id) != self.cache_path(current):
+                self.save_cache(current, failure)
+            await session.flush()
+        self.runtime.versions[row.id] = current.revision
+        # The caller is outside the SDK owner task. Stop only the failed revision;
+        # an administrator may already be testing a newer configuration.
+        await self.runtime.stop_server(row.id, revision=row.revision)
+
+    def mark_refreshing(self, row, user_id=None):
+        if row.mode != "disabled" and self.runtime.versions.get(row.id, row.revision) == row.revision:
+            self.save_cache(row, {"tools": [], "resources": [], "prompts": [], "templates": [],
+                                 "cache_status": "refreshing", "cache_attempt_at": now().isoformat()})
+
+    async def connection_starting(self, spec):
+        if spec.id.startswith("diagnose-"):
+            return
+        row = await self.get(spec.id)
+        if row.revision != spec.revision or row.mode == "disabled":
+            raise GatewayError("revision_changed", "MCP configuration changed before startup")
+        user_id = spec.credential_owner if spec.credential_owner not in {"", "service"} else None
+        self.mark_refreshing(row, user_id)
+
+    async def start_failed(self, spec, exc):
+        if spec.id.startswith("diagnose-"):
+            return
+        try:
+            row = await self.get(spec.id)
+        except HTTPException as missing:
+            if missing.status_code == 404:
+                return
+            raise
+        if row.revision == spec.revision:
+            user_id = spec.credential_owner if spec.credential_owner not in {"", "service"} else None
+            await self.discovery_failed(row, exc, user_id, spec=spec)
 
     async def store_discovery(self, row, result, user_id=None, *, spec=None):
         current = await self.get(row.id)
@@ -206,12 +274,6 @@ class Catalog:
             self.save_cache(row, {"tools": [], "resources": [], "prompts": [], "templates": [],
                                   "cache_status": "disabled"})
             return
-        # REST capabilities are already local. OAuth still requires credentials for calls.
-        if row.transport == "rest":
-            from .transports import RestConnection
-            await self.store_discovery(row, await RestConnection(self.unseal(row.config), None).discover(), user_id)
-            if row.mode != "eager":
-                return
         try:
             if row.isolation == "session":
                 await self.refresh(row.id, user_id, authorize=authorize)
@@ -223,6 +285,8 @@ class Catalog:
             pass
 
     async def spec(self, row, user_id=None):
+        if row.mode == "disabled":
+            raise GatewayError("disabled", "MCP is disabled; repair configuration or authorization, then enable it")
         config = self.unseal(row.config)
         credential_scope = ""
         credential_owner = ""
@@ -287,7 +351,7 @@ class Catalog:
         except IntegrityError:
             raise HTTPException(409, "MCP slug already exists")
         await self.refresh_after_change(row, user_id, authorize)
-        return row
+        return await self.get(row.id)
 
     async def update(self, server_id, values, *, authorize=None, user_id=None):
         async with self.locks.setdefault(server_id, asyncio.Lock()):
@@ -317,14 +381,11 @@ class Catalog:
                             setattr(row, key, values[key])
                     row.transport, row.config, row.revision = transport, self.seal(config), row.revision + 1
                     await s.flush()
-                if config == self.unseal(old.config) and transport == old.transport:
-                    for source in self.cache_dir.glob(old.id + "-" + str(old.revision) + "-*.json"):
-                        target = self.cache_dir / source.name.replace(
-                            old.id + "-" + str(old.revision) + "-", row.id + "-" + str(row.revision) + "-", 1)
-                        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+                # Every new revision must discover its own capabilities before publication.
                 self.runtime.versions[server_id] = row.revision
                 self.runtime.holds.discard(server_id)
                 await self.refresh_after_change(row, user_id, authorize)
+                row = await self.get(row.id)
                 for target in await self.refresh_targets(server_id):
                     if target["user_id"] and target["user_id"] != user_id:
                         async def owner_authorize(target=target):
@@ -398,7 +459,8 @@ class Catalog:
         if authorize:
             await authorize()
         row = await self.get(server_id)
-        lease = None
+        lease, spec = None, None
+        self.mark_refreshing(row, user_id)
         try:
             spec = await self.spec(row, user_id)
             if authorize:
@@ -407,14 +469,14 @@ class Catalog:
             result = await self.runtime.perform(spec, lease.id, "discover", authorize=authorize, business=False)
             return await self.store_discovery(row, result, user_id, spec=spec)
         except Exception as exc:
-            self.cache_failure(row, exc, user_id)
+            await self.discovery_failed(row, exc, user_id, spec=spec)
             raise
         finally:
             if lease:
                 await self.runtime.release(lease.id)
 
     async def warm(self, server_id, user_id=None, *, explicit=False, authorize=None, expected_revision=None):
-        row, lease, success = None, None, False
+        row, lease, spec, success = None, None, None, False
         try:
             if authorize:
                 await authorize()
@@ -423,6 +485,7 @@ class Catalog:
                 return
             if explicit:
                 self.runtime.holds.discard(server_id)
+            self.mark_refreshing(row, user_id)
             spec = await self.spec(row, user_id)
             lease = self.runtime.create_lease(user_id or "system", "maintenance", kind="maintenance")
             result = await self.runtime.perform(spec, lease.id, "discover", authorize=authorize, business=False)
@@ -430,7 +493,7 @@ class Catalog:
             success = True
         except Exception as exc:
             if row:
-                self.cache_failure(row, exc, user_id)
+                await self.discovery_failed(row, exc, user_id, spec=spec)
             await self.logs.audit("mcp.start.failed", user_id, {"server_id": server_id, "error": str(exc)})
             raise
         finally:
@@ -493,7 +556,7 @@ class Catalog:
             raise
         except Exception as exc:
             if getattr(exc, "code", "") in {"startup_failed", "startup_timeout", "auth_required", "connection_error"}:
-                self.cache_failure(row, exc, user.id if user else None)
+                await self.discovery_failed(row, exc, user.id if user else None)
             event.update(status="outcome_unknown" if getattr(exc, "code", "") == "outcome_unknown"
                          else "gateway_error", error=str(exc)[:2000])
             raise

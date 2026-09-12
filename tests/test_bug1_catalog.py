@@ -56,6 +56,14 @@ async def test_admin_uses_own_personal_oauth_cache(tmp_path):
         row = await app.state.catalog.create({"name": "personal", "transport": "streamable-http",
             "config": {"url": "https://mcp.test", "auth": {"type": "oauth", "scope": "user",
                 "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"}}})
+        from mcp_manager.database import set_setting
+        await set_setting(app.state.db, app.state.oauth.key(row, actor["id"]),
+                          app.state.catalog.seal({"access_token": "valid"}))
+        @asynccontextmanager
+        async def connect(spec):
+            yield Connection()
+        app.state.runtime.connector = connect
+        row = await app.state.catalog.update(row.id, {"mode": "lazy"}, user_id=actor["id"])
         app.state.catalog.save_cache(row, {"tools": [{"name": "mine"}], "cache_at": "2026-09-12T00:00:00+00:00"}, actor["id"])
         app.state.catalog.save_cache(row, {"tools": [{"name": "other"}, {"name": "private"}]}, "other-user")
         item = (await web.get("/api/v1/mcps")).json()["items"][0]
@@ -64,15 +72,17 @@ async def test_admin_uses_own_personal_oauth_cache(tmp_path):
         assert item["auth_type"] == "oauth"
 
 
-async def test_auth_failure_is_status_and_successful_empty_discovery_clears_errors(tmp_path):
+async def test_auth_failure_disables_without_losing_authorization_reason(tmp_path):
     async with console(tmp_path) as (app, web, actor):
         row = await app.state.catalog.create({"name": "oauth", "transport": "streamable-http",
             "config": {"url": "https://mcp.test", "auth": {"type": "oauth",
                 "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"}}})
-        with pytest.raises(GatewayError, match="OAuth"):
+        assert row.mode == "disabled"
+        with pytest.raises(GatewayError, match="disabled"):
             await app.state.catalog.refresh(row.id)
         cached = app.state.catalog.cached(row)
-        assert cached["cache_status"] == "auth_required"
+        assert cached["cache_status"] == "error"
+        assert cached["auto_disabled"] is True
         assert cached["tools"] == []
         assert cached["cache_error_code"] == "auth_required"
 

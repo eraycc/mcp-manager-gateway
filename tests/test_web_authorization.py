@@ -32,7 +32,7 @@ async def web(tmp_path):
             c.headers["X-CSRF-Token"] = c.cookies["mcp_csrf"]
             row = await app.state.catalog.create({
                 "name": "Existing", "slug": "existing", "transport": "stdio",
-                "config": {"command": "must-never-be-launched"}, "mode": "lazy"})
+                "config": {"command": "must-never-be-launched"}, "mode": "disabled"})
             yield app, c, actor, row
     finally:
         finished.set()

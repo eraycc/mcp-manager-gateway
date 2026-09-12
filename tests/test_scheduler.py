@@ -1,6 +1,6 @@
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
-from mcp_manager.database import User, set_setting
+from mcp_manager.database import McpServer, User, set_setting
 
 
 async def test_schedule_expands_personal_oauth_only_for_authorized_owners(tmp_path):
@@ -11,6 +11,9 @@ async def test_schedule_expands_personal_oauth_only_for_authorized_owners(tmp_pa
         personal = await app.state.catalog.create({"name": "personal", "transport": "rest", "config": config})
         public = await app.state.catalog.create({"name": "public", "transport": "stdio", "config": {"command": "fake"}})
         async with app.state.db.locked() as session:
+            # Seed enabled rows: this test exercises owner selection, not discovery.
+            (await session.get(McpServer, personal.id)).mode = "lazy"
+            (await session.get(McpServer, public.id)).mode = "lazy"
             session.add(User(id="allowed", username="allowed", password_hash="x", mcp_ids=[personal.id]))
             session.add(User(id="revoked", username="revoked", password_hash="x", mcp_ids=[]))
         for user_id in ("allowed", "revoked"):

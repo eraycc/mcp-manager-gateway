@@ -7,7 +7,7 @@ from .catalog import web_authorizer
 from .database import McpServer, SystemSetting, get_setting
 from .identity import admin_user, current_user, effective_mcp_ids
 from .imports import deduplicate, normalize_import, scan_sources
-from .runtime import ServerSpec
+from .runtime import GatewayError, ServerSpec
 from .transports import validate_config
 
 router = APIRouter(prefix="/api/v1")
@@ -167,7 +167,11 @@ async def batch(data: dict, request: Request, user=ADMIN):
             return await stop(server_id, request, actor)
         row = await cat.update(server_id, {"mode": {"enable": "eager", "disable": "disabled", "lazy": "lazy"}[action]},
                                authorize=web_authorizer(request), user_id=user.id)
-        return cat.public(row, user_id=user.id)
+        result = cat.public(row, user_id=user.id)
+        if action in {"enable", "lazy"} and result["cache_status"] in {"error", "auth_required"}:
+            raise GatewayError(result["cache_error_code"] or "discovery_failed",
+                               result["cache_error"] or "MCP discovery failed")
+        return result
     return request.app.state.jobs.submit("mcp." + action, ids, operation, user.id)
 
 

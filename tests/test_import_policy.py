@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from mcp_manager.environment import connection_config
@@ -27,9 +28,10 @@ def test_expanded_environment_values_are_literal_not_recursive(monkeypatch):
 
 
 async def test_rest_tool_policy_hides_and_blocks_disallowed_tools():
-    connection = RestConnection({"tools": [{"name": "delete", "request": {"url": "https://example.com"}},
-                                         {"name": "read", "request": {"url": "https://example.com"}}],
-                                 "disabled_tools": ["delete"]}, None)
-    assert [t["name"] for t in (await connection.discover())["tools"]] == ["read"]
-    with pytest.raises(GatewayError, match="disabled"):
-        await connection.call("delete", {})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200))) as client:
+        connection = RestConnection({"tools": [{"name": "delete", "request": {"url": "https://example.com"}},
+                                             {"name": "read", "request": {"url": "https://example.com"}}],
+                                     "disabled_tools": ["delete"]}, client)
+        assert [t["name"] for t in (await connection.discover())["tools"]] == ["read"]
+        with pytest.raises(GatewayError, match="disabled"):
+            await connection.call("delete", {})

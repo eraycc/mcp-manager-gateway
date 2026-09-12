@@ -15,6 +15,8 @@ async def auth_app(tmp_path):
     app = create_app(Settings(data_dir=tmp_path, secret_key="auth-bug1"))
     del app.state.protocol  # API-only fixture avoids crossing AnyIO scopes between pytest tasks.
     async with app.router.lifespan_context(app):
+        from rest_fixture import rest_connect
+        app.state.runtime.connector = rest_connect
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as web:
             user = await signup(web, "admin")
             await login(web, "admin")
@@ -64,6 +66,7 @@ async def test_oauth_status_and_service_refresh_without_user(auth_app, monkeypat
     credentials = await app.state.oauth.credentials(row, None)
     assert credentials["access_token"] == "new"
     assert app.state.runtime.credential_versions[(row.id, "service")] == hashlib.sha256(b"new").hexdigest()[:16]
+    row = await app.state.catalog.update(row.id, {"mode": "lazy"})
     spec = await app.state.catalog.spec(row, None)
     assert spec.credential_owner == "service"
     await app.state.catalog.warm(row.id)
@@ -85,6 +88,9 @@ async def test_oauth_callback_redirects_after_authorization_when_discovery_fails
         "auth": {"type": "oauth", "scope": "user", "authorization_url": "https://auth.test/authorize",
                  "token_url": "https://auth.test/token"},
         "tools": [{"name": "read", "request": {"url": "https://api.test/read"}}]}})
+    from mcp_manager.database import McpServer
+    async with app.state.db.locked() as session:
+        (await session.get(McpServer, row.id)).mode = "lazy"
     started = (await web.post("/api/v1/mcps/" + row.id + "/oauth/start")).json()
     nonce = parse_qs(urlsplit(started["authorization_url"]).query)["state"][0]
     async def exchange(auth, data):
