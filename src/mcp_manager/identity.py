@@ -10,11 +10,13 @@ import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from .database import ApiToken, AuthSession, Database, McpServer, SystemSetting, User, get_setting, now, uid
+from .token_secrets import decrypt_token_secret, encrypt_token_secret
 
 router = APIRouter(prefix="/api/v1")
 hasher = PasswordHasher()
@@ -28,9 +30,12 @@ def expired(value):
 
 def public(obj):
     result = {c.name: getattr(obj, c.name) for c in obj.__table__.columns
-              if c.name not in {"password_hash", "token_hash", "auth_version"}}
-    return {key: value.replace(tzinfo=UTC) if isinstance(value, datetime) and value.tzinfo is None else value
-            for key, value in result.items()}
+              if c.name not in {"password_hash", "token_hash", "token_secret", "auth_version"}}
+    result = {key: value.replace(tzinfo=UTC) if isinstance(value, datetime) and value.tzinfo is None else value
+              for key, value in result.items()}
+    if isinstance(obj, ApiToken):
+        result["secret_available"] = bool(obj.token_secret)
+    return result
 
 
 def origin_check(request):
@@ -467,15 +472,40 @@ async def owned_token(s, token_id, user):
 
 @router.get("/tokens")
 async def tokens(request: Request, q: str = "", page: int = 1, page_size: int = 20,
-                 disabled: bool | None = None, user=CURRENT_USER):
-    statement = select(ApiToken)
-    if user.role != "admin":
+                 disabled: bool | None = None, view: Literal["mine", "all"] = "mine",
+                 username: str = "", user_id: str | None = None, user=CURRENT_USER):
+    if page < 1 or not 1 <= page_size <= 200:
+        raise HTTPException(422, "page >= 1 and page_size between 1 and 200 required")
+    statement = select(ApiToken, User.username).join(User, User.id == ApiToken.user_id)
+    if view == "all":
+        if user.role != "admin":
+            raise HTTPException(403, "Administrator required for all token owners")
+        if user_id:
+            statement = statement.where(ApiToken.user_id == user_id)
+        if username:
+            statement = statement.where(func.lower(User.username).contains(username.lower(), autoescape=True))
+    else:
+        if username or user_id:
+            raise HTTPException(422, "Owner filters require view=all")
         statement = statement.where(ApiToken.user_id == user.id)
     if q:
         statement = statement.where(ApiToken.name.contains(q, autoescape=True))
     if disabled is not None:
         statement = statement.where(ApiToken.disabled == disabled)
-    result = await page_query(request.app.state.db, statement, ApiToken, page, page_size)
+    db = request.app.state.db
+    async with db.session() as session:
+        total = await session.scalar(select(func.count()).select_from(statement.subquery()))
+        rows = (await session.execute(
+            statement.order_by(ApiToken.created_at.desc(), ApiToken.id)
+            .offset((page - 1) * page_size).limit(page_size)
+        )).all()
+    result = {
+        "items": [public(token) | {"username": owner_name} for token, owner_name in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": math.ceil(total / page_size),
+    }
     logs = getattr(request.app.state, "logs", None)
     counts = await logs.token_counts([x["id"] for x in result["items"]]) if logs else {}
     for item in result["items"]:
@@ -484,7 +514,7 @@ async def tokens(request: Request, q: str = "", page: int = 1, page_size: int = 
 
 
 @router.post("/tokens")
-async def create_token(data: TokenCreate, request: Request, user=CURRENT_USER):
+async def create_token(data: TokenCreate, request: Request, response: Response, user=CURRENT_USER):
     db = request.app.state.db
     async with db.locked() as s:
         user = await revalidate_user(request, s)
@@ -497,9 +527,11 @@ async def create_token(data: TokenCreate, request: Request, user=CURRENT_USER):
         await scope_check(db, owner, data.scope_mode, data.mcp_ids)
         secret, digest, prefix = mint_token()
         token = ApiToken(**data.model_dump(exclude={"user_id"}), user_id=owner_id,
-                         token_hash=digest, prefix=prefix)
+                         token_hash=digest, token_secret=encrypt_token_secret(request.app.state.config, secret),
+                         prefix=prefix)
         s.add(token)
         await s.flush()
+        response.headers["Cache-Control"] = "no-store"
         return dict(public(token), token=secret)
 
 
@@ -509,6 +541,29 @@ async def revoke_token_leases(request, token_id):
         await state.runtime.revoke(token_id=token_id)
     if hasattr(state, "gateway"):
         await state.gateway.revoke(token_id=token_id)
+
+
+@router.get("/tokens/{token_id}/secret")
+async def reveal_token_secret(token_id: str, request: Request, response: Response, user=CURRENT_USER):
+    async with request.app.state.db.locked() as session:
+        user = await revalidate_user(request, session)
+        token = await owned_token(session, token_id, user)
+        secret = decrypt_token_secret(request.app.state.config, token.token_secret) if token.token_secret else None
+        owner_id = token.user_id
+    if secret is None:
+        return JSONResponse(
+            {
+                "detail": "This legacy token secret cannot be recovered; rotate it once.",
+                "code": "token_secret_unavailable",
+            },
+            status_code=409,
+            headers={"Cache-Control": "no-store"},
+        )
+    logs = getattr(request.app.state, "logs", None)
+    if logs:
+        await logs.audit("token.secret.reveal", user.id, {"token_id": token_id, "owner_id": owner_id})
+    response.headers["Cache-Control"] = "no-store"
+    return {"token": secret}
 
 
 @router.patch("/tokens/{token_id}")
@@ -545,11 +600,13 @@ async def delete_token(token_id: str, request: Request, user=CURRENT_USER):
 
 
 @router.post("/tokens/{token_id}/rotate")
-async def rotate_token(token_id: str, request: Request, user=CURRENT_USER):
+async def rotate_token(token_id: str, request: Request, response: Response, user=CURRENT_USER):
     async with request.app.state.db.locked() as s:
         user = await revalidate_user(request, s)
         token = await owned_token(s, token_id, user)
         secret, token.token_hash, token.prefix = mint_token()
+        token.token_secret = encrypt_token_secret(request.app.state.config, secret)
         result = dict(public(token), token=secret)
     await revoke_token_leases(request, token_id)
+    response.headers["Cache-Control"] = "no-store"
     return result

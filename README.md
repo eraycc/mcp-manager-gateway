@@ -35,9 +35,9 @@ mcp-manager serve --port 8766
 ## 使用顺序
 
 1. 管理员添加 MCP。支持 stdio、Streamable HTTP、旧 SSE、REST 转 MCP；http 是 Streamable HTTP 的导入别名。
-2. 添加或修改启用中的 MCP 后自动发现工具；连接启动时再次更新缓存。lazy 的维护发现完成后释放实例。启动、连接或发现失败（包括 OAuth 未授权、过期）会自动将运行策略设为 disabled，移除可用工具目录并保留失败原因。配置仍会保存，便于修复；修复后管理员可点击启动、刷新自动禁用的服务，或重新设置 lazy/eager，读取最新工具成功才恢复可用目录。自动禁用后的重试恢复此前策略；旧记录未保存此前策略时默认 lazy。手动禁用的服务仅在显式启动或设置启用策略后恢复，刷新不会自行启用。已禁用的 OAuth 服务仍可完成授权，但授权不会自动启用服务。REST 刷新会先探测 HTTP 连接，不能仅凭本地定义生成可用缓存。
+2. 添加或修改启用中的 MCP 后自动发现工具；连接启动时再次更新缓存。lazy 的维护发现完成后释放实例。非 OAuth 服务的启动、连接或发现失败会自动将运行策略设为 disabled，移除可用工具目录并保留失败原因。OAuth 未授权、过期或发现失败只清除当前用户的目录和实例，保留服务运行策略，不影响其他用户。配置仍会保存，便于修复；修复后管理员可点击启动、刷新自动禁用的服务，或重新设置 lazy/eager，读取最新工具成功才恢复可用目录。自动禁用后的重试恢复此前策略；旧记录未保存此前策略时默认 lazy。手动禁用的服务仅在显式启动或设置启用策略后恢复，刷新不会自行启用。已禁用的 OAuth 服务仍可完成授权，但授权不会自动启用服务。REST 刷新会先探测 HTTP 连接，不能仅凭本地定义生成可用缓存。
 3. 给普通用户分配可用 MCP；用户只能在自己的授权范围创建 Token。
-4. 在 Token 页面创建凭据，保存只显示一次的完整 Token，然后配置客户端。
+4. 在访问令牌页面创建凭据并配置客户端。令牌值加密保存，可在列表复制或编辑时查看。旧版本仅保存哈希的令牌无法还原，轮换一次后即可回显和复制。普通用户只管理自己的令牌；管理员默认查看自己的令牌，可切换全部用户并按用户名筛选。
 5. 实际调用才启动按需服务。查询工具目录不会启动下游进程。
 
 REST 默认向工具地址发送 HEAD 请求检查连接，HTTP 405 表示该路由不支持 HEAD，视为连通；连接失败、鉴权失败、404 或服务器错误会使发现失败。可在表单中填写健康检查 URL（配置字段 `healthcheck_url`），改用 GET 检查固定健康端点并要求 2xx；工具 URL 含参数时必须配置该地址。此检查不执行 POST、PUT、DELETE 等业务工具，也不代替具体工具的功能测试。
@@ -54,7 +54,19 @@ REST 默认向工具地址发送 HEAD 请求检查连接，HTTP 405 表示该路
 Authorization: Bearer mcpm_你的Token
 ```
 
-默认直接列出该 Token 有权使用的全部缓存工具；Token 可切换发现模式，提供 gateway_search、gateway_inspect 和 gateway_call。
+原生工具目录直接列出该 Token 有权使用的全部缓存工具。按需发现提供两个索引工具和一个执行工具：
+
+| 工具 | 用途 |
+| --- | --- |
+| `gateway_search_mcps(query)` | 搜索服务名称、描述、标签和工具名；空或 `*` 列出全部授权 MCP 摘要。每项含仅由原始工具名字符串组成的 `tools_list`，不包含工具定义 |
+| `gateway_search_tools(mcp, tool)` | 搜索工具并返回完整原始 inputSchema、描述、归属、精确 gateway_name、示例或参数模板 |
+| `gateway_call(name, arguments)` | 按精确 gateway_name 调用，arguments 必须符合发现结果中的原始 Schema |
+
+`mcp` 推荐使用返回的服务 ID，也支持名称和 slug。指定 mcp、tool 留空会列出该服务全部工具；mcp 留空或为 `*` 时跨服务搜索；两个参数都留空或为 `*` 时列举全部授权 MCP 和工具。超过页大小时跟随 `next_cursor`，保持查询不变。每页条目还有 1 MiB 的累计 JSON 字节预算，完整 Schema 不拆分；单个条目超过此预算时返回 `catalog_entry_too_large`。错误参数会返回字段路径和修正提示，实际执行不会通过模糊匹配选择工具。
+
+管理员可在「系统设置 → 工具检索」配置 OpenAI 兼容 embedding 接口、模型、密钥、超时与最低相似度，并测试已保存的连接。例如接口 `https://api.siliconflow.cn`、模型 `BAAI/bge-m3`；也可接本地模型。裸地址自动补全 `/v1/embeddings`，支持 `/v1` 或完整 embeddings 地址。
+
+精确名称优先，其他查询融合字段关键词、拼写模糊匹配和真实向量相似度。向量默认关闭；启用后模型故障会明确回退关键词模式。最低相似度默认 `0.5`；已有管理员自定义值保持不变，并应结合所选模型和实际查询评估。单次超过 1,000 个候选时语义阶段返回 `input_too_large` 并回退关键词，完整目录分页仍可用。文档向量和查询向量均缓存，并按接口、模型、授权身份和内容隔离，使同一查询的分页评分保持稳定；仅向模型发送描述性元数据与检索语句，不发送连接凭据或实际调用参数。重排序模型使用独立的 rerank 协议，不能填入 embedding 模型栏。
 
 关闭 Token 鉴权只影响 MCP 调用，Web 管理仍需登录。匿名范围由管理员单独设置，默认不公开任何服务。请求提供了无效 Token 时，不会退回匿名权限。
 
@@ -120,9 +132,11 @@ Windows 使用 MCP SDK 的 Job Object 清理子进程树；Linux 使用独立进
 
 ## OAuth
 
-在 MCP 认证配置中选择 oauth，填写 authorization_url、token_url、client_id、client_secret（可选）、scopes 和 scope（user/service）。其中 `scopes` 是 OAuth 权限列表（例如 `mcp:read`），`scope` 仅决定网关凭据归属（`user` / `service`），两者互不覆盖。支持授权码、PKCE、一次性 state、Token 刷新及 client_secret_post/client_secret_basic。
+在 MCP 认证配置中选择 oauth，填写 authorization_url、token_url、client_id、client_secret（可选）和 scopes。`scopes` 是 OAuth 权限列表（例如 `mcp:read`）；网关的 `scope` 固定为 `user`，每位用户独立授权。支持授权码、PKCE、一次性 state、Token 刷新及 client_secret_post/client_secret_basic。
 
-回调地址为 PUBLIC_URL/api/v1/oauth/callback。个人用户在个人中心授权自己的服务；共享服务 OAuth 由管理员授权。凭据加密保存，撤销、配置变化和刷新并发会重新验证。
+回调地址为 PUBLIC_URL/api/v1/oauth/callback。用户在个人中心或 MCP 服务授权入口完成自己的授权；访问令牌调用时使用令牌所属用户的 OAuth 凭据。凭据、能力目录和运行实例按用户隔离。旧配置中省略 scope 或设置 service 的 OAuth 也按用户隔离运行，旧共享凭据不会复用，各用户需重新授权。断开或授权失效仅影响本人。
+
+调用日志默认对管理员展示全部用户，可按用户名或用户 ID 搜索筛选；普通用户的列表、详情和导出始终限于本人。
 
 ## 数据和迁移
 
@@ -144,6 +158,7 @@ MySQL 数据库需要提前创建；系统自动执行表结构升级。SQLite �
 | ~/.mcp-manager/mcp-manager.sqlite | 默认系统数据库 |
 | ~/.mcp-manager/secret.key | JWT 与配置加密的根密钥 |
 | ~/.mcp-manager/cache/ | 按配置版本、身份隔离的能力缓存 |
+| ~/.mcp-manager/indexes/embeddings.jsonl | 模型、授权作用域与文档内容隔离的向量缓存 |
 | ~/.mcp-manager/jobs/ | 可恢复查看的任务状态，不自动重放中断任务 |
 | ~/.mcp-manager/logs/YYYY-MM-DD.jsonl | 调用日志原文 |
 | ~/.mcp-manager/logs/audit/ | 管理审计 |

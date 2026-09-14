@@ -11,3 +11,4 @@ docs/
 *.egg-info/
 .git/
 example/
+.code-review-graph/

@@ -12,7 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from filelock import FileLock, Timeout
 from jsonschema import ValidationError
 
-from . import catalog_api, identity, operations_api
+from . import catalog_api, embedding_api, identity, operations_api
+from .embeddings import EmbeddingIndex
 from .catalog import Catalog
 from .config import PACKAGE_ROOT, Settings
 from .database import ApiToken, Database, User, get_setting, now
@@ -115,6 +116,7 @@ def create_app(config=None):
         state.runtime = Runtime(connect)
         state.jobs = Jobs(config.data_dir)
         state.catalog = Catalog(state.db, state.runtime, state.logs, config)
+        state.embeddings = EmbeddingIndex(config.data_dir)
         state.oauth = OAuth(state.catalog)
         state.catalog.oauth = state.oauth
         state.runtime.on_starting = state.catalog.connection_starting
@@ -185,7 +187,7 @@ def create_app(config=None):
     async def ready():
         return JSONResponse({"ready": app.state.ready}, status_code=200 if app.state.ready else 503)
 
-    for router in (identity.router, catalog_api.router, operations_api.router, oauth_router):
+    for router in (identity.router, catalog_api.router, operations_api.router, oauth_router, embedding_api.router):
         app.include_router(router)
     try:
         from .gateway import install_gateway

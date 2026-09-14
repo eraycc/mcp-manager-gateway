@@ -7,9 +7,9 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
-from weakref import WeakValueDictionary
 from pathlib import Path
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
@@ -17,10 +17,10 @@ from jsonschema import Draft202012Validator
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
-from .jsonl_store import JsonlStore
 from .database import ApiToken, McpServer, SystemSetting, User, now
 from .identity import public as public_model
 from .identity import revalidate_user
+from .jsonl_store import JsonlStore
 from .runtime import GatewayError, ServerSpec
 from .transports import validate_config
 
@@ -104,7 +104,13 @@ class Catalog:
         return {"sealed": self.fernet.encrypt(json.dumps(value, ensure_ascii=False).encode()).decode()}
 
     def unseal(self, value):
-        return json.loads(self.fernet.decrypt(value["sealed"])) if "sealed" in value else copy.deepcopy(value)
+        result = json.loads(self.fernet.decrypt(value["sealed"])) if "sealed" in value else copy.deepcopy(value)
+        # Legacy service credentials remain stored but are never used for OAuth.
+        # Every caller must authorize independently under their own identity.
+        if (isinstance(result, dict) and isinstance(result.get("auth"), dict)
+                and result["auth"].get("type") == "oauth"):
+            result["auth"]["scope"] = "user"
+        return result
 
     async def get(self, server_id):
         async with self.db.session() as s:
@@ -210,6 +216,16 @@ class Catalog:
         if spec and spec.credential_owner and self.runtime.credential_versions.get(
                 (spec.id, spec.credential_owner), spec.credential_scope) != spec.credential_scope:
             return
+        personal = self.unseal(row.config).get("auth", {}).get("type") == "oauth"
+        if personal:
+            async with self.db.locked() as session:
+                current = await session.get(McpServer, row.id)
+                if not current or current.revision != row.revision or current.mode == "disabled":
+                    return
+                self.cache_failure(current, exc, user_id)
+            if user_id:
+                await self.runtime.invalidate_credential(row.id, user_id)
+            return
         async with self.db.locked() as session:
             current = await session.get(McpServer, row.id)
             if not current or current.revision != row.revision or current.mode == "disabled":
@@ -314,10 +330,9 @@ class Catalog:
         credential_owner = ""
         isolation = row.isolation
         if config.get("auth", {}).get("type") == "oauth":
-            if config["auth"].get("scope") == "user":
-                if not user_id:
-                    raise GatewayError("auth_required", "Personal OAuth requires a signed-in user")
-                isolation = "user"
+            if not user_id or not self.oauth:
+                raise GatewayError("auth_required", "Personal OAuth requires a signed-in user")
+            isolation = "user"
             if self.oauth:
                 auth = await self.oauth.credentials(row, user_id)
                 # OAuth token responses use "scope" for provider permissions.

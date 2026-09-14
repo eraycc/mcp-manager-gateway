@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
+from jsonschema import ValidationError
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.transport_security import TransportSecuritySettings
@@ -15,19 +16,12 @@ from starlette.responses import JSONResponse
 
 from .catalog import alias
 from .database import ApiToken, User
+from .discovery import DISCOVERY, Discovery, result_json, validate_meta, validation_error
 from .identity import authenticate_token, expired
 from .runtime import GatewayError
 
 router = APIRouter(prefix="/gateway/v1")
-DISCOVERY = [
-    {"name": "gateway_search", "description": "Search authorized cached MCP tools without starting servers.",
-     "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "additionalProperties": False}},
-    {"name": "gateway_inspect", "description": "Read the full cached schema for a discovered tool.",
-     "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
-    {"name": "gateway_call", "description": "Call a discovered MCP tool by its exact gateway name.",
-     "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}},
-                     "required": ["name"]}},
-]
+
 
 
 def owner(user, token, request=None):
@@ -82,6 +76,7 @@ class Gateway:
         self.app = app
         self.sessions = {}
         self.retention = {}
+        self.discovery = Discovery(self)
 
     async def close_session(self, sid):
         bound = self.sessions.pop(sid, None)
@@ -184,8 +179,11 @@ class Gateway:
         return lease
 
     async def list_tools(self, ctx, params):
+        _, token, _ = await self.principal(ctx.request)
+        if token and token.discovery_mode == "discovery":
+            return types.ListToolsResult(tools=[types.Tool.model_validate(x) for x in DISCOVERY])
         user, token, rows, entries = await self.directory(ctx.request)
-        tools = DISCOVERY if token and token.discovery_mode == "discovery" else [e[2] for e in entries]
+        tools = [e[2] for e in entries]
         return types.ListToolsResult(tools=[types.Tool.model_validate(x) for x in tools])
 
     async def call_tool(self, ctx, params):
@@ -196,17 +194,22 @@ class Gateway:
             if not isinstance(exc, (GatewayError, ValueError, HTTPException, ValidationError)):
                 raise
             message = exc.message if isinstance(exc, ValidationError) else str(getattr(exc, "detail", exc))
+            error = {"code": getattr(exc, "code", "invalid_request"), "message": message}
+            if hasattr(exc, "details"):
+                return result_json({"error": error | exc.details}, error=True)
             return types.CallToolResult(isError=True,
-                content=[types.TextContent(type="text", text=message)],
-                structuredContent={"error": {"code": getattr(exc, "code", "invalid_request"), "message": message}})
+                content=[types.TextContent(type="text", text=message)], structuredContent={"error": error})
 
     async def _call_tool(self, ctx, params):
         request = ctx.request
         user, token, rows, entries = await self.directory(request)
         name, arguments = params.name, params.arguments or {}
         discovery = token and token.discovery_mode == "discovery"
+        if discovery and name in {"gateway_search_mcps", "gateway_search_tools"}:
+            return await self.discovery.search(name, arguments, request)
         if discovery and name == "gateway_search":
-            q = arguments.get("query", "").lower()
+            q = arguments.get("query", "").strip().lower()
+            q = "" if q == "*" else q
             matches = [{"name": e[2]["name"], "description": e[1].get("description", ""), "mcp": e[0].name}
                        for e in entries if q in (e[2]["name"] + " " + e[1].get("description", "")).lower()]
             return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(matches, ensure_ascii=False))])
@@ -218,7 +221,8 @@ class Gateway:
         if discovery:
             if name != "gateway_call":
                 raise ValueError("Use gateway_call in discovery mode")
-            name, arguments = arguments.get("name"), arguments.get("arguments", {})
+            arguments = validate_meta("gateway_call", arguments)
+            name, arguments = arguments["name"], arguments["arguments"]
         entry = next((e for e in entries if e[2]["name"] == name), None)
         if not entry:
             raise ValueError("Tool not found in authorized cache; ask an administrator to refresh")
@@ -230,8 +234,13 @@ class Gateway:
             if row.id not in allowed or fresh.revision != row.revision:
                 raise GatewayError("permission_revoked", "MCP permission or configuration changed")
 
-        result = await self.app.state.catalog.call(row, self.lease(request, user, token), tool["name"],
-                                                   arguments, user=user, token=token, authorize=authorize)
+        try:
+            result = await self.app.state.catalog.call(row, self.lease(request, user, token), tool["name"],
+                                                       arguments, user=user, token=token, authorize=authorize)
+        except ValidationError as exc:
+            if discovery:
+                raise validation_error(exc, name=name) from None
+            raise
         return types.CallToolResult.model_validate(result)
 
     async def list_resources(self, ctx, params):

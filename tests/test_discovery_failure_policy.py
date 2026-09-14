@@ -219,7 +219,7 @@ async def test_failure_is_persisted_across_restart(tmp_path):
         assert await restarted.state.catalog.refresh_targets() == []
 
 
-async def test_expired_oauth_discovery_disables_and_preserves_reason(tmp_path):
+async def test_expired_oauth_discovery_preserves_service_policy_and_reason(tmp_path):
     from mcp_manager.database import set_setting
     async with console(tmp_path) as (app, web, actor):
         row = await app.state.catalog.create({"name": "oauth", "mode": "disabled",
@@ -230,7 +230,7 @@ async def test_expired_oauth_discovery_disables_and_preserves_reason(tmp_path):
             {"access_token": "expired", "expires_at": 0}))
         response = await web.patch("/api/v1/mcps/" + row.id, json={"mode": "eager"})
         saved = response.json()
-        assert saved["mode"] == "disabled"
+        assert saved["mode"] == "eager"
         assert saved["cache_error_code"] == "auth_required"
         assert "expired" in saved["cache_error"]
         assert saved["tool_count"] == 0
@@ -313,16 +313,18 @@ async def test_nested_transport_failure_preserves_specific_reason(tmp_path):
         assert "remote port refused connection" in app.state.catalog.cached(row)["cache_error"]
 
 
-async def test_global_disable_reason_is_visible_outside_failed_oauth_owner(tmp_path):
+async def test_personal_auth_failure_is_visible_only_to_its_owner(tmp_path):
     async with console(tmp_path) as (app, web, actor):
         response = await web.post("/api/v1/mcps", json={"name": "personal", "transport": "streamable-http",
             "config": {"url": "https://mcp.test", "auth": {"type": "oauth", "scope": "user",
             "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"}}})
         row = await app.state.catalog.get(response.json()["id"])
-        assert row.mode == "disabled"
-        for observer in (actor["id"], "another-admin", None):
+        assert row.mode == "lazy"
+        owner_cache = app.state.catalog.cached(row, actor["id"])
+        assert owner_cache["cache_status"] == "auth_required"
+        assert owner_cache["cache_error_code"] == "auth_required"
+        for observer in ("another-admin", None):
             cache = app.state.catalog.cached(row, observer)
             assert cache["tools"] == []
-            assert cache["cache_status"] == "error"
-            assert cache["cache_error_code"] == "auth_required"
-            assert cache["auto_disabled"] is True
+            assert cache["cache_status"] == "empty"
+            assert cache["cache_error_code"] is None

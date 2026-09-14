@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-manager-gateway"
-version = "0.1.4"
+version = "0.1.5"
 description = "Multi-user MCP management and lazy proxy gateway"
 license = { file = "LICENSE" }
 license-files = ["LICENSE"]

@@ -10,3 +10,4 @@ dist
 .env
 docs/
 example/
+.code-review-graph/

@@ -67,7 +67,7 @@ async def test_frontend_workflows_and_mobile(running_gateway, monkeypatch):  # n
         await page.get_by_label("令牌名称", exact=True).fill("Browser token")
         await page.get_by_label("服务范围", exact=True).select_option("all")
         await page.get_by_role("button", name="保存", exact=True).click()
-        await expect(page.get_by_role("heading", name="请立即保存访问令牌", exact=True)).to_be_visible()
+        await expect(page.get_by_role("dialog", name="访问令牌", exact=True)).to_be_visible()
         assert (await page.locator(".secret").inner_text()).startswith("mcpm_")
         await page.get_by_role("dialog").get_by_role("button", name="关闭").click()
         await expect(page.get_by_role("row").filter(has_text="Browser token")).to_be_visible()

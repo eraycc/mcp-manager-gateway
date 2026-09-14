@@ -149,6 +149,10 @@ class LogStore:
             if filters.get(key) is not None and filters[key] != "":
                 sql.append(key + " = ?")
                 values.append(filters[key])
+        if filters.get("username"):
+            username = str(filters["username"]).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            sql.append("LOWER(COALESCE(username,'')) LIKE LOWER(?) ESCAPE '\\'")
+            values.append("%" + username + "%")
         if filters.get("q"):
             sql.append("(COALESCE(username,'') || ' ' || COALESCE(token_name,'') || ' ' || "
                        "COALESCE(mcp_name,'') || ' ' || COALESCE(tool_name,'') LIKE ?)")

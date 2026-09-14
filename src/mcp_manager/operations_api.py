@@ -20,7 +20,8 @@ DEFAULTS = {"title": "MCP Manager", "registration_enabled": True, "jwt_days": 30
             "token_auth_enabled": True, "anonymous_scope_mode": "selected", "anonymous_mcp_ids": [],
             "idle_seconds": 86400, "refresh_enabled": False, "refresh_cron": "0 3 * * *",
             "timezone": "Asia/Shanghai", "log_retention_days": 0, "cors_origins": ["*"]}
-FILTERS = {"q", "user_id", "token_id", "mcp_id", "tool_name", "status", "source", "from_time", "to_time"}
+FILTERS = {"q", "username", "user_id", "token_id", "mcp_id", "tool_name", "status", "source",
+           "from_time", "to_time"}
 
 
 def log_filters(request, user, values=None):

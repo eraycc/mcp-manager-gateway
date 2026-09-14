@@ -51,27 +51,27 @@ async def test_anonymous_lease_requires_independent_client_secret(auth_app):
     assert (await web.post(endpoint, headers={"X-MCP-Manager-Client": lease["client_secret"]})).status_code == 200
 
 
-async def test_oauth_status_and_service_refresh_without_user(auth_app, monkeypatch):
-    app, web, _ = auth_app
+async def test_oauth_status_and_personal_refresh(auth_app, monkeypatch):
+    app, web, user = auth_app
     row = await app.state.catalog.create({"name": "OAuth", "transport": "rest", "config": {
-        "auth": {"type": "oauth", "scope": "service", "authorization_url": "https://auth.test/authorize",
+        "auth": {"type": "oauth", "scope": "user", "authorization_url": "https://auth.test/authorize",
                  "token_url": "https://auth.test/token"}, "tools": [{"name": "read", "request": {"url": "https://api.test/read"}}]}})
     endpoint = "/api/v1/mcps/" + row.id + "/oauth/status"
     assert (await web.get(endpoint)).json()["authorized"] is False
-    await set_setting(app.state.db, app.state.oauth.key(row, None), app.state.catalog.seal(
+    await set_setting(app.state.db, app.state.oauth.key(row, user["id"]), app.state.catalog.seal(
         {"access_token": "old", "refresh_token": "refresh", "expires_at": 0}))
     async def exchange(auth, data):
         return {"access_token": "new", "expires_at": time.time() + 3600}
     monkeypatch.setattr(app.state.oauth, "exchange", exchange)
-    credentials = await app.state.oauth.credentials(row, None)
+    credentials = await app.state.oauth.credentials(row, user["id"])
     assert credentials["access_token"] == "new"
-    assert app.state.runtime.credential_versions[(row.id, "service")] == hashlib.sha256(b"new").hexdigest()[:16]
-    row = await app.state.catalog.update(row.id, {"mode": "lazy"})
-    spec = await app.state.catalog.spec(row, None)
-    assert spec.credential_owner == "service"
-    await app.state.catalog.warm(row.id)
+    assert app.state.runtime.credential_versions[(row.id, user["id"])] == hashlib.sha256(b"new").hexdigest()[:16]
+    row = await app.state.catalog.update(row.id, {"mode": "lazy"}, user_id=user["id"])
+    spec = await app.state.catalog.spec(row, user["id"])
+    assert spec.credential_owner == user["id"]
+    await app.state.catalog.warm(row.id, user["id"])
     target = next(target for target in await app.state.catalog.refresh_targets() if target["server_id"] == row.id)
-    assert target["user_id"] is None
+    assert target["user_id"] == user["id"]
     await app.state.catalog.refresh_target(target)
     assert (await web.get(endpoint)).json()["authorized"] is True
     await web.post("/api/v1/mcps/" + row.id + "/oauth/disconnect")

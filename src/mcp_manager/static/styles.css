@@ -67,5 +67,10 @@ html,body,#app{min-height:100vh}html:has(body.dark){background:#101726}.shell{mi
 .about-links{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;max-width:640px;margin-top:20px}
 .about-link{display:flex;align-items:center;min-height:48px;padding:12px 16px;border:1px solid var(--line);border-radius:8px;background:var(--panel);transition:background .15s}
 .about-link:hover{background:var(--hover)}
-.settings-form:has(#settings_tab-panel-about:not([hidden])) .settings-save{display:none}
+.settings-form:has(#settings_tab-panel-about:not([hidden])) .settings-save,.settings-form:has(#settings_tab-panel-embedding:not([hidden])) .settings-save{display:none}
 @media(max-width:720px){.settings-grid,.settings-row{grid-template-columns:minmax(0,1fr)}.about-links{grid-template-columns:minmax(0,1fr)}.about-version{width:100%}.session-actions{width:100%}.session-actions button{flex:1}}
+
+.settings-form>div,#settings_tab-panel-embedding,.settings-grid>label{min-width:0}
+#settings_tab-panel-embedding small,#settings_tab-panel-embedding .notice{overflow-wrap:anywhere}
+.toolbar>label.filter-submit-field{display:grid;grid-template-rows:auto auto;align-content:start}
+.toolbar>label.filter-submit-field>.field-label{min-height:1.55em;line-height:1.55}

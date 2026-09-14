@@ -46,6 +46,7 @@ class ApiToken(Base):
     name: Mapped[str] = mapped_column(String(128))
     prefix: Mapped[str] = mapped_column(String(24))
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    token_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
     disabled: Mapped[bool] = mapped_column(Boolean, default=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     scope_mode: Mapped[str] = mapped_column(String(16), default="selected")

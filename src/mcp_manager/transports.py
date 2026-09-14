@@ -121,8 +121,8 @@ def validate_config(transport, config):
                 check_url(auth.get(field, ""))
             except ValueError as exc:
                 raise ValueError("OAuth " + field + ": " + str(exc)) from exc
-        if auth.get("scope", "service") not in {"user", "service"}:
-            raise ValueError("OAuth scope must be user or service")
+        if auth.get("scope", "user") != "user":
+            raise ValueError("OAuth scope must be user; each user authorizes independently")
     auth_header = (auth.get("header", "X-API-Key") if auth.get("type") == "api_key" else
                    "Authorization" if auth.get("type") in {"oauth", "basic", "bearer"} else None)
     if auth_header:

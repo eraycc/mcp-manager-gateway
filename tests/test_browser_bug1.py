@@ -78,11 +78,11 @@ async def test_oauth_profile_only_oauth_and_disconnect(bug1_browser):
     await expect(page.get_by_role("button", name="断开 OAuth 授权", exact=True)).to_have_count(0)
     await expect(page.get_by_role("link", name="打开授权页面")).to_be_visible()
     await page.get_by_role("dialog").get_by_role("button", name="关闭", exact=True).click()
-    await page.route("**/api/v1/mcps/oauth/oauth/status", lambda r: r.fulfill(json={"authorized": True, "scope": "service"}))
+    await page.route("**/api/v1/mcps/oauth/oauth/status", lambda r: r.fulfill(json={"authorized": True, "scope": "user"}))
     await page.evaluate("async()=>{const m=await import('/mcps.js');await m.oauthDialog({id:'oauth'},false)}")
-    await expect(page.get_by_role("dialog")).to_contain_text("服务共享授权由管理员管理")
-    await expect(page.get_by_role("button", name="断开 OAuth 授权", exact=True)).to_have_count(0)
-    await expect(page.get_by_role("link", name="打开授权页面")).to_have_count(0)
+    await expect(page.get_by_role("dialog")).to_contain_text("当前登录用户已完成 OAuth 授权")
+    await expect(page.get_by_role("button", name="断开 OAuth 授权", exact=True)).to_have_count(1)
+    await expect(page.get_by_role("link", name="打开授权页面")).to_have_count(1)
 
 
 @pytest.mark.asyncio

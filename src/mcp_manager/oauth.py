@@ -25,9 +25,9 @@ class OAuth:
         self.locks = {}
 
     def key(self, row, user_id):
-        config = self.catalog.unseal(row.config).get("auth", {})
-        scope = user_id if config.get("scope") == "user" else "service"
-        return "oauth:" + row.id + ":" + str(scope)
+        if not user_id:
+            raise GatewayError("auth_required", "Personal OAuth requires a signed-in user")
+        return "oauth:" + row.id + ":" + str(user_id)
 
     async def credentials(self, row, user_id):
         key = self.key(row, user_id)
@@ -91,8 +91,6 @@ async def oauth_actor(request, session, server_id, *, revision=None, read_only=F
     auth = request.app.state.catalog.unseal(row.config).get("auth", {})
     if auth.get("type") != "oauth":
         raise HTTPException(422, "MCP does not use OAuth")
-    if not read_only and auth.get("scope", "service") != "user" and user.role != "admin":
-        raise HTTPException(403, "Service OAuth requires administrator")
     return user, row, auth
 
 
@@ -121,7 +119,7 @@ async def status(server_id: str, request: Request, user=USER):
         value = app.catalog.unseal(item.value) if item and item.value else {}
         authorized = bool(value.get("access_token") and (
             value.get("refresh_token") or value.get("expires_at", float("inf")) > time.time()))
-        return {"authorized": authorized, "scope": auth.get("scope", "service")}
+        return {"authorized": authorized, "scope": auth.get("scope", "user")}
 
 
 @router.post("/mcps/{server_id}/oauth/start")

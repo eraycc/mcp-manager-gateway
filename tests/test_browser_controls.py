@@ -60,7 +60,7 @@ async def test_frontend_controls(running_gateway):  # noqa: F811
         await page.get_by_label("搜索授权服务", exact=True).fill("no-match")
         await expect(page.locator(".grant-list input")).to_have_count(0)
         await page.get_by_role("button", name="保存", exact=True).click()
-        await expect(page.get_by_role("heading", name="请立即保存访问令牌")).to_be_visible()
+        await expect(page.get_by_role("dialog", name="访问令牌", exact=True)).to_be_visible()
         row = next(x for x in (await web.get("/api/v1/tokens")).json()["items"] if x["name"] == "Selected snapshot")
         assert row["scope_mode"] == "selected" and len(row["mcp_ids"]) == 1
         await page.get_by_role("dialog").get_by_role("button", name="关闭", exact=True).click()

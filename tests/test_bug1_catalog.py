@@ -72,17 +72,17 @@ async def test_admin_uses_own_personal_oauth_cache(tmp_path):
         assert item["auth_type"] == "oauth"
 
 
-async def test_auth_failure_disables_without_losing_authorization_reason(tmp_path):
+async def test_personal_auth_failure_preserves_policy_and_authorization_reason(tmp_path):
     async with console(tmp_path) as (app, web, actor):
         row = await app.state.catalog.create({"name": "oauth", "transport": "streamable-http",
             "config": {"url": "https://mcp.test", "auth": {"type": "oauth",
                 "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"}}})
-        assert row.mode == "disabled"
-        with pytest.raises(GatewayError, match="disabled"):
+        assert row.mode == "lazy"
+        with pytest.raises(GatewayError, match="OAuth"):
             await app.state.catalog.refresh(row.id)
         cached = app.state.catalog.cached(row)
-        assert cached["cache_status"] == "error"
-        assert cached["auto_disabled"] is True
+        assert cached["cache_status"] == "auth_required"
+        assert not cached.get("auto_disabled", False)
         assert cached["tools"] == []
         assert cached["cache_error_code"] == "auth_required"
 

@@ -112,14 +112,14 @@ async def test_oauth_authorization_then_start_uses_current_users_credentials(tmp
             "config": {"url": "https://mcp.test", "auth": {"type": "oauth", "scope": "user",
             "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"}}},
             user_id=actor["id"])
-        assert row.mode == "disabled"
+        assert row.mode == "lazy"
         start = await web.post("/api/v1/mcps/" + row.id + "/oauth/start")
         params = parse_qs(urlsplit(start.json()["authorization_url"]).query)
         async def exchange(auth, data):
             return {"access_token": "current-owner"}
         monkeypatch.setattr(app.state.oauth, "exchange", exchange)
         assert (await web.get("/api/v1/oauth/callback", params={"state": params["state"][0], "code": "demo"})).status_code == 303
-        assert (await app.state.catalog.get(row.id)).mode == "disabled"
+        assert (await app.state.catalog.get(row.id)).mode == "lazy"
         assert (await web.post("/api/v1/mcps/" + row.id + "/start")).status_code == 200
         current = await app.state.catalog.get(row.id)
         assert app.state.catalog.cached(current, actor["id"])["cache_status"] == "ready"

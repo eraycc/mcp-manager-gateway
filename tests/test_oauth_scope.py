@@ -10,7 +10,7 @@ from mcp_manager.runtime import GatewayError
 from mcp_manager.transports import auth_headers, validate_config
 
 
-@pytest.mark.parametrize("owner_scope", ["user", "service"])
+@pytest.mark.parametrize("owner_scope", ["user"])
 async def test_provider_scope_preserves_isolation_cache_and_bearer(tmp_path, owner_scope):
     app = create_app(Settings(data_dir=tmp_path, secret_key="scope-regression"))
     async with app.router.lifespan_context(app):
@@ -44,8 +44,8 @@ async def test_provider_scope_preserves_isolation_cache_and_bearer(tmp_path, own
         assert spec.config["auth"]["scope"] == owner_scope
         assert spec.config["auth"]["scopes"] == ["mcp:read"]
         assert spec.config["auth"]["granted_scope"] == "mcp:read"
-        assert spec.credential_owner == ("alice" if owner_scope == "user" else "service")
-        assert spec.isolation == ("user" if owner_scope == "user" else "service")
+        assert spec.credential_owner == "alice"
+        assert spec.isolation == "user"
         result = await catalog.refresh(row.id, "alice")
         assert result["cache_status"] == "ready"
         assert catalog.cached(row, "alice")["tools"][0]["name"] == "read"
@@ -54,10 +54,7 @@ async def test_provider_scope_preserves_isolation_cache_and_bearer(tmp_path, own
             assert not (await app.state.runtime.call(spec, lease.id, "read", {}))["isError"]
         finally:
             await app.state.runtime.release(lease.id)
-        if owner_scope == "user":
-            assert catalog.cached(row, "bob")["tools"] == []
-            with pytest.raises(GatewayError, match="OAuth"):
-                await catalog.spec(row, "bob")
-        else:
-            assert catalog.cached(row, "bob")["tools"][0]["name"] == "read"
+        assert catalog.cached(row, "bob")["tools"] == []
+        with pytest.raises(GatewayError, match="OAuth"):
+            await catalog.spec(row, "bob")
         assert catalog.unseal(row.config)["auth"]["scope"] == owner_scope

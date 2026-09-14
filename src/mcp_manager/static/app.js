@@ -1,5 +1,6 @@
 import{$,el,icon,pretty,api,button,toast,run,field,selectField,check,jsonField,dialog,formDialog,detail,download,badge,date,route,navigate,title,loading,empty,allPages,jobDialog,tablePage,cacheInfo,pagedList,tabPanels,enableTableDragging}from './core.js';
 import{mcpEditor,mcpTools,mcpImport,oauthDialog}from './mcps.js';
+import{embeddingSettings}from './search-settings.js';
 let me,bootstrap,abort,refreshTimer;
 const nav=[['dashboard','仪表盘','grid'],['mcps','MCP 服务','server',true],['tokens','访问令牌','key'],['logs','调用日志','logs'],['users','用户管理','users',true],['profile','个人资料','user'],['settings','系统设置','settings',true]];
 const admin=()=>me?.role==='admin';
@@ -69,14 +70,78 @@ async function grants(value={}){
  const toggle=()=>controls.hidden=mode.input.value==='all';mode.input.onchange=toggle;search.input.oninput=renderList;protocol.input.onchange=renderList;renderList();toggle();
  return{node:el('div',{class:'stack grant-selector'},mode.node,controls),value:()=>({scope_mode:mode.input.value,mcp_ids:[...selected]})}
 }
-async function tokenEditor(row){const name=field('令牌名称',row?.name||'');name.input.required=true;const scope=await grants(row);const discovery=selectField('工具发现模式',row?.discovery_mode||'native',[['native','原生工具目录'],['discovery','按需发现工具']]);const expiry=field('到期时间（可选）',row?.expires_at?new Date(new Date(row.expires_at).getTime()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16):'','datetime-local');const disabled=check('禁用令牌',row?.disabled);formDialog(row?'编辑访问令牌':'创建访问令牌',[name.node,scope.node,discovery.node,expiry.node,...(row?[disabled.node]:[])],async()=>{const result=await api('/tokens'+(row?'/'+row.id:''),{method:row?'PATCH':'POST',body:{name:name.input.value,...scope.value(),discovery_mode:discovery.input.value,expires_at:expiry.input.value?new Date(expiry.input.value).toISOString():null,...(row?{disabled:disabled.input.checked}:{})}});await refresh();if(result.token)secret(result.token)})}
-function secret(value){const box=el('code',{class:'secret'},value);dialog('请立即保存访问令牌',el('div',{class:'stack'},el('p',{class:'notice'},'完整令牌只展示一次。关闭窗口后无法重新查看；遗失后请轮换。'),box,button('复制令牌',async()=>{await navigator.clipboard.writeText(value);toast('已复制')})))}
-async function tokens(main,signal){main.append(title('访问令牌','为不同客户端创建独立凭据和服务范围。',[button('创建令牌',()=>tokenEditor(),'primary')]));await tablePage(main,{path:'/tokens',signal,columns:[['名称',x=>el('div',{},x.name,el('span',{class:'subtext code'},x.prefix+'…'))],['工具目录',x=>badge(x.discovery_mode)],['范围',x=>x.scope_mode==='all'?'全部授权服务':(x.mcp_ids?.length||0)+' 个服务'],['状态',x=>badge(x.disabled?'disabled':'active')],['调用次数',x=>el('div',{},x.call_count??'—',el('span',{class:'subtext'},'成功 '+(x.success_count??'—')+' / 失败 '+(x.failed_count??'—')))],['到期',x=>date(x.expires_at)]],filters:[['disabled','状态',[['false','启用'],['true','禁用']]]],rowActions:r=>[button('统计',async()=>detail('令牌调用统计',await api('/tokens/'+r.id+'/stats'))),button('编辑',()=>tokenEditor(r)),button('轮换',()=>ask('轮换后旧令牌立即失效。',async()=>{const d=await api('/tokens/'+r.id+'/rotate',{method:'POST'});secret(d.token);refresh()})),button('删除',()=>ask('删除令牌“'+r.name+'”？',async()=>{await api('/tokens/'+r.id,{method:'DELETE'});refresh()}),'danger')],bulk:[...['enable','disable','delete'].map((a,i)=>[['批量启用','批量禁用','批量删除'][i],ids=>ask('对 '+ids.length+' 个令牌执行此操作？',async()=>{const results=[];for(const id of ids){try{await api('/tokens/'+id,{method:a==='delete'?'DELETE':'PATCH',...(a==='delete'?{}:{body:{disabled:a==='disable'}})});results.push({id,ok:true})}catch(e){results.push({id,ok:false,error:e.message})}}detail('批量操作结果',results);refresh()})])]})}
+async function copyToken(row){
+ let data;try{data=await api('/tokens/'+row.id+'/secret')}catch(e){if(e.code==='token_secret_unavailable'){await tokenEditor({...row,secret_available:false});return}throw e}
+ try{await navigator.clipboard.writeText(data.token);toast('令牌已复制')}
+ catch{secret(data.token)}
+}
+async function tokenEditor(row){
+ const name=field('令牌名称',row?.name||'');name.input.required=true;
+ const scope=await grants(row),discovery=selectField('工具发现模式',row?.discovery_mode||'native',[['native','原生工具目录'],['discovery','按需发现工具']]);
+ const help=el('p',{class:'notice'});
+ const describe=()=>help.textContent=discovery.input.value==='discovery'?
+  '先发现 MCP 服务，再获取工具完整参数定义，最后按精确名称调用。系统设置中的混合检索配置对按需发现生效。':
+  '客户端直接获取当前令牌授权范围内的全部工具定义。';
+ discovery.input.onchange=describe;describe();
+ const expiry=field('到期时间（可选）',row?.expires_at?new Date(new Date(row.expires_at).getTime()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16):'','datetime-local');
+ const disabled=check('禁用令牌',row?.disabled),parts=[name.node,scope.node,discovery.node,help,expiry.node];
+ if(row){
+  parts.push(disabled.node);let data;
+  if(row.secret_available){try{data=await api('/tokens/'+row.id+'/secret')}catch(e){if(e.code!=='token_secret_unavailable')throw e}}
+  if(data){
+   const value=field('访问令牌值',data.token);
+   value.input.readOnly=true;value.input.setAttribute('aria-label','访问令牌值');value.input.autocomplete='off';
+   parts.push(value.node,button('复制令牌',()=>copyToken(row)));
+  }else parts.push(el('p',{class:'notice'},'此令牌的原值未保存或暂时无法解密，仍可编辑其设置。轮换一次后即可回显和复制新值。'));
+ }
+ formDialog(row?'编辑访问令牌':'创建访问令牌',parts,async()=>{
+  const result=await api('/tokens'+(row?'/'+row.id:''),{method:row?'PATCH':'POST',body:{
+   name:name.input.value,...scope.value(),discovery_mode:discovery.input.value,
+   expires_at:expiry.input.value?new Date(expiry.input.value).toISOString():null,...(row?{disabled:disabled.input.checked}:{})}});
+  await refresh();if(result.token)secret(result.token);
+ });
+}
+function secret(value){
+ const box=el('code',{class:'secret'},value);
+ dialog('访问令牌',el('div',{class:'stack'},el('p',{class:'notice'},'可在访问令牌列表中再次复制，或打开编辑查看完整值。'),
+  box,button('复制令牌',async()=>{await navigator.clipboard.writeText(value);toast('已复制')})));
+}
+async function tokens(main,signal){
+ main.append(title('访问令牌','为不同客户端创建独立凭据和服务范围。',[button('创建令牌',()=>tokenEditor(),'primary')]));
+ if(admin()){
+  const params=route().params,view=selectField('令牌视图',params.get('view')||'mine',[['mine','我的令牌'],['all','全部用户令牌']]);
+  const username=field('按用户名筛选',params.get('username')||'');username.input.setAttribute('aria-label','按用户名筛选');
+  username.input.disabled=view.input.value!=='all';
+  const filters=el('form',{class:'toolbar'},view.node,username.node,el('label',{class:'filter-submit-field'},el('span',{class:'field-label'},' '),el('button',{type:'submit'},'筛选用户')));
+  const apply=()=>{const p=new URLSearchParams(params);p.set('view',view.input.value);p.set('page','1');
+   if(view.input.value==='all'&&username.input.value.trim())p.set('username',username.input.value.trim());else p.delete('username');
+   if(view.input.value==='mine')p.delete('user_id');navigate('tokens',p)};
+  view.input.onchange=apply;filters.onsubmit=e=>{e.preventDefault();apply()};main.append(filters);
+ }
+ await tablePage(main,{path:'/tokens',signal,columns:[
+  ['名称',x=>el('div',{},x.name,el('span',{class:'subtext code'},x.prefix+'…'))],
+  ...(admin()?[['所属用户',x=>x.username||x.user_id]]:[]),
+  ['工具目录',x=>badge(x.discovery_mode)],['范围',x=>x.scope_mode==='all'?'全部授权服务':(x.mcp_ids?.length||0)+' 个服务'],
+  ['状态',x=>badge(x.disabled?'disabled':'active')],
+  ['调用次数',x=>el('div',{},x.call_count??'—',el('span',{class:'subtext'},'成功 '+(x.success_count??'—')+' / 失败 '+(x.failed_count??'—')))],
+  ['到期',x=>date(x.expires_at)]],
+  filters:[['disabled','状态',[['false','启用'],['true','禁用']]]],
+  rowActions:r=>[...(r.secret_available?[button('复制',()=>copyToken(r))]:[]),button('统计',async()=>detail('令牌调用统计',await api('/tokens/'+r.id+'/stats'))),
+   button('编辑',()=>tokenEditor(r)),button('轮换',()=>ask('轮换后旧令牌立即失效。',async()=>{
+    const d=await api('/tokens/'+r.id+'/rotate',{method:'POST'});secret(d.token);refresh()})),
+   button('删除',()=>ask('删除令牌“'+r.name+'”？',async()=>{await api('/tokens/'+r.id,{method:'DELETE'});refresh()}),'danger')],
+  bulk:[...['enable','disable','delete'].map((a,i)=>[['批量启用','批量禁用','批量删除'][i],ids=>ask('对 '+ids.length+' 个令牌执行此操作？',async()=>{
+   const results=[];for(const id of ids){try{
+    await api('/tokens/'+id,{method:a==='delete'?'DELETE':'PATCH',...(a==='delete'?{}:{body:{disabled:a==='disable'}})});results.push({id,ok:true})
+   }catch(e){results.push({id,ok:false,error:e.message})}}
+   detail('批量操作结果',results);refresh()})])]
+ });
+}
 async function users(main,signal){main.append(title('用户管理','管理账户、角色和 MCP 服务授权。',[button('创建用户',()=>userEditor(),'primary')]));await tablePage(main,{path:'/users',signal,columns:[['用户',x=>el('div',{},x.username,el('span',{class:'subtext'},x.email||'未设置邮箱'))],['角色',x=>badge(x.role)],['服务范围',x=>x.scope_mode==='all'?'全部服务':(x.mcp_ids?.length||0)+' 个服务'],['状态',x=>badge(x.disabled?'disabled':'active')],['创建时间',x=>date(x.created_at)]],filters:[['role','角色',[['admin','管理员'],['user','普通用户']]],['disabled','状态',[['false','正常'],['true','禁用']]]],rowActions:r=>[button('编辑',()=>userEditor(r)),button('删除',()=>ask('删除用户“'+r.username+'”及其访问权限？',async()=>{await api('/users/'+r.id,{method:'DELETE'});refresh()}),'danger')],bulk:[...['enable','disable','delete'].map((a,i)=>[['批量启用','批量禁用','批量删除'][i],ids=>ask('对 '+ids.length+' 个用户执行'+['启用','禁用','删除'][i]+'？',async()=>{detail('操作结果',await api('/users/batch',{method:'POST',body:{action:a,ids}}));refresh()})])]})}
 async function userEditor(row){const username=field('用户名',row?.username||''),email=field('邮箱',row?.email||'','email'),password=field(row?'新密码（留空不修改）':'密码','','password'),role=selectField('角色',row?.role||'user',[['user','普通用户'],['admin','管理员']]),disabled=check('禁用账户',row?.disabled),scope=await grants(row);username.input.required=true;password.input.required=!row;password.input.minLength=10;formDialog(row?'编辑用户':'创建用户',[el('div',{class:'form-grid'},username.node,email.node,password.node,role.node),scope.node,disabled.node],async()=>{await api('/users'+(row?'/'+row.id:''),{method:row?'PATCH':'POST',body:{username:username.input.value,email:email.input.value||'',role:role.input.value,disabled:disabled.input.checked,...scope.value(),...(password.input.value?{password:password.input.value}:{})}});refresh()})}
 async function mcps(main,signal){main.append(title('MCP 服务','集中配置服务，按需启动，共享工具能力。',[button('导入配置',()=>mcpImport(refresh)),button('新增服务',()=>mcpEditor(null,refresh),'primary')]));await tablePage(main,{path:'/mcps',signal,columns:[['服务名称',x=>el('div',{},el('strong',{},x.name),el('span',{class:'subtext'},x.description||x.slug))],['传输',x=>badge(x.transport)],['运行策略',x=>badge(x.mode)],['运行状态',x=>badge(x.runtime?.[0]?.phase||'stopped')],['工具',x=>x.tool_count??0],['缓存状态 / 时间',x=>cacheInfo(x)]],filters:[['transport','传输',[['stdio','stdio'],['streamable-http','Streamable HTTP'],['sse','SSE'],['rest','REST']]],['mode','策略',[['lazy','按需'],['eager','常驻'],['disabled','禁用']]]],rowActions:r=>[button('工具 / 测试',()=>mcpTools(r,admin())),button('编辑',()=>mcpEditor(r,refresh)),button('更多',()=>mcpMore(r))],bulk:[...['start','stop','refresh','lazy','enable','disable','delete'].map((a,i)=>[['启动','停止','刷新缓存','设为按需','设为常驻','禁用','删除'][i],ids=>ask('对 '+ids.length+' 个服务执行此操作？',async()=>{for(let offset=0;offset<ids.length;offset+=500){toast('提交批次 '+(Math.floor(offset/500)+1)+' / '+Math.ceil(ids.length/500));const result=await jobDialog(await api('/mcps/batch',{method:'POST',body:{action:a,ids:ids.slice(offset,offset+500)}}),{autoCloseOnSuccess:a==='delete',title:a==='delete'?'正在删除服务':'后台任务'});if(!result||!['completed','complete','done','success'].includes(result.status)){toast('操作未全部完成，请查看任务详情','fail');refresh();return}}if(a==='delete')toast('删除完成','success');refresh()})]),['导出',async ids=>download('mcp-services.json',await api('/mcps/export',{method:'POST',body:{ids,include_secrets:false}}))]]})}
 function mcpMore(r){const d=dialog(r.name+' · 服务操作',el('div',{class:'stack'},...['start','stop','refresh','copy'].map((a,i)=>button(['启动服务','停止服务','刷新工具缓存','复制服务'][i],async()=>{try{const data=await api('/mcps/'+r.id+'/'+a,{method:'POST'});detail('操作结果',data)}finally{refresh()}})),r.auth_type==='oauth'?button('OAuth 授权',()=>oauthDialog(r,admin(),refresh)):null,button('删除服务',()=>ask('删除服务“'+r.name+'”？',async()=>{await api('/mcps/'+r.id,{method:'DELETE'});d.close();refresh()}),'danger')))}
-async function logs(main,signal){main.append(title('调用日志','追踪请求来源、工具参数、执行结果与耗时。',admin()?[button('重建日志索引',()=>ask('从日志原文重建索引？',async()=>jobDialog(await api('/logs/rebuild',{method:'POST'}))))]:[]));const p=route().params;const advanced=el('form',{class:'card form-grid'}),entries=[['user_id','用户 ID'],['token_id','令牌 ID'],['mcp_id','服务 ID'],['tool_name','工具名称'],['from_time','开始时间'],['to_time','结束时间'],['source','来源']].map(([k,l])=>{const f=field(l,p.get(k)||'',k.endsWith('_time')?'datetime-local':'text');advanced.append(f.node);return[k,f.input]});advanced.append(el('button',{type:'submit'},'应用筛选'));advanced.onsubmit=e=>{e.preventDefault();const q=new URLSearchParams(p);for(const[k,f]of entries){if(f.value)q.set(k,k.endsWith('_time')?new Date(f.value).toISOString():f.value);else q.delete(k)}q.set('page','1');navigate('logs',q)};const disclosure=el('details',{},el('summary',{},'高级筛选'),advanced);main.append(disclosure);
+async function logs(main,signal){main.append(title('调用日志','追踪请求来源、工具参数、执行结果与耗时。',admin()?[button('重建日志索引',()=>ask('从日志原文重建索引？',async()=>jobDialog(await api('/logs/rebuild',{method:'POST'}))))]:[]));const p=route().params;const advanced=el('form',{class:'card form-grid'}),entries=[...(admin()?[['username','用户名'],['user_id','用户 ID']]:[]),['token_id','令牌 ID'],['mcp_id','服务 ID'],['tool_name','工具名称'],['from_time','开始时间'],['to_time','结束时间'],['source','来源']].map(([k,l])=>{const f=field(l,p.get(k)||'',k.endsWith('_time')?'datetime-local':'text');advanced.append(f.node);return[k,f.input]});advanced.append(el('button',{type:'submit'},'应用筛选'));advanced.onsubmit=e=>{e.preventDefault();const q=new URLSearchParams(p);for(const[k,f]of entries){if(f.value)q.set(k,k.endsWith('_time')?new Date(f.value).toISOString():f.value);else q.delete(k)}q.set('page','1');navigate('logs',q)};const disclosure=el('details',{},el('summary',{},'高级筛选'),advanced);main.append(disclosure);
 await tablePage(main,{path:'/logs',signal,columns:[['时间',x=>date(x.timestamp)],['用户 / 令牌',x=>el('div',{},x.username||'匿名',el('span',{class:'subtext'},x.token_name||'—'))],['服务 / 工具',x=>el('div',{},x.mcp_name||x.mcp_id,el('span',{class:'subtext code'},x.tool_name))],['结果',x=>badge(x.status)],['耗时',x=>(x.duration_ms??'—')+' ms'],['来源','source']],filters:[['status','结果',[['success','成功'],['tool_error','工具失败'],['gateway_error','网关失败'],['outcome_unknown','结果未知'],['cancelled','已取消']]]],actions:[button('导出筛选结果',async()=>download('mcp-logs.json',await api('/logs/export?'+p))),...(admin()?[button('删除全部匹配',()=>ask('永久删除所有匹配日志？',async()=>{await jobDialog(await api('/logs/delete',{method:'POST',body:{ids:null,filters:Object.fromEntries(p)}}));refresh()}),'danger')]:[])],rowActions:r=>[button('详情',async()=>detail('调用详情',await api('/logs/'+r.id)))],bulk:admin()?[['删除选中',ids=>ask('永久删除 '+ids.length+' 条日志？',async()=>{await jobDialog(await api('/logs/delete',{method:'POST',body:{ids,filters:{}}}));refresh()})]]:null})}
 async function profile(main,signal){main.append(title('个人资料','管理账户、登录会话与客户端连接。'));const username=field('用户名',me.username),email=field('邮箱',me.email||'','email'),old=field('当前密码','','password'),password=field('新密码（可选）','','password');username.input.required=true;password.input.minLength=10;const form=el('form',{class:'card stack'},el('h2',{},'账户信息'),el('div',{class:'form-grid'},username.node,email.node,old.node,password.node),el('button',{type:'submit',class:'primary'},'保存资料'));form.onsubmit=e=>{e.preventDefault();run(async()=>{me=await api('/me',{method:'PATCH',body:{username:username.input.value,email:email.input.value||'',...(password.input.value?{current_password:old.input.value,password:password.input.value}:{})}});toast('资料已保存');refresh()})};main.append(form);main.append(connectionGuide());
 const sessions=await api('/me/sessions',{signal});main.append(el('section',{class:'card'},el('h2',{},'登录会话'),el('p',{class:'muted'},'撤销会话会立即使该登录失效；永久删除还会移除会话记录。当前会话请通过右上角退出登录。'),pagedList({items:Array.isArray(sessions)?sessions:sessions.items||[],key:'sessions',label:'会话',searchText:s=>[s.user_agent,s.id,s.ip_address,date(s.created_at)].join(' '),filters:[['current','当前会话',s=>s.current],['active','有效会话',s=>s.active],['revoked','已撤销',s=>s.revoked]],renderItem:s=>el('div',{class:'toolbar session-row'},el('div',{class:'session-details'},el('div',{class:'actions'},s.current?badge('当前会话'):null,badge(s.revoked?'已撤销':s.active?'有效':'已失效')),el('div',{},'登录 IP：'+(s.ip_address||'未记录')),el('div',{class:'session-agent'},'User-Agent：'+(s.user_agent||'未记录')),el('div',{class:'muted'},'登录时间：'+date(s.created_at))),s.current?null:el('div',{class:'actions session-actions'},s.active?button('撤销会话',()=>ask('撤销此登录会话？该设备需要重新登录。',async()=>{await api('/me/sessions/'+s.id,{method:'DELETE'});toast('会话已撤销');refresh()})):null,button('永久删除',()=>ask('永久删除此登录会话及其记录？该设备会立即退出，此操作不可恢复。',async()=>{await api('/me/sessions/'+s.id+'/permanent',{method:'DELETE'});toast('会话已永久删除');refresh()}),'danger')))})));
@@ -128,6 +193,7 @@ async function settings(main,signal){
  settingPanels.push(['anonymous','匿名访问',el('section',{class:'card'},el('h2',{},'匿名访问范围'),el('p',{class:'notice'},'匿名访问无需令牌，仅允许访问此处明确授权的服务。默认不授权任何服务。'),scope.node)]);
  const about=el('section',{class:'card'},el('h2',{},'关于'),loading());
  const loadAbout=async()=>{try{const content=aboutPanel(await api('/about',{signal}));about.replaceChildren(...content.childNodes);about.className=content.className}catch(e){if(e.name==='AbortError')return;about.replaceChildren(el('h2',{},'关于'),el('p',{class:'error',role:'alert'},e.message),button('重试',loadAbout))}};
+ settingPanels.push(['embedding','工具检索',await embeddingSettings(signal)]);
  settingPanels.push(['about','关于',about]);
  form.append(tabPanels(settingPanels,{key:'settings_tab',label:'系统设置分类'}));
  const err=el('div',{class:'error',hidden:true}),submit=el('button',{type:'submit',class:'primary'},'保存设置');
