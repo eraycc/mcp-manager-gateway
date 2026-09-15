@@ -109,9 +109,23 @@ function Get-ServiceCmd {
   "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$daemon`""
 }
 
+function Get-RealDaemons {
+  # 返回真实守护进程（powershell.exe 跑 mmg-daemon.ps1），排除 pwsh/node 自身
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.Name -eq 'powershell.exe' -and
+    $_.CommandLine -like '*mmg-daemon.ps1*' -and
+    $_.CommandLine -notlike '*node.exe*' -and
+    $_.CommandLine -notlike '*runner.js*'
+  }
+}
+
 function Install-Service {
   if (Get-Process -Name mmg -ErrorAction SilentlyContinue) {
-    Write-Host 'mmg 正在运行；请先停止（直接启动[2] 或 服务管理[3]）。'
+    Write-Host '检测到 mmg 残留进程，先自动清理...'
+    Stop-Service
+  }
+  if (Get-Process -Name mmg -ErrorAction SilentlyContinue) {
+    Write-Host 'mmg 仍在运行且无法自动停止；请在任务管理器手动结束 mmg.exe 后重试。'
     return
   }
   $cmd = Get-ServiceCmd
@@ -138,12 +152,23 @@ function Start-Service {
 }
 
 function Stop-Service {
-  $killed = 0
-  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*mmg-daemon.ps1*' } | ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $killed++
+  # 1) 先杀守护（排除 pwsh/node 自身的误匹配），防止 mmg 被 while 循环重启
+  $dcount = 0
+  foreach ($d in (Get-RealDaemons)) {
+    Stop-Process -Id $d.ProcessId -Force -ErrorAction SilentlyContinue; $dcount++
   }
-  Stop-Process -Name mmg -ErrorAction SilentlyContinue
-  Write-Host "已停止（守护进程 $killed 个，mmg）。"
+  # 2) 多轮杀 mmg（uv trampoline 可能派生子 Python 进程，需打断 while 循环）
+  for ($i = 0; $i -lt 3; $i++) {
+    Stop-Process -Name mmg -Force -ErrorAction SilentlyContinue
+    Start-Sleep 1
+    if (-not (Get-Process -Name mmg -ErrorAction SilentlyContinue)) { break }
+  }
+  $remaining = Get-Process -Name mmg -ErrorAction SilentlyContinue
+  if ($remaining) {
+    Write-Host "已停止守护（$dcount 个），但 mmg 仍有 $($remaining.Count) 个进程无法结束（可能权限不足）。请在任务管理器手动结束 mmg.exe。"
+  } else {
+    Write-Host "已停止（守护 $dcount 个 + mmg）。"
+  }
 }
 
 function Restart-Service {
@@ -159,7 +184,7 @@ function Service-Status {
   $p = Get-Process -Name mmg -ErrorAction SilentlyContinue
   if ($p) { Write-Host "  mmg: 运行中 (PID $(($p | ForEach-Object { $_.Id }) -join ', '))" }
   else    { Write-Host '  mmg: 未运行' }
-  $d = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*mmg-daemon.ps1*' }
+  $d = Get-RealDaemons
   if ($d) { Write-Host "  守护: 运行中 (PID $(($d.ProcessId) -join ', '))" } else { Write-Host '  守护: 未运行' }
   $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
   if ($c) { Write-Host "  端口 $port : 监听中" } else { Write-Host "  端口 $port : 未监听" }
@@ -229,12 +254,7 @@ function Direct-Menu {
         }
       }
       '2' {
-        $killed = 0
-        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*mmg-daemon.ps1*' } | ForEach-Object {
-          Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $killed++
-        }
-        Stop-Process -Name mmg -ErrorAction SilentlyContinue
-        Write-Host "已停止（守护进程 $killed 个，mmg）。"
+        Stop-Service
       }
       '3' { Direct-Status }
       '0' { $loop = $false }
