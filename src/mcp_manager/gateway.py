@@ -152,6 +152,16 @@ class Gateway:
                 entries.append((row, tool, dict(tool, name=alias(row.slug, tool["name"]))))
         return user, token, rows, entries
 
+    def failed_target(self, rows, name, user_id):
+        catalog = self.app.state.catalog
+        for row in rows:
+            error = catalog.failed_error(row, user_id)
+            if error is None:
+                continue
+            if name in catalog.cached(row, user_id)["failed_gateway_names"]:
+                return error
+        return None
+
     def lease(self, request, user, token):
         runtime = self.app.state.runtime
         identity = owner(user, token, request)
@@ -225,6 +235,9 @@ class Gateway:
             name, arguments = arguments["name"], arguments["arguments"]
         entry = next((e for e in entries if e[2]["name"] == name), None)
         if not entry:
+            failure = self.failed_target(rows, name, user.id if user else None)
+            if failure is not None:
+                raise failure
             raise ValueError("Tool not found in authorized cache; ask an administrator to refresh")
         row, tool, _ = entry
 

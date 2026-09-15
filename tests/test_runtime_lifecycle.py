@@ -128,15 +128,51 @@ async def test_connection_callback_completes_before_first_business_dispatch():
     connection = Connection()
     runtime = Runtime(connection.connect)
     lease = runtime.create_lease("u", "t")
-    cached = []
+    callbacks = []
+
     async def on_connect(spec, downstream):
         await asyncio.sleep(0)
         assert not connection.entered.is_set()
-        cached.append((spec.id, await downstream.discover()))
+        callbacks.append((spec.id, downstream))
+
     runtime.on_connect = on_connect
     try:
         await runtime.call(ServerSpec("s", "stdio", {}), lease.id, "call", {})
-        assert cached == [("s", {"tools": [], "resources": [], "prompts": [], "templates": []})]
+        assert callbacks == [("s", connection)]
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_shared_start_failure_callback_runs_once_for_all_waiters():
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @asynccontextmanager
+    async def connect(spec):
+        entered.set()
+        await release.wait()
+        raise OSError("offline")
+        yield
+
+    runtime = Runtime(connect)
+    leases = [runtime.create_lease("u", str(index)) for index in range(2)]
+    failures = []
+
+    async def on_start_failure(spec, failure):
+        failures.append((spec.id, failure.code, str(failure)))
+
+    runtime.on_start_failure = on_start_failure
+    calls = [
+        asyncio.create_task(runtime.call(ServerSpec("s", "stdio", {}), lease.id, "x", {}))
+        for lease in leases
+    ]
+    await entered.wait()
+    release.set()
+    try:
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        assert all(isinstance(result, GatewayError) for result in results)
+        assert failures == [("s", "startup_failed", "offline")]
     finally:
         await runtime.close()
 

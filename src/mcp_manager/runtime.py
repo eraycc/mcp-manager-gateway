@@ -19,8 +19,9 @@ def startup_failure_reason(exc):
 
 
 class GatewayError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, details: dict | None = None):
         self.code = code
+        self.details = details or {}
         super().__init__(message)
 
 
@@ -130,9 +131,25 @@ class Runtime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            instance.error = startup_failure_reason(exc)
-            instance.failure = exc
+            code = getattr(
+                exc,
+                "code",
+                "startup_timeout" if isinstance(exc, TimeoutError) else "startup_failed",
+            )
+            failure = (
+                exc
+                if isinstance(exc, GatewayError)
+                else GatewayError(code, startup_failure_reason(exc))
+            )
+            instance.error = str(failure)
+            instance.failure = failure
             instance.phase = "failed"
+            if self.on_start_failure is not None:
+                try:
+                    await self.on_start_failure(instance.spec, failure)
+                except Exception as callback_error:
+                    instance.error = startup_failure_reason(callback_error)
+                    instance.failure = callback_error
         finally:
             instance.connection = None
             if instance.phase != "failed":
@@ -214,12 +231,7 @@ class Runtime:
                       *args, authorize=None, business=True):
         if authorize is not None:
             await authorize()
-        try:
-            instance = await self._acquire(spec, lease_id)
-        except GatewayError as exc:
-            if self.on_start_failure is not None:
-                await self.on_start_failure(spec, exc)
-            raise
+        instance = await self._acquire(spec, lease_id)
         dispatched = False
         try:
             queue_timeout = float(spec.config.get("queue_timeout", 60))

@@ -148,10 +148,27 @@ class Discovery:
             service_tools = [original for service, original, _exposed in entries if service.id == row.id]
             tools_list = sorted(tool["name"] for tool in service_tools)
             description, description_source = service_description(row.description, service_tools)
-            summaries.append({"id": row.id, "mcp": row.id, "name": row.name, "slug": row.slug,
-                              "description": description, "description_source": description_source,
-                              "tags": row.tags, "tool_count": len(tools_list), "tools_list": tools_list,
-                              "catalog_status": cache["cache_status"], "revision": row.revision})
+            failure = catalog.failure_details(row, user.id if user else None)
+            summaries.append({
+                "id": row.id,
+                "mcp": row.id,
+                "name": row.name,
+                "slug": row.slug,
+                "description": description,
+                "description_source": description_source,
+                "tags": row.tags,
+                "tool_count": len(tools_list),
+                "tools_list": tools_list,
+                "catalog_status": cache["cache_status"],
+                "status": failure["status"],
+                "startup_failure_count": failure["startup_failure_count"],
+                "failure_reason": failure["failure_reason"],
+                "last_startup_error": cache["last_startup_error"],
+                "last_startup_error_code": cache["last_startup_error_code"],
+                "last_startup_failure_at": cache["last_startup_failure_at"],
+                "failure_scope": failure["failure_scope"],
+                "revision": row.revision,
+            })
         summaries.sort(key=lambda x: (x["slug"], x["id"]))
         visible = {s["id"] for s in summaries}
         entries = sorted((e for e in entries if e[0].id in visible), key=lambda e: (e[0].slug, e[2]["name"]))

@@ -24,18 +24,25 @@ async def permitted(request, server_id, user):
 
 @router.get("/mcps")
 async def listing(request: Request, q: str = "", page: int = 1, page_size: int = 20,
-                  mode: str = "", transport: str = "", user=USER):
+                  mode: str = "", transport: str = "", status: str = "", user=USER):
     if page < 1 or not 1 <= page_size <= 200:
         raise HTTPException(422, "Invalid pagination")
+    if status not in {"", "running", "ready", "stopped", "failed"}:
+        raise HTTPException(422, "Invalid status")
     cat = request.app.state.catalog
     allowed = None if user.role == "admin" else await effective_mcp_ids(cat.db, user)
     rows = [r for r in await cat.rows() if (allowed is None or r.id in allowed)
             and (not mode or r.mode == mode) and (not transport or r.transport == transport)
             and (not q or q.lower() in (r.name + " " + r.description + " " + " ".join(r.tags)).lower())]
-    return {"items": [cat.public(r, user_id=user.id, runtime_user_id=None if user.role == "admin" else user.id)
-                      for r in rows[(page - 1) * page_size:page * page_size]],
-            "total": len(rows), "page": page, "page_size": page_size,
-            "total_pages": (len(rows) + page_size - 1) // page_size}
+    items = [
+        cat.public(row, user_id=user.id, runtime_user_id=None if user.role == "admin" else user.id)
+        for row in rows
+    ]
+    if status:
+        items = [item for item in items if item["status"] == status]
+    return {"items": items[(page - 1) * page_size:page * page_size],
+            "total": len(items), "page": page, "page_size": page_size,
+            "total_pages": (len(items) + page_size - 1) // page_size}
 
 
 @router.post("/mcps")

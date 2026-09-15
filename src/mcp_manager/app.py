@@ -131,6 +131,9 @@ def create_app(config=None):
             from zoneinfo import ZoneInfo
             state.logs.timezone = ZoneInfo(await get_setting(state.db, "timezone", "Asia/Shanghai"))
             state.runtime.idle_seconds = await get_setting(state.db, "idle_seconds", 86400)
+            state.catalog.startup_failure_threshold = await get_setting(
+                state.db, "startup_failure_threshold", 3
+            )
             async with contextlib.AsyncExitStack() as stack:
                 if hasattr(state, "protocol"):
                     await stack.enter_async_context(state.protocol.session_manager.run())
@@ -165,7 +168,7 @@ def create_app(config=None):
 
     @app.exception_handler(GatewayError)
     async def gateway_error(request: Request, exc):
-        return JSONResponse({"detail": str(exc), "code": exc.code}, status_code=502)
+        return JSONResponse({"detail": str(exc), "code": exc.code, **exc.details}, status_code=502)
 
     @app.exception_handler(ValueError)
     async def value_error(request: Request, exc):

@@ -20,7 +20,7 @@ mcp-manager
 - Windows：`C:\Users\用户名\.mcp-manager`
 - Linux：`~/.mcp-manager`
 
-工具目录集中保存在 `cache/catalog.jsonl`，后台任务状态集中保存在 `jobs/jobs.jsonl`。缓存文件缺失时，启动后会在后台为已启用服务重建目录，按需服务发现完成即释放实例；仍会禁用发现失败的服务。更新采用追加写入，自动合并重复快照；缓存按服务和授权用户保存最新版本，不再按版本创建文件。启动时会迁移可读取的旧 `.json` 快照，持久化成功后删除旧文件；无法读取的文件会保留并记录迁移错误。日志仍按日期保存为 JSONL，系统数据库、日志 SQLite 索引与 `.env` 保持各自格式。
+工具目录与服务失败状态集中保存在 `cache/catalog.jsonl`，后台任务状态集中保存在 `jobs/jobs.jsonl`。缓存文件缺失时，启动后会在后台为已启用服务重建目录，按需服务发现完成即释放实例。连续启动失败达到系统阈值后，服务标记为 `failed` 并清空能力缓存，但不会修改 `mode`；普通服务全局共享失败状态，个人 OAuth 按用户隔离。已有可用缓存时，单次 `tools/list` 刷新失败会保留上一版能力并单独记录刷新警告。更新采用追加写入并自动合并重复快照；缓存按服务和授权用户保存最新版本，不再按版本创建文件。启动时会迁移可读取的旧 `.json` 快照，持久化成功后删除旧文件；无法读取的文件会保留并记录迁移错误。日志仍按日期保存为 JSONL，系统数据库、日志 SQLite 索引与 `.env` 保持各自格式。
 
 环境变量优先于用户目录内的 .env；源码目录和当前工作目录的 .env 不会被自动读取。可设置 `MCP_MANAGER_HOME`，或执行 `mcp-manager --home /自定义目录 serve` 指定另一份配置与数据。
 
@@ -58,7 +58,7 @@ Authorization: Bearer mcpm_你的Token
 
 | 工具 | 用途 |
 | --- | --- |
-| `gateway_search_mcps(query)` | 搜索服务名称、描述、标签和工具名；空或 `*` 列出全部授权 MCP 摘要。每项含仅由原始工具名字符串组成的 `tools_list`，不包含工具定义 |
+| `gateway_search_mcps(query)` | 搜索服务名称、描述、标签和工具名；空或 `*` 列出全部授权且非 disabled 的 MCP 摘要。failed 服务仍返回 `status`、失败次数、原因与作用域，但 `tools_list` 为空 |
 | `gateway_search_tools(mcp, tool)` | 搜索工具并返回完整原始 inputSchema、描述、归属、精确 gateway_name、示例或参数模板 |
 | `gateway_call(name, arguments)` | 按精确 gateway_name 调用，arguments 必须符合发现结果中的原始 Schema |
 
@@ -126,6 +126,9 @@ MCP_MANAGER_TOKEN=mcpm_你的Token mcp-manager stdio --url http://127.0.0.1:8765
 - 支持 MCP 会话的 HTTP 客户端可用 DELETE 释放；未报告退出的通用 HTTP 客户端采用保留租约。
 - 只有所有引用释放后，按需实例才停止。默认 24 小时没有业务调用也会回收；心跳和目录刷新不算业务调用。活动调用不会被空闲回收杀死。系统设置中的空闲回收时间设为 `0` 时，关闭业务空闲超时回收；主动断开和桥接失联租约仍正常释放。
 - 单实例并发、排队、启动、调用与停止超时可配置；停止和配置换代会阻止继续派发排队请求。
+- `mode` 仅表示 `lazy`、`eager`、`disabled` 策略；`status` 独立表示 `stopped`、`ready`、`running`、`failed`。阈值默认为 3，可在系统设置中调整。
+
+管理 API 的 `status` 按固定顺序推导：`mode=disabled` 时返回 `stopped`；当前作用域存在执行中调用时返回 `running`；存在就绪实例时返回 `ready`；没有实时实例时再读取 `catalog.jsonl` 的持久化基线，返回 `failed` 或 `stopped`。因此 `running/ready` 来自实时运行时，`stopped/failed` 来自无实时实例时的持久化状态。`cache_status` 与 `status` 是独立维度，服务保持 `ready/stopped` 时仍可通过 `last_refresh_error*` 展示刷新警告。`GET /api/v1/mcps` 支持 `status=running|ready|stopped|failed` 筛选，并返回启动失败次数、最近启动失败与刷新失败字段。`failure_scope` 当前为 `global` 或 `user`，枚举允许未来扩展。
 - 发送后失去结果标记为 outcome_unknown，不自动重放调用。
 
 Windows 使用 MCP SDK 的 Job Object 清理子进程树；Linux 使用独立进程组。Linux 作为长期服务运行时，建议使用附带的 systemd 单元（KillMode=control-group）或 Docker init，以在网关异常终止时一起回收进程。

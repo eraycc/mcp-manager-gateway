@@ -2,7 +2,6 @@ from contextlib import asynccontextmanager
 
 import httpx
 import pytest
-from jsonschema import ValidationError
 
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
@@ -100,14 +99,15 @@ async def test_missing_cached_tool_cannot_bypass_validation(tmp_path):
             with pytest.raises(GatewayError) as exc:
                 await app.state.catalog.call(row, lease, "missing", {})
             assert exc.value.code == "tool_not_found"
-            with pytest.raises(ValidationError):
+            with pytest.raises(GatewayError) as current:
                 await app.state.catalog.call(row, lease, "first", {})
+            assert current.value.code == "tool_not_found"
         finally:
             await app.state.runtime.release(lease.id)
 
 
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
-async def test_eager_start_and_call_replace_stale_cache(tmp_path, transport):
+async def test_eager_start_and_call_keeps_refresh_warning_without_implicit_discovery(tmp_path, transport):
     async with console(tmp_path) as (app, web, actor):
         @asynccontextmanager
         async def connect(spec):
@@ -118,12 +118,16 @@ async def test_eager_start_and_call_replace_stale_cache(tmp_path, transport):
         assert app.state.runtime.status()[0]["phase"] == "ready"
         assert app.state.catalog.cached(row)["tools"][0]["name"] == "current"
         await app.state.runtime.stop_server(row.id)
-        app.state.catalog.save_cache(row, {"tools": [{"name": "current", "inputSchema": {"type": "object"}}],
-                                          "cache_error": "old startup timeout", "cache_status": "error"})
+        app.state.catalog.save_cache(row, {
+            "tools": [{"name": "current", "inputSchema": {"type": "object"}}],
+            "cache_status": "ready",
+            "last_refresh_error": "old tools/list failure",
+            "last_refresh_error_code": "connection_error",
+        })
         lease = app.state.runtime.create_lease("system", "test")
         try:
             await app.state.catalog.call(row, lease, "current", {"value": 1})
-            assert app.state.catalog.cached(row)["cache_error"] is None
+            assert app.state.catalog.cached(row)["last_refresh_error"] == "old tools/list failure"
             assert app.state.catalog.cached(row)["cache_status"] == "ready"
         finally:
             await app.state.runtime.release(lease.id)
@@ -142,7 +146,8 @@ async def test_revoked_credential_discovery_does_not_restore_cache(tmp_path):
                 app.state.runtime.credential_versions[(row.id, actor["id"])] = None
                 return await super().discover()
         with pytest.raises(GatewayError):
-            await app.state.catalog.connection_ready(spec, RevokedConnection())
+            result = await RevokedConnection().discover()
+            await app.state.catalog.store_discovery(row, result, actor["id"], spec=spec)
         assert app.state.catalog.cached(row, actor["id"])["tools"] == []
 
 

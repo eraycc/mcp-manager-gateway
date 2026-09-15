@@ -11,10 +11,11 @@ async def test_failed_saved_service_shows_warning(bug1_browser):
     await page.get_by_label("服务名称", exact=True).fill("Broken")
     await page.get_by_label("可执行命令", exact=False).fill("missing")
     await page.route("**/api/v1/mcps", lambda r: r.fulfill(json={
-        "id": "broken", "mode": "disabled", "cache_status": "error",
-        "auto_disabled": True, "cache_error": "missing executable", "cache_error_code": "startup_failed"}))
+        "id": "broken", "mode": "lazy", "status": "stopped", "cache_status": "error",
+        "startup_failure_count": 1, "last_startup_error": "missing executable",
+        "last_startup_error_code": "startup_failed"}))
     await page.get_by_role("button", name="创建服务", exact=True).click()
-    await expect(page.locator("#toast")).to_contain_text("已自动禁用")
+    await expect(page.locator("#toast")).to_contain_text("工具目录尚未就绪")
     await expect(page.locator("#toast")).to_have_attribute("data-status", "warning")
 
 
@@ -22,8 +23,9 @@ async def test_refresh_failure_replaces_open_cached_tool_list(bug1_browser):
     page, url = bug1_browser
     stale = {"tools": [{"name": "old_tool", "inputSchema": {"type": "object"}}],
              "cache_status": "ready", "cache_at": "2026-09-12T00:00:00Z"}
-    failure = {"tools": [], "cache_status": "error", "auto_disabled": True,
-               "cache_error": "upstream offline", "cache_error_code": "connection_error"}
+    failure = {**stale, "last_refresh_error": "upstream offline",
+               "last_refresh_error_code": "connection_error",
+               "last_refresh_failure_at": "2026-09-15T00:00:00Z"}
     state = {"failed": False}
     await page.route("**/api/v1/mcps/broken/tools",
                      lambda r: r.fulfill(json=failure if state["failed"] else stale))
@@ -35,8 +37,8 @@ async def test_refresh_failure_replaces_open_cached_tool_list(bug1_browser):
     dialog = page.get_by_role("dialog")
     await expect(dialog).to_contain_text("old_tool")
     await dialog.get_by_role("button", name="刷新发现缓存").click()
-    await expect(dialog).not_to_contain_text("old_tool")
-    await expect(dialog).to_contain_text("已自动禁用")
+    await expect(dialog).to_contain_text("old_tool")
+    await expect(dialog).to_contain_text("最近刷新警告")
     await expect(dialog).to_contain_text("upstream offline")
     await expect(page.locator("#toast")).to_have_attribute("data-status", "fail")
 

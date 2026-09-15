@@ -111,10 +111,18 @@ async def test_tokens_use_own_oauth_and_one_user_failure_preserves_other(tmp_pat
                 await catalog.refresh(row.id, alice["id"])
         current = await catalog.get(row.id)
         assert (current.mode, current.revision) == ("lazy", before)
-        assert catalog.cached(current, alice["id"])["tools"] == []
+        alice_cache = catalog.cached(current, alice["id"])
+        if failure == "disconnect":
+            assert alice_cache["tools"] == []
+        else:
+            assert alice_cache["cache_status"] == "ready"
+            assert [tool["name"] for tool in alice_cache["tools"]] == ["whoami"]
+            assert alice_cache["last_refresh_error"]
+            assert alice_cache["startup_failure_count"] == 0
         assert catalog.cached(current, bob["id"])["cache_status"] == "ready"
         assert not (await invoke(bob)).is_error
         assert calls[-1] == (bob["id"], "Bearer oauth-bob")
-        assert (await invoke(alice)).is_error
+        alice_result = await invoke(alice)
+        assert alice_result.is_error is (failure != "discovery")
         specs = [item.spec for item in app.state.runtime.instances.values()]
         assert all(spec.isolation == "user" for spec in specs)
