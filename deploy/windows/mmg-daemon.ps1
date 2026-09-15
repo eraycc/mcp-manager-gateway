@@ -44,22 +44,23 @@ if ($cfg['DATA_DIR'])     { $env:MCP_MANAGER_DATA_DIR     = $cfg['DATA_DIR'] }
 if ($cfg['DATABASE_URL']) { $env:MCP_MANAGER_DATABASE_URL = $cfg['DATABASE_URL'] }
 if ($cfg['COOKIE_SECURE']) { $env:MCP_MANAGER_COOKIE_SECURE = $cfg['COOKIE_SECURE'] }
 
-# --- Explicit PATH (service/scheduled-task env has sparse PATH) ---
-$systemPaths = @(
-  'C:\Windows\system32'
-  'C:\Windows'
-  'C:\Windows\System32\Wbem'
-  'C:\Windows\System32\WindowsPowerShell\v1.0\'
-  'C:\Windows\System32\OpenSSH\'
-)
-$userPaths = @(
-  (Join-Path $userHome 'AppData\Local\nvm')
-  (Join-Path $env:ProgramFiles 'nodejs')
-  $mmgDir
-  (Join-Path $userHome 'AppData\Local\Microsoft\WindowsApps')
-  (Join-Path $env:ProgramFiles 'Git\cmd')
-)
-$env:PATH = ($systemPaths + $userPaths) -join ';'
+# --- PATH: build the full user PATH.
+# --- Start-Process -WindowStyle Hidden gives the child PowerShell an empty or
+# --- system-only $env:PATH. Read the user-level PATH from the registry (HKCU)
+# --- and the system-level PATH (HKLM) via `reg query`, then merge.
+$mmgDir = Join-Path $userHome '.local\bin'
+$existingPath = $env:PATH
+# Read user PATH from HKCU\Environment
+$usrPath = ''
+$usrReg = reg query 'HKCU\Environment' /v Path 2>$null | Select-String 'Path'
+if ($usrReg) { $usrPath = ($usrReg -split 'REG_' -replace '.*REG_(?:EXPAND_)?SZ\s+','').Trim() }
+# Read system PATH from HKLM
+$sysPath = ''
+$sysReg = reg query 'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' /v Path 2>$null | Select-String 'Path'
+if ($sysReg) { $sysPath = ($sysReg -split 'REG_' -replace '.*REG_(?:EXPAND_)?SZ\s+','').Trim() }
+# Merge: mmgDir + existing + user + system, de-duplicate.
+$pathParts = @($mmgDir) + (($existingPath -split ';') + (($usrPath -split ';') + ($sysPath -split ';')))
+$env:PATH = ($pathParts | Where-Object { $_.Trim() -ne '' } | Select-Object -Unique) -join ';'
 
 $workDir = Join-Path $userHome '.mcp-manager'
 if (-not (Test-Path $workDir)) { New-Item -ItemType Directory -Path $workDir -Force | Out-Null }
@@ -75,13 +76,14 @@ while ($true) {
   $psi.FileName = $mmg
   $psi.Arguments = "serve --host $($cfg['HOST']) --port $($cfg['PORT'])"
   $psi.UseShellExecute = $false
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
   $psi.CreateNoWindow = $true
   $psi.WorkingDirectory = $workDir
+  # Do NOT redirect stdout/stderr: when RedirectStandardOutput=$true the child
+  # mmg process gets a pipe; mmg's stdio MCP children (uvx etc.) inherit that
+  # pipe, and the pipe buffer fills because ReadToEnd() is only called after
+  # WaitForExit(), deadlocking the child. Without redirection, stdout goes to
+  # the console (null when hidden) and children can write freely.
   $proc = [System.Diagnostics.Process]::Start($psi)
-  $proc.StandardOutput.ReadToEnd() | Out-Null
-  $proc.StandardError.ReadToEnd() | Out-Null
   $proc.WaitForExit()
   $exitCode = $proc.ExitCode
   $ErrorActionPreference = $prevEAP
