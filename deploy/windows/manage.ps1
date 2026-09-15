@@ -3,8 +3,7 @@
 # 通用: 用 $env:USERPROFILE，无硬编码用户名。
 # 配置存 .env（脚本同级目录），配置不写注册表。
 # 服务 = HKCU Run 键（当前用户，无需管理员）；直接启动 = 临时后台。
-# 写法: 本文件以 .log 扩展名写入(明文落盘)再改名为 .ps1，避免 DLP 加密 .ps1；
-#       文件头带 UTF-8 BOM，使 Windows PowerShell 5.x 按 UTF-8 读取中文。
+# 文件头带 UTF-8 BOM，使 Windows PowerShell 5.x 按 UTF-8 读取中文。
 $ErrorActionPreference = 'Stop'
 $scriptDir = $PSScriptRoot
 $daemon    = Join-Path $scriptDir 'mmg-daemon.ps1'
@@ -101,6 +100,8 @@ function Config-Menu {
       '0' { $loop = $false }
       default { Write-Host '无效，请输入 1/2/0。' }
     }
+    Write-Host ''
+    if ($loop) { Write-Banner; Write-Menu }
   }
 }
 
@@ -116,7 +117,7 @@ function Install-Service {
   $cmd = Get-ServiceCmd
   Set-ItemProperty -Path $runKey -Name $entryName -Value $cmd
   Write-Host "服务已安装（HKCU Run $entryName），下次登录自动启动。"
-  Write-Host '现在启��？(y/N) ' -NoNewline
+  Write-Host '现在启动？(y/N) ' -NoNewline
   $yn = Read-Host; if ($yn -and $yn.Trim().StartsWith('y')) { Start-Service }
 }
 
@@ -192,6 +193,8 @@ function Service-Menu {
       '0' { $loop = $false }
       default { Write-Host '无效，请输入 1-6 或 0。' }
     }
+    Write-Host ''
+    if ($loop) { Write-Banner; Write-Menu }
   }
 }
 
@@ -237,6 +240,8 @@ function Direct-Menu {
       '0' { $loop = $false }
       default { Write-Host '无效，请输入 1-3 或 0。' }
     }
+    Write-Host ''
+    if ($loop) { Write-Banner; Write-Menu }
   }
 }
 
@@ -254,5 +259,6 @@ while ($main) {
     default { Write-Host '无效，请输入 1/2/3/0。' }
   }
   Write-Host ''
+  if ($main) { Write-Banner; Write-Menu }
 }
 Write-Host '再见。'
