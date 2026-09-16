@@ -11,3 +11,4 @@ dist
 docs/
 example/
 .code-review-graph/
+uv.lock
