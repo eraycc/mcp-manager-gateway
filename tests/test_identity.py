@@ -4,7 +4,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from mcp_manager.config import Settings
-from mcp_manager.database import Database, McpServer, set_setting
+from mcp_manager.database import Database, McpServer, get_setting, set_setting
 from mcp_manager.identity import router, authenticate_token
 
 
@@ -62,6 +62,23 @@ async def test_cookie_csrf_last_admin_and_session_revocation(clients):
     assert (await b.get("/api/v1/me")).status_code == 401
     assert (await a.post("/api/v1/auth/logout")).status_code == 200
     assert (await a.get("/api/v1/me")).status_code == 401
+
+
+async def test_user_delete_removes_only_personal_credential_settings(clients):
+    a, b, db = clients
+    await signup(a, "admin")
+    target = await signup(b, "target")
+    await login(a, "admin")
+    await set_setting(db, f"credential:server:{target['id']}", {"sealed": "personal"})
+    await set_setting(db, f"oauth:server:{target['id']}", {"sealed": "legacy"})
+    await set_setting(db, "credential:server:service", {"sealed": "global"})
+
+    response = await a.delete("/api/v1/users/" + target["id"])
+
+    assert response.status_code == 200
+    assert await get_setting(db, f"credential:server:{target['id']}") is None
+    assert await get_setting(db, f"oauth:server:{target['id']}") is None
+    assert await get_setting(db, "credential:server:service") == {"sealed": "global"}
 
 
 async def test_token_scope_revocation_and_object_access(clients):

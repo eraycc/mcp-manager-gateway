@@ -1,4 +1,3 @@
-import hashlib
 import time
 
 import httpx
@@ -53,9 +52,9 @@ async def test_anonymous_lease_requires_independent_client_secret(auth_app):
 
 async def test_oauth_status_and_personal_refresh(auth_app, monkeypatch):
     app, web, user = auth_app
-    row = await app.state.catalog.create({"name": "OAuth", "transport": "rest", "config": {
+    row = await app.state.catalog.create({"name": "OAuth", "transport": "rest", "isolation": "user", "config": {
         "auth": {"type": "oauth", "scope": "user", "authorization_url": "https://auth.test/authorize",
-                 "token_url": "https://auth.test/token"}, "tools": [{"name": "read", "request": {"url": "https://api.test/read"}}]}})
+                 "token_url": "https://auth.test/token"}, "tools": [{"name": "read", "request": {"url": "https://api.test/read"}}]}}, user_id=user["id"])
     endpoint = "/api/v1/mcps/" + row.id + "/oauth/status"
     assert (await web.get(endpoint)).json()["authorized"] is False
     await set_setting(app.state.db, app.state.oauth.key(row, user["id"]), app.state.catalog.seal(
@@ -65,10 +64,11 @@ async def test_oauth_status_and_personal_refresh(auth_app, monkeypatch):
     monkeypatch.setattr(app.state.oauth, "exchange", exchange)
     credentials = await app.state.oauth.credentials(row, user["id"])
     assert credentials["access_token"] == "new"
-    assert app.state.runtime.credential_versions[(row.id, user["id"])] == hashlib.sha256(b"new").hexdigest()[:16]
+    assert app.state.runtime.credential_versions[(row.id, user["id"])] is None
     row = await app.state.catalog.update(row.id, {"mode": "lazy"}, user_id=user["id"])
     spec = await app.state.catalog.spec(row, user["id"])
     assert spec.credential_owner == user["id"]
+    assert app.state.runtime.credential_versions[(row.id, user["id"])]
     await app.state.catalog.warm(row.id, user["id"])
     target = next(target for target in await app.state.catalog.refresh_targets() if target["server_id"] == row.id)
     assert target["user_id"] == user["id"]

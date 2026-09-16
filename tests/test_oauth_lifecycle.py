@@ -7,7 +7,7 @@ import pytest
 
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
-from mcp_manager.database import get_setting, set_setting
+from mcp_manager.database import McpServer, get_setting
 from mcp_manager.runtime import GatewayError
 
 
@@ -19,10 +19,12 @@ async def test_personal_oauth_pkce_refresh_and_disconnect_race(tmp_path, monkeyp
             user = (await web.post("/api/v1/auth/login", json={"username": "admin", "password": "password12345"})).json()
             web.headers["X-CSRF-Token"] = web.cookies["mcp_csrf"]
             row = await app.state.catalog.create({"name": "OAuth REST", "transport": "rest",
+                "isolation": "user",
                 "config": {"auth": {"type": "oauth", "scope": "user", "authorization_url": "https://auth.test/authorize",
                     "token_url": "https://auth.test/token", "client_id": "client", "scopes": ["read"]},
                     "tools": [{"name": "read", "inputSchema": {"type": "object"},
-                               "request": {"url": "https://api.test/value"}}]}})
+                               "request": {"url": "https://api.test/value"}}]}},
+                user_id=user["id"])
             response = await web.post("/api/v1/mcps/" + row.id + "/oauth/start")
             assert response.status_code == 200, response.text
             params = parse_qs(urlsplit(response.json()["authorization_url"]).query)
@@ -40,8 +42,12 @@ async def test_personal_oauth_pkce_refresh_and_disconnect_race(tmp_path, monkeyp
             with pytest.raises(GatewayError):
                 await app.state.oauth.credentials(row, "another-user")
             key = app.state.oauth.key(row, user["id"])
-            await set_setting(app.state.db, key, app.state.catalog.seal(
-                {"access_token": "expired", "refresh_token": "refresh-1", "expires_at": 0}))
+            async with app.state.db.locked() as session:
+                saved = await session.get(McpServer, row.id)
+                await app.state.credentials.save_oauth_token(
+                    session, saved, user["id"],
+                    {"access_token": "expired", "refresh_token": "refresh-1", "expires_at": 0},
+                )
             entered, release = asyncio.Event(), asyncio.Event()
             async def refresh(auth, data):
                 entered.set()
@@ -55,3 +61,6 @@ async def test_personal_oauth_pkce_refresh_and_disconnect_race(tmp_path, monkeyp
             with pytest.raises(GatewayError):
                 await task
             assert await get_setting(app.state.db, key) is None
+            assert "oauth_token" not in await app.state.credentials.load(
+                row.id, user["id"]
+            )

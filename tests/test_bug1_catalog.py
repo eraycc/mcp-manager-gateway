@@ -53,8 +53,10 @@ async def test_create_edit_disable_refreshes_directory_without_kept_lazy_lease(t
 async def test_admin_uses_own_personal_oauth_cache(tmp_path):
     async with console(tmp_path) as (app, web, actor):
         row = await app.state.catalog.create({"name": "personal", "transport": "streamable-http",
+            "isolation": "user",
             "config": {"url": "https://mcp.test", "auth": {"type": "oauth", "scope": "user",
-                "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"}}})
+                "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"}}},
+            user_id=actor["id"])
         from mcp_manager.database import set_setting
         await set_setting(app.state.db, app.state.oauth.key(row, actor["id"]),
                           app.state.catalog.seal({"access_token": "valid"}))

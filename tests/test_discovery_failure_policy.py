@@ -143,6 +143,7 @@ async def test_personal_auth_failure_is_visible_only_to_its_owner(tmp_path):
             json={
                 "name": "personal",
                 "transport": "streamable-http",
+                "isolation": "user",
                 "config": {
                     "url": "https://mcp.test",
                     "auth": {

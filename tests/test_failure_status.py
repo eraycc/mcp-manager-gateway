@@ -212,6 +212,7 @@ async def test_personal_start_failure_counter_is_user_scoped(tmp_path):
             {
                 "name": "personal",
                 "transport": "streamable-http",
+                "isolation": "user",
                 "config": {
                     "url": "https://mcp.test",
                     "auth": {

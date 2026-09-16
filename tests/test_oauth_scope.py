@@ -16,10 +16,11 @@ async def test_provider_scope_preserves_isolation_cache_and_bearer(tmp_path, own
     async with app.router.lifespan_context(app):
         catalog = app.state.catalog
         row = await catalog.create({"name": "OAuth", "transport": "streamable-http",
+            "isolation": "user",
             "config": {"url": "https://mcp.test/mcp", "auth": {
                 "type": "oauth", "scope": owner_scope, "scopes": ["mcp:read"],
                 "authorization_url": "https://auth.test/authorize",
-                "token_url": "https://auth.test/token"}}})
+                "token_url": "https://auth.test/token"}}}, user_id="alice")
         value = {"access_token": "test-access", "scope": "mcp:read", "expires_at": 9999999999}
         await set_setting(app.state.db, app.state.oauth.key(row, "alice"), catalog.seal(value))
 
@@ -40,6 +41,8 @@ async def test_provider_scope_preserves_isolation_cache_and_bearer(tmp_path, own
 
         app.state.runtime.connector = connect
         row = await catalog.update(row.id, {"mode": "lazy"}, user_id="alice")
+        personal = await app.state.credentials.load(row.id, "alice")
+        assert personal.get("oauth_token", {}).get("access_token") == "test-access", personal
         spec = await catalog.spec(row, "alice")
         assert spec.config["auth"]["scope"] == owner_scope
         assert spec.config["auth"]["scopes"] == ["mcp:read"]
@@ -57,4 +60,6 @@ async def test_provider_scope_preserves_isolation_cache_and_bearer(tmp_path, own
         assert catalog.cached(row, "bob")["tools"] == []
         with pytest.raises(GatewayError, match="OAuth"):
             await catalog.spec(row, "bob")
-        assert catalog.unseal(row.config)["auth"]["scope"] == owner_scope
+        assert catalog.unseal(row.config)["auth"] == {
+            "type": "oauth", "config_isolation": "shared"
+        }

@@ -228,8 +228,11 @@ async def last_admin(s):
 
 
 async def remove_user(s, user):
-    await s.execute(delete(SystemSetting).where(SystemSetting.key.startswith("oauth:", autoescape=True),
-                                               SystemSetting.key.endswith(":" + user.id, autoescape=True)))
+    for prefix in ("oauth:", "credential:"):
+        await s.execute(delete(SystemSetting).where(
+            SystemSetting.key.startswith(prefix, autoescape=True),
+            SystemSetting.key.endswith(":" + user.id, autoescape=True),
+        ))
     await s.execute(delete(ApiToken).where(ApiToken.user_id == user.id))
     await s.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
     await s.delete(user)

@@ -19,9 +19,8 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
 
-from .runtime import GatewayError, ServerSpec
 from .environment import connection_config, environment_value, stdio_environment
-
+from .runtime import GatewayError, ServerSpec
 
 BUILTIN_TRANSPORTS = {"stdio", "streamable-http", "sse", "rest"}
 PLUGINS = {}
@@ -121,8 +120,6 @@ def validate_config(transport, config):
                 check_url(auth.get(field, ""))
             except ValueError as exc:
                 raise ValueError("OAuth " + field + ": " + str(exc)) from exc
-        if auth.get("scope", "user") != "user":
-            raise ValueError("OAuth scope must be user; each user authorizes independently")
     auth_header = (auth.get("header", "X-API-Key") if auth.get("type") == "api_key" else
                    "Authorization" if auth.get("type") in {"oauth", "basic", "bearer"} else None)
     if auth_header:
@@ -183,6 +180,22 @@ def validate_config(transport, config):
     for key, value in config.get("headers", {}).items():
         if "\r" in str(key) + str(value) or "\n" in str(key) + str(value):
             raise ValueError("Headers cannot contain line breaks")
+
+
+def validate_service_config(transport, isolation, config):
+    """Validate transport configuration together with its instance isolation."""
+    validate_config(transport, config)
+    if isolation not in {"service", "user", "session"}:
+        raise ValueError("Invalid isolation")
+    if isolation == "session" and transport != "stdio":
+        raise ValueError("session isolation is only valid for stdio")
+    auth = config.get("auth", {})
+    if auth.get("type") == "oauth":
+        value = auth.get("config_isolation", "shared")
+        if value not in {"shared", "user"}:
+            raise ValueError("OAuth config_isolation must be shared or user")
+        if isolation != "user" and value != "shared":
+            raise ValueError("OAuth config_isolation must be shared outside user isolation")
 
 
 def check_url(url, *, template=False):

@@ -3,12 +3,12 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from .catalog import web_authorizer
+from .catalog import SECRET_KEYS, restore, sanitize_diagnostic_error, web_authorizer
 from .database import McpServer, SystemSetting, get_setting
 from .identity import admin_user, current_user, effective_mcp_ids
 from .imports import deduplicate, normalize_import, scan_sources
 from .runtime import GatewayError, ServerSpec
-from .transports import validate_config
+from .transports import validate_service_config
 
 router = APIRouter(prefix="/api/v1")
 ADMIN = Depends(admin_user)
@@ -50,7 +50,7 @@ async def create(data: dict, request: Request, user=ADMIN):
     cat = request.app.state.catalog
     row = await cat.create(data, authorize=web_authorizer(request), user_id=user.id)
     await request.app.state.logs.audit("mcp.create", user.id, {"mcp_id": row.id})
-    return cat.public(row, detail=True, user_id=user.id)
+    return await cat.detail(row, user.id)
 
 
 @router.post("/mcps/import-preview")
@@ -74,8 +74,16 @@ async def import_deduplicate(data: dict, request: Request, response: Response, u
     response.headers["Cache-Control"] = "no-store"
     parsed = normalize_import(data.get("data", []), data.get("channel", "generic"))
     cat = request.app.state.catalog
-    existing = [{"name": row.name, "transport": row.transport, "isolation": row.isolation,
-                 "config": cat.unseal(row.config)} for row in await cat.rows()]
+    existing = []
+    for row in await cat.rows():
+        existing.append({
+            "name": row.name,
+            "transport": row.transport,
+            "isolation": row.isolation,
+            "config": await cat.credentials.materialize(
+                row, user.id, require=False
+            ),
+        })
     kept, duplicates = deduplicate(parsed["items"], existing)
     return {"items": kept, "duplicates": duplicates, "errors": parsed["errors"]}
 
@@ -129,25 +137,89 @@ async def export_mcps(data: dict, request: Request, user=ADMIN):
     for row in await cat.rows():
         if data.get("ids") and row.id not in data["ids"]:
             continue
-        public = cat.public(row, detail=True, user_id=user.id)
-        result[row.slug] = {k: public[k] for k in ("name", "description", "tags", "transport", "mode", "isolation", "config")}
+        public = await cat.detail(row, user.id)
+        result[row.slug] = {
+            key: public[key]
+            for key in (
+                "name", "description", "tags", "transport",
+                "mode", "isolation", "config",
+            )
+        }
         if data.get("include_secrets", False):
-            result[row.slug]["config"] = cat.unseal(row.config)
+            result[row.slug]["config"] = await cat.credentials.materialize(
+                row, user.id, require=False
+            )
     await request.app.state.logs.audit("mcp.export", user.id,
                                        {"count": len(result), "include_secrets": data.get("include_secrets", False)})
     return {"mcpServers": result}
 
 
+def diagnostic_secrets(value, parent=""):
+    values = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            lowered = key.lower()
+            if (
+                lowered in SECRET_KEYS or parent in {"env", "headers"}
+            ) and isinstance(item, (str, int, float)) and item:
+                values.append(str(item))
+            values.extend(diagnostic_secrets(item, lowered))
+    elif isinstance(value, list):
+        for item in value:
+            values.extend(diagnostic_secrets(item, parent))
+    return values
+
+
+def has_redacted(value):
+    if value == "[REDACTED]":
+        return True
+    if isinstance(value, dict):
+        return any(has_redacted(item) for item in value.values())
+    if isinstance(value, list):
+        return any(has_redacted(item) for item in value)
+    return False
+
+
 @router.post("/mcps/diagnose")
 async def diagnose(data: dict, request: Request, user=ADMIN):
     user = await web_authorizer(request)()
+    cat = request.app.state.catalog
     transport = data.get("transport", "stdio")
     transport = "streamable-http" if transport == "http" else transport
-    validate_config(transport, data.get("config", {}))
+    isolation = data.get("isolation", "service")
+    config = data.get("config", {})
+    secrets = diagnostic_secrets(config)
+    server_id = data.get("server_id")
+    if server_id:
+        row = await cat.get(server_id)
+        if data.get("revision") != row.revision:
+            raise HTTPException(
+                409, "MCP configuration changed; reload before diagnosis"
+            )
+        saved = await cat.credentials.materialize(
+            row, user.id, require=False
+        )
+        secrets.extend(diagnostic_secrets(saved))
+        config = restore(config, saved)
+        if has_redacted(config):
+            raise GatewayError(
+                "auth_required", "Saved credential is unavailable"
+            )
+    validate_service_config(transport, isolation, config)
     runtime = request.app.state.runtime
     lease = runtime.create_lease(user.id, "diagnostic", kind="maintenance")
     try:
-        return await runtime.discover(ServerSpec("diagnose-" + uuid4().hex, transport, data["config"]), lease.id)
+        spec = ServerSpec(
+            "diagnose-" + uuid4().hex,
+            transport,
+            config,
+            "lazy",
+            isolation,
+        )
+        try:
+            return await runtime.discover(spec, lease.id)
+        except GatewayError as exc:
+            raise sanitize_diagnostic_error(exc, secrets) from exc
     finally:
         await runtime.release(lease.id)
 
@@ -185,15 +257,17 @@ async def batch(data: dict, request: Request, user=ADMIN):
 @router.get("/mcps/{server_id}")
 async def detail(server_id: str, request: Request, user=USER):
     row = await permitted(request, server_id, user)
-    return request.app.state.catalog.public(row, detail=user.role == "admin",
-                                            user_id=user.id, runtime_user_id=None if user.role == "admin" else user.id)
+    cat = request.app.state.catalog
+    if user.role == "admin":
+        return await cat.detail(row, user.id)
+    return cat.public(row, user_id=user.id, runtime_user_id=user.id)
 
 
 @router.patch("/mcps/{server_id}")
 async def update(server_id: str, data: dict, request: Request, user=ADMIN):
     row = await request.app.state.catalog.update(server_id, data, authorize=web_authorizer(request), user_id=user.id)
     await request.app.state.logs.audit("mcp.update", user.id, {"mcp_id": row.id, "revision": row.revision})
-    return request.app.state.catalog.public(row, detail=True, user_id=user.id)
+    return await request.app.state.catalog.detail(row, user.id)
 
 
 @router.delete("/mcps/{server_id}")
@@ -209,15 +283,27 @@ async def duplicate(server_id: str, request: Request, user=ADMIN):
     cat = request.app.state.catalog
     row = await cat.get(server_id)
     values = cat.public(row)
-    values.update(slug=row.slug[:56] + "_" + uuid4().hex[:6], name=row.name[:120] + " Copy",
-                  config=cat.unseal(row.config), mode="lazy")
-    return cat.public(await cat.create(values, authorize=web_authorizer(request), user_id=user.id), detail=True, user_id=user.id)
+    values.update(
+        slug=row.slug[:56] + "_" + uuid4().hex[:6],
+        name=row.name[:120] + " Copy",
+        config=await cat.credentials.materialize(row, user.id, require=False),
+        mode="lazy",
+    )
+    copied = await cat.create(
+        values, authorize=web_authorizer(request), user_id=user.id
+    )
+    return await cat.detail(copied, user.id)
 
 
 @router.get("/mcps/{server_id}/tools")
 async def cached_tools(server_id: str, request: Request, user=USER):
     row = await permitted(request, server_id, user)
-    return request.app.state.catalog.cached(row, user.id)
+    cat = request.app.state.catalog
+
+    async def authorize():
+        await permitted(request, server_id, user)
+
+    return await cat.ensure_ready(row, user.id, authorize=authorize)
 
 
 @router.post("/mcps/{server_id}/refresh")

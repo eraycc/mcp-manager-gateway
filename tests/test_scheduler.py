@@ -9,7 +9,7 @@ async def test_schedule_expands_personal_oauth_only_for_authorized_owners(tmp_pa
     async with app.router.lifespan_context(app):
         config = {"auth": {"type": "oauth", "scope": "user", "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"},
                   "tools": [{"name": "read", "request": {"url": "https://example.test"}}]}
-        personal = await app.state.catalog.create({"name": "personal", "transport": "rest", "config": config})
+        personal = await app.state.catalog.create({"name": "personal", "transport": "rest", "isolation": "user", "config": config}, user_id="creator")
         public = await app.state.catalog.create({"name": "public", "transport": "stdio", "config": {"command": "fake"}})
         async with app.state.db.locked() as session:
             # Seed enabled rows: this test exercises owner selection, not discovery.

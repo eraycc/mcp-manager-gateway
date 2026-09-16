@@ -51,10 +51,23 @@ async def bug1_browser(tmp_path):
 async def test_oauth_profile_only_oauth_and_disconnect(bug1_browser):
     page, url = bug1_browser
     rows = [
-        {"id": "plain", "name": "普通服务", "slug": "plain", "transport": "stdio", "auth_type": "none"},
-        {"id": "oauth", "name": "授权服务", "slug": "oauth", "transport": "streamable-http", "auth_type": "oauth"},
+        {"id": "plain", "name": "普通服务", "slug": "plain", "transport": "stdio",
+         "mode": "lazy", "isolation": "service", "revision": 1, "auth_type": "none"},
+        {"id": "oauth", "name": "授权服务", "slug": "oauth", "transport": "streamable-http",
+         "mode": "lazy", "isolation": "user", "revision": 1, "auth_type": "oauth"},
     ]
     await page.route("**/api/v1/mcps?*", lambda r: r.fulfill(json={"items": rows, "total": 2}))
+    async def credential_status(route):
+        oauth = "/mcps/oauth/" in route.request.url
+        await route.fulfill(json={
+            "required": oauth,
+            "auth_type": "oauth" if oauth else "none",
+            "isolation": "user" if oauth else "service",
+            "config_isolation": "shared" if oauth else None,
+            "state": "pending_authorization" if oauth else "not_required",
+            "action": "authorize" if oauth else None,
+        })
+    await page.route("**/api/v1/mcps/*/credentials/status", credential_status)
     await page.route("**/api/v1/mcps/oauth/oauth/status", lambda r: r.fulfill(json={"authorized": True, "scope": "user"}))
     await page.route("**/api/v1/mcps/oauth/oauth/start", lambda r: r.fulfill(json={"authorization_url": "https://example.com/authorize"}))
     disconnected = []
@@ -63,8 +76,8 @@ async def test_oauth_profile_only_oauth_and_disconnect(bug1_browser):
         await route.fulfill(json={"ok": True})
     await page.route("**/api/v1/mcps/oauth/oauth/disconnect", disconnect)
     await page.goto(url + "/#/profile")
-    await expect(page.get_by_role("button", name="OAuth 授权", exact=True)).to_have_count(1)
-    await page.get_by_role("button", name="OAuth 授权", exact=True).click()
+    await expect(page.get_by_role("button", name="授权", exact=True)).to_have_count(1)
+    await page.get_by_role("button", name="授权", exact=True).click()
     dialog = page.get_by_role("dialog", name="授权服务", exact=True)
     button = dialog.get_by_role("button", name="断开 OAuth 授权", exact=True)
     await expect(button).to_have_class("danger")
@@ -74,7 +87,7 @@ async def test_oauth_profile_only_oauth_and_disconnect(bug1_browser):
     await expect(button).to_have_count(0)
     assert disconnected == ["POST"]
     await page.route("**/api/v1/mcps/oauth/oauth/status", lambda r: r.fulfill(json={"authorized": False, "scope": "user"}))
-    await page.get_by_role("button", name="OAuth 授权", exact=True).click()
+    await page.get_by_role("button", name="授权", exact=True).click()
     await expect(page.get_by_role("button", name="断开 OAuth 授权", exact=True)).to_have_count(0)
     await expect(page.get_by_role("link", name="打开授权页面")).to_be_visible()
     await page.get_by_role("dialog").get_by_role("button", name="关闭", exact=True).click()

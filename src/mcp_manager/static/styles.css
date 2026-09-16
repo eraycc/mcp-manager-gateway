@@ -74,3 +74,6 @@ html,body,#app{min-height:100vh}html:has(body.dark){background:#101726}.shell{mi
 #settings_tab-panel-embedding small,#settings_tab-panel-embedding .notice{overflow-wrap:anywhere}
 .toolbar>label.filter-submit-field{display:grid;grid-template-rows:auto auto;align-content:start}
 .toolbar>label.filter-submit-field>.field-label{min-height:1.55em;line-height:1.55}
+
+.credential-service{justify-content:space-between}.credential-service-name{display:flex;align-items:center;gap:10px;min-width:0}.credential-service>.actions{justify-content:flex-end}
+@media(max-width:720px){.credential-service{align-items:flex-start}.credential-service>.actions{width:100%;justify-content:flex-start}}

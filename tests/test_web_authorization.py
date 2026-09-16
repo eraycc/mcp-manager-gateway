@@ -130,6 +130,7 @@ async def test_oauth_callback_rechecks_after_network_without_holding_db_lock(web
         saved.transport = "streamable-http"
         saved.config = app.state.catalog.seal(config)
         if change == "grant":
+            saved.isolation = "user"
             user = await s.get(User, actor["id"])
             user.role, user.mcp_ids = "user", [row.id]
     response = await c.post("/api/v1/mcps/" + row.id + "/oauth/start")

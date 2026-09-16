@@ -52,8 +52,10 @@ async def test_oauth_scope_refresh_and_call_over_http(tmp_path):
                 user = (await web.post("/api/v1/auth/login",
                     json={"username": "admin", "password": "password12345"})).json()
                 row = await app.state.catalog.create({"name": "HTTP OAuth", "transport": "streamable-http",
+                    "isolation": "user",
                     "config": {"url": url, "auth": {"type": "oauth", "scope": "user", "scopes": ["mcp:read"],
-                        "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"}}})
+                        "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"}}},
+                    user_id=user["id"])
                 await set_setting(app.state.db, app.state.oauth.key(row, user["id"]), app.state.catalog.seal(
                     {"access_token": "fixture-token", "scope": "mcp:read", "expires_at": 9999999999}))
                 row = await app.state.catalog.update(row.id, {"mode": "lazy"}, user_id=user["id"])

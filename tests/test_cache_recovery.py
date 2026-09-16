@@ -133,6 +133,7 @@ async def test_oauth_authorization_then_start_uses_current_users_credentials(tmp
             {
                 "name": "personal",
                 "transport": "streamable-http",
+                "isolation": "user",
                 "config": {
                     "url": "https://mcp.test",
                     "auth": {

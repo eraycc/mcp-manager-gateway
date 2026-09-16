@@ -17,12 +17,13 @@ from jsonschema import Draft202012Validator
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
+from .credentials import catalog_owner, credential_owner
 from .database import ApiToken, McpServer, SystemSetting, User, now
 from .identity import public as public_model
 from .identity import revalidate_user
 from .jsonl_store import JsonlStore
 from .runtime import GatewayError, ServerSpec
-from .transports import validate_config
+from .transports import validate_service_config
 
 SECRET_KEYS = {"password", "token", "access_token", "refresh_token", "client_secret",
                "authorization", "cookie", "api_key", "value"}
@@ -62,6 +63,60 @@ def restore(value, previous):
     return value
 
 
+def diagnostic_cause(exc):
+    """Return the most specific downstream cause from wrapped failures."""
+    current = exc
+    while getattr(current, "__cause__", None) is not None:
+        current = current.__cause__
+    if isinstance(current, BaseExceptionGroup):
+        leaves = []
+
+        def collect(group):
+            for child in group.exceptions:
+                if isinstance(child, BaseExceptionGroup):
+                    collect(child)
+                else:
+                    leaves.append(diagnostic_cause(child))
+
+        collect(current)
+        return next(
+            (
+                item
+                for item in leaves
+                if getattr(getattr(item, "response", None), "status_code", None)
+            ),
+            leaves[-1] if leaves else current,
+        )
+    return current
+
+
+def sanitize_diagnostic_error(exc, secrets):
+    """Expose useful downstream type/status while redacting sensitive values."""
+    cause = diagnostic_cause(exc)
+    message = str(cause) or type(cause).__name__
+    for secret in sorted(
+        {str(value) for value in secrets if value}, key=len, reverse=True
+    ):
+        message = message.replace(secret, "[REDACTED]")
+    message = re.sub(
+        r"(?i)\b(?:authorization|cookie|set-cookie)\b[^;\r\n]*",
+        "[REDACTED]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)([?&](?:code|access_token|refresh_token)=)[^&\s]+",
+        r"\1[REDACTED]",
+        message,
+    )
+    details = {
+        "error_type": type(cause).__name__,
+        "downstream_status": getattr(
+            getattr(cause, "response", None), "status_code", None
+        ),
+    }
+    return GatewayError("diagnosis_failed", message[:500], details)
+
+
 def alias(slug, name):
     result = slug + "__" + name
     if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", result):
@@ -88,7 +143,9 @@ class Catalog:
         self.cache_dir = Path(config.data_dir) / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.locks = WeakValueDictionary()
+        self.discovery_locks = WeakValueDictionary()
         self.oauth = None
+        self.credentials = None
         self.tasks = set()
         self.cache_store = JsonlStore(self.cache_dir / "catalog.jsonl", fail_closed=True)
         self._cache_failures = {}
@@ -118,13 +175,7 @@ class Catalog:
         return {"sealed": self.fernet.encrypt(json.dumps(value, ensure_ascii=False).encode()).decode()}
 
     def unseal(self, value):
-        result = json.loads(self.fernet.decrypt(value["sealed"])) if "sealed" in value else copy.deepcopy(value)
-        # Legacy service credentials remain stored but are never used for OAuth.
-        # Every caller must authorize independently under their own identity.
-        if (isinstance(result, dict) and isinstance(result.get("auth"), dict)
-                and result["auth"].get("type") == "oauth"):
-            result["auth"]["scope"] = "user"
-        return result
+        return json.loads(self.fernet.decrypt(value["sealed"])) if "sealed" in value else copy.deepcopy(value)
 
     async def get(self, server_id):
         async with self.db.session() as s:
@@ -169,15 +220,22 @@ class Catalog:
             result["config"] = masked(self.unseal(row.config))
         return result
 
+    async def detail(self, row, user_id=None):
+        """Return a masked editor model resolved only for the current owner."""
+        result = self.public(row, user_id=user_id)
+        config = await self.credentials.materialize(
+            row, user_id, require=False
+        )
+        result["config"] = masked(config)
+        return result
+
     def cache_key(self, row, user_id=None):
-        config = self.unseal(row.config)
-        scope = user_id if config.get("auth", {}).get("scope") == "user" else "service"
-        suffix = hashlib.sha256(str(scope or "anonymous").encode()).hexdigest()[:24]
+        owner = catalog_owner(row.isolation, user_id)
+        suffix = hashlib.sha256(owner.encode()).hexdigest()[:24]
         return row.id + "-" + suffix
 
     def failure_scope(self, row):
-        auth = self.unseal(row.config).get("auth", {})
-        return "user" if auth.get("type") == "oauth" and auth.get("scope") == "user" else "global"
+        return "user" if row.isolation == "user" else "global"
 
     def service_status(self, row, user_id=None):
         if row.mode == "disabled":
@@ -220,8 +278,6 @@ class Catalog:
             saved = self._cache_failures.get(key) or self.cache_store.get(key)
             return saved["data"] if saved and saved["revision"] == row.revision else None
         saved = current(self.cache_key(row, user_id))
-        if row.mode == "disabled" and saved is None:
-            saved = current(self.cache_key(row))
         empty = {
             **{key: [] for key in CAPABILITY_KEYS},
             "cache_at": None,
@@ -243,6 +299,12 @@ class Catalog:
             if row.mode == "disabled" and value["cache_status"] != "error":
                 value["cache_status"] = "disabled"
         return value
+
+    def delete_cache(self, row, user_id=None):
+        """Delete one canonical owner cache without crossing isolation scopes."""
+        key = self.cache_key(row, user_id)
+        self.cache_store.set(key, None)
+        self._cache_failures.pop(key, None)
 
     def save_cache(self, row, value, user_id=None):
         key = self.cache_key(row, user_id)
@@ -459,7 +521,7 @@ class Catalog:
     async def refresh_after_change(self, row, user_id=None, authorize=None):
         if row.mode == "disabled":
             self.save_cache(row, {"tools": [], "resources": [], "prompts": [], "templates": [],
-                                  "cache_status": "disabled"})
+                                  "cache_status": "disabled"}, user_id)
             return
         try:
             if row.isolation == "session":
@@ -478,27 +540,44 @@ class Catalog:
             failure = self.failed_error(row, user_id)
             if failure is not None:
                 raise failure
-        config = self.unseal(row.config)
-        credential_scope = ""
-        credential_owner = ""
-        isolation = row.isolation
-        if config.get("auth", {}).get("type") == "oauth":
-            if not user_id or not self.oauth:
-                raise GatewayError("auth_required", "Personal OAuth requires a signed-in user")
-            isolation = "user"
-            if self.oauth:
-                auth = await self.oauth.credentials(row, user_id)
-                # OAuth token responses use "scope" for provider permissions.
-                # Keep gateway ownership and configuration under local control.
-                config["auth"].update({key: auth[key] for key in
-                    ("access_token", "token_type", "expires_at") if key in auth})
-                if "scope" in auth:
-                    config["auth"]["granted_scope"] = auth["scope"]
-                credential_scope = hashlib.sha256(auth.get("access_token", "").encode()).hexdigest()[:16]
-                credential_owner = user_id if config["auth"].get("scope") == "user" else "service"
-                self.runtime.credential_versions[(row.id, credential_owner)] = credential_scope
-        return ServerSpec(row.id, row.transport, config, row.mode, isolation, row.revision,
-                          credential_scope, credential_owner)
+        if self.credentials is None:
+            config = self.unseal(row.config)
+        else:
+            config = await self.credentials.materialize(row, user_id)
+        auth = config.get("auth", {})
+        auth_type = auth.get("type", "none")
+        if auth_type == "oauth" and self.oauth is not None:
+            await self.oauth.credentials(row, user_id)
+            config = await self.credentials.materialize(row, user_id)
+            auth = config.get("auth", {})
+        if auth_type == "oauth" and not auth.get("access_token"):
+            raise GatewayError(
+                "auth_required", "Complete OAuth authorization in the Web console"
+            )
+        owner = (
+            credential_owner(row.isolation, user_id)
+            if auth_type in {"bearer", "oauth"}
+            else ""
+        )
+        scope = (
+            hashlib.sha256(
+                json.dumps(auth, sort_keys=True, ensure_ascii=False).encode()
+            ).hexdigest()[:16]
+            if owner
+            else ""
+        )
+        if owner:
+            self.runtime.credential_versions[(row.id, owner)] = scope
+        return ServerSpec(
+            row.id,
+            row.transport,
+            config,
+            row.mode,
+            row.isolation,
+            row.revision,
+            scope,
+            owner,
+        )
 
     @staticmethod
     def validate_metadata(values, partial=False):
@@ -518,10 +597,11 @@ class Catalog:
         if transport == "http":
             transport = "streamable-http"
         config = values.get("config", {})
-        validate_config(transport, config)
-        mode, isolation = values.get("mode", "lazy"), values.get("isolation", "service")
-        if mode not in {"eager", "lazy", "disabled"} or isolation not in {"service", "user", "session"}:
-            raise ValueError("Invalid mode or isolation")
+        mode = values.get("mode", "lazy")
+        isolation = values.get("isolation", "service")
+        if mode not in {"eager", "lazy", "disabled"}:
+            raise ValueError("Invalid mode")
+        validate_service_config(transport, isolation, config)
         name = values.get("name", "").strip()
         if not name or len(name) > 128:
             raise ValueError("Name must contain 1–128 characters")
@@ -529,17 +609,31 @@ class Catalog:
         slug = values.get("slug") or generated + "_" + uuid4().hex[:6]
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", slug) or "__" in slug:
             raise ValueError("Slug must contain 1–64 ASCII letters, digits, hyphens or single underscores")
-        row = McpServer(id=str(uuid4()), name=name, slug=slug, description=values.get("description", ""),
-                        tags=values.get("tags", []), transport=transport, mode=mode, isolation=isolation,
-                        config=self.seal(config))
+        row = McpServer(
+            id=str(uuid4()),
+            name=name,
+            slug=slug,
+            description=values.get("description", ""),
+            tags=values.get("tags", []),
+            transport=transport,
+            mode=mode,
+            isolation=isolation,
+            config=self.seal({}),
+        )
         try:
             async with self.db.locked() as s:
                 if authorize:
                     await authorize(s)
                 s.add(row)
                 await s.flush()
+                stored = await self.credentials.persist_config(
+                    s, row, config, isolation, user_id
+                )
+                row.config = self.seal(stored)
+                await s.flush()
         except IntegrityError:
             raise HTTPException(409, "MCP slug already exists")
+        self.runtime.versions[row.id] = row.revision
         await self.refresh_after_change(row, user_id, authorize)
         return await self.get(row.id)
 
@@ -551,14 +645,17 @@ class Catalog:
             self.validate_metadata(values, partial=True)
             if "revision" in values and values["revision"] != old.revision:
                 raise HTTPException(409, "Configuration changed; reload before saving")
-            config = restore(values.get("config", self.unseal(old.config)), self.unseal(old.config))
+            previous = await self.credentials.materialize(
+                old, user_id, require=False
+            )
+            config = restore(values.get("config", previous), previous)
             transport = values.get("transport", old.transport)
             transport = "streamable-http" if transport == "http" else transport
-            validate_config(transport, config)
-            if values.get("mode", old.mode) not in {"eager", "lazy", "disabled"}:
+            mode = values.get("mode", old.mode)
+            isolation = values.get("isolation", old.isolation)
+            if mode not in {"eager", "lazy", "disabled"}:
                 raise ValueError("Invalid mode")
-            if values.get("isolation", old.isolation) not in {"service", "user", "session"}:
-                raise ValueError("Invalid isolation")
+            validate_service_config(transport, isolation, config)
             if authorize:
                 await authorize()
             async with self.changing(server_id):
@@ -566,22 +663,30 @@ class Catalog:
                     if authorize:
                         await authorize(s)
                     row = await s.get(McpServer, server_id)
-                    for key in ("name", "description", "tags", "mode", "isolation"):
+                    stored = await self.credentials.persist_config(
+                        s, row, config, isolation, user_id
+                    )
+                    for key in ("name", "description", "tags"):
                         if key in values:
                             setattr(row, key, values[key])
-                    row.transport, row.config, row.revision = transport, self.seal(config), row.revision + 1
+                    row.mode = mode
+                    row.isolation = isolation
+                    row.transport = transport
+                    row.config = self.seal(stored)
+                    row.revision += 1
                     await s.flush()
-                # Every new revision must discover its own capabilities before publication.
+                # A revision or ownership change must never publish stale tools.
                 self.runtime.versions[server_id] = row.revision
                 self.runtime.holds.discard(server_id)
+                self.cache_store.delete_prefix(server_id + "-")
+                for key in list(self._cache_failures):
+                    if key.startswith(server_id + "-"):
+                        self._cache_failures.pop(key, None)
+                for key in list(self.runtime.credential_versions):
+                    if key[0] == server_id:
+                        self.runtime.credential_versions.pop(key, None)
                 await self.refresh_after_change(row, user_id, authorize)
-                row = await self.get(row.id)
-                for target in await self.refresh_targets(server_id):
-                    if target["user_id"] and target["user_id"] != user_id:
-                        async def owner_authorize(target=target):
-                            await self.authorize_target(target)
-                        self.schedule_warm(row, owner_authorize, target["user_id"])
-                return row
+                return await self.get(row.id)
 
     async def delete(self, server_id, *, authorize=None):
         async with self.locks.setdefault(server_id, asyncio.Lock()):
@@ -595,8 +700,7 @@ class Catalog:
                     if not row:
                         raise HTTPException(404, "MCP not found")
                     await s.delete(row)
-                    await s.execute(delete(SystemSetting).where(
-                        SystemSetting.key.startswith("oauth:" + server_id + ":", autoescape=True)))
+                    await self.credentials.delete_server(s, server_id)
                     await s.execute(delete(SystemSetting).where(SystemSetting.key == "tests:" + server_id))
                     for model in (User, ApiToken):
                         for principal in (await s.scalars(select(model))).all():
@@ -615,20 +719,30 @@ class Catalog:
         for row in await self.rows(ids=[server_id] if server_id else None):
             if row.mode == "disabled":
                 continue
-            auth = self.unseal(row.config).get("auth", {})
-            if auth.get("type") == "oauth" and auth.get("scope") == "user":
-                prefix = "oauth:" + row.id + ":"
-                async with self.db.session() as session:
-                    credentials = (await session.scalars(select(SystemSetting).where(
-                        SystemSetting.key.startswith(prefix, autoescape=True)))).all()
-                    for credential in credentials:
-                        user_id = credential.key[len(prefix):]
-                        user = await session.get(User, user_id)
-                        if (credential.value and user and not user.disabled and
-                                (user.role == "admin" or user.scope_mode == "all" or row.id in user.mcp_ids)):
-                            targets.append({"server_id": row.id, "user_id": user_id})
-            else:
+            if row.isolation != "user":
                 targets.append({"server_id": row.id, "user_id": None})
+                continue
+            owners = await self.credentials.owners(row.id)
+            prefix = "oauth:" + row.id + ":"
+            async with self.db.session() as session:
+                legacy = await session.scalars(select(SystemSetting).where(
+                    SystemSetting.key.startswith(prefix, autoescape=True)
+                ))
+                owners.update(
+                    item.key[len(prefix):] for item in legacy if item.value
+                )
+                for owner in sorted(owners - {"service", "anonymous"}):
+                    user = await session.get(User, owner)
+                    if (
+                        user
+                        and not user.disabled
+                        and (
+                            user.role == "admin"
+                            or user.scope_mode == "all"
+                            or row.id in user.mcp_ids
+                        )
+                    ):
+                        targets.append({"server_id": row.id, "user_id": owner})
         return targets
 
     async def authorize_target(self, target):
@@ -666,6 +780,33 @@ class Catalog:
             raise GatewayError(cache.get("cache_error_code") or "discovery_failed",
                                cache.get("cache_error") or "MCP directory verification failed")
         return True
+
+    async def ensure_ready(self, row, user_id=None, *, authorize=None):
+        """Discover an authorized owner's missing directory exactly once."""
+        current = self.cached(row, user_id)
+        if (
+            current["cache_status"] == "ready"
+            or current["runtime_status"] == "failed"
+            or row.mode == "disabled"
+        ):
+            return current
+        key = (row.id, row.revision, catalog_owner(row.isolation, user_id))
+        lock = self.discovery_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            row = await self.get(row.id)
+            current = self.cached(row, user_id)
+            if (
+                current["cache_status"] == "ready"
+                or current["runtime_status"] == "failed"
+                or row.mode == "disabled"
+            ):
+                return current
+            try:
+                return await self.refresh(
+                    row.id, user_id, authorize=authorize
+                )
+            except (GatewayError, HTTPException):
+                return self.cached(row, user_id)
 
     async def refresh(self, server_id, user_id=None, *, authorize=None):
         if authorize:

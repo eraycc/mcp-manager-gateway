@@ -12,14 +12,16 @@ from fastapi.staticfiles import StaticFiles
 from filelock import FileLock, Timeout
 from jsonschema import ValidationError
 
-from . import catalog_api, embedding_api, identity, operations_api
-from .embeddings import EmbeddingIndex
+from . import catalog_api, credentials_api, embedding_api, identity, operations_api
 from .catalog import Catalog
 from .config import PACKAGE_ROOT, Settings
+from .credentials import CredentialStore
 from .database import ApiToken, Database, User, get_setting, now
+from .embeddings import EmbeddingIndex
 from .jobs import Jobs
 from .logs import LogStore
-from .oauth import OAuth, router as oauth_router
+from .oauth import OAuth
+from .oauth import router as oauth_router
 from .runtime import GatewayError, Runtime
 from .transports import connect, load_transport_plugins
 
@@ -116,8 +118,10 @@ def create_app(config=None):
         state.runtime = Runtime(connect)
         state.jobs = Jobs(config.data_dir)
         state.catalog = Catalog(state.db, state.runtime, state.logs, config)
+        state.credentials = CredentialStore(state.catalog)
+        state.catalog.credentials = state.credentials
         state.embeddings = EmbeddingIndex(config.data_dir)
-        state.oauth = OAuth(state.catalog)
+        state.oauth = OAuth(state.catalog, state.credentials)
         state.catalog.oauth = state.oauth
         state.runtime.on_starting = state.catalog.connection_starting
         state.runtime.on_connect = state.catalog.connection_ready
@@ -137,10 +141,11 @@ def create_app(config=None):
             async with contextlib.AsyncExitStack() as stack:
                 if hasattr(state, "protocol"):
                     await stack.enter_async_context(state.protocol.session_manager.run())
-                eager = {row.id for row in await state.catalog.rows()
-                         if row.mode == "eager" and row.isolation != "session"
-                         and (row.isolation == "service" or
-                              state.catalog.unseal(row.config).get("auth", {}).get("scope") == "user")}
+                eager = {
+                    row.id
+                    for row in await state.catalog.rows()
+                    if row.mode == "eager"
+                }
                 rows = {row.id: row for row in await state.catalog.rows()}
                 targets = [target for target in await state.catalog.refresh_targets()
                            if target["server_id"] in eager or state.catalog.cached(
@@ -190,7 +195,14 @@ def create_app(config=None):
     async def ready():
         return JSONResponse({"ready": app.state.ready}, status_code=200 if app.state.ready else 503)
 
-    for router in (identity.router, catalog_api.router, operations_api.router, oauth_router, embedding_api.router):
+    for router in (
+        identity.router,
+        catalog_api.router,
+        credentials_api.router,
+        operations_api.router,
+        oauth_router,
+        embedding_api.router,
+    ):
         app.include_router(router)
     try:
         from .gateway import install_gateway

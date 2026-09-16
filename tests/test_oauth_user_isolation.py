@@ -22,10 +22,11 @@ def configuration(scope=None):
 
 @pytest.mark.parametrize("legacy_scope", [None, "service", "user"])
 async def test_legacy_oauth_never_reuses_shared_credentials(tmp_path, legacy_scope):
-    async with console(tmp_path) as (app, web, _actor):
+    async with console(tmp_path) as (app, web, actor):
         catalog = app.state.catalog
         row = await catalog.create({"name": "legacy", "transport": "streamable-http",
-                                    "mode": "disabled", "config": configuration()})
+                                    "mode": "disabled", "isolation": "user",
+                                    "config": configuration()}, user_id=actor["id"])
         async with app.state.db.locked() as session:
             saved = await session.get(McpServer, row.id)
             saved.config = catalog.seal(configuration(legacy_scope))
@@ -33,18 +34,22 @@ async def test_legacy_oauth_never_reuses_shared_credentials(tmp_path, legacy_sco
         row = await catalog.get(row.id)
         await set_setting(app.state.db, "oauth:" + row.id + ":service",
                           catalog.seal({"access_token": "shared-secret"}))
-        assert catalog.unseal(row.config)["auth"]["scope"] == "user"
+        assert catalog.unseal(row.config)["auth"].get("config_isolation", "shared") == "shared"
         assert catalog.cache_key(row, "alice") != catalog.cache_key(row, "bob")
         for user_id in (None, "alice", "bob"):
-            with pytest.raises(GatewayError, match="OAuth"):
+            with pytest.raises(GatewayError) as caught:
                 await catalog.spec(row, user_id)
+            assert caught.value.code == "auth_required"
         assert (await web.get("/api/v1/mcps/" + row.id + "/oauth/status")).json() == {
-            "authorized": False, "scope": "user"}
+            "authorized": False,
+            "state": "pending_authorization",
+            "config_isolation": "shared",
+            "isolation": "user",
+        }
 
 
-def test_new_shared_oauth_configuration_is_rejected():
-    with pytest.raises(ValueError, match="user"):
-        validate_config("streamable-http", configuration("service"))
+def test_legacy_oauth_scope_does_not_select_local_ownership():
+    validate_config("streamable-http", configuration("service"))
 
 
 @pytest.mark.parametrize("failure", ["disconnect", "expired", "discovery"])
@@ -54,7 +59,8 @@ async def test_tokens_use_own_oauth_and_one_user_failure_preserves_other(tmp_pat
         bob = (await web.post("/api/v1/users", json={
             "username": "bob", "password": "password12345", "scope_mode": "all"})).json()
         row = await catalog.create({"name": "personal", "slug": "personal",
-            "transport": "streamable-http", "config": configuration()})
+            "transport": "streamable-http", "isolation": "user", "config": configuration()},
+            user_id=alice["id"])
         assert row.mode == "lazy"
         calls, broken = [], set()
 
@@ -103,8 +109,12 @@ async def test_tokens_use_own_oauth_and_one_user_failure_preserves_other(tmp_pat
             assert (await web.post("/api/v1/mcps/" + row.id + "/oauth/disconnect")).status_code == 200
         else:
             if failure == "expired":
-                await set_setting(app.state.db, app.state.oauth.key(row, alice["id"]),
-                                  catalog.seal({"access_token": "expired", "expires_at": 0}))
+                async with app.state.db.locked() as session:
+                    saved = await session.get(McpServer, row.id)
+                    await app.state.credentials.save_oauth_token(
+                        session, saved, alice["id"],
+                        {"access_token": "expired", "expires_at": 0},
+                    )
             else:
                 broken.add(alice["id"])
             with pytest.raises((GatewayError, OSError)):

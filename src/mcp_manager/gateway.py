@@ -147,8 +147,22 @@ class Gateway:
         cat = self.app.state.catalog
         rows = await cat.rows(ids=allowed)
         entries = []
+        user_id = user.id if user else None
+
+        async def authorize(server_id):
+            current_user, current_token, current_allowed = await self.principal(request)
+            if owner(current_user, current_token, request) != owner(user, token, request):
+                raise GatewayError("permission_revoked", "Gateway identity changed")
+            if server_id not in current_allowed:
+                raise GatewayError("permission_revoked", "MCP access revoked")
+
         for row in rows:
-            for tool in cat.cached(row, user.id if user else None)["tools"]:
+            await cat.ensure_ready(
+                row,
+                user_id,
+                authorize=lambda row_id=row.id: authorize(row_id),
+            )
+            for tool in cat.cached(row, user_id)["tools"]:
                 entries.append((row, tool, dict(tool, name=alias(row.slug, tool["name"]))))
         return user, token, rows, entries
 
