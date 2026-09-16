@@ -27,6 +27,10 @@ function Write-Banner {
   Write-Host '========================================'
 }
 
+function Clear-Screen {
+  Clear-Host
+}
+
 function Write-Menu {
   Write-Host ''
   Write-Host '  [1] 配置与管理'
@@ -68,6 +72,7 @@ function Show-Config {
     Write-Host '  （尚无 .env；将使用默认值）'
   }
   Write-Host ''
+  [void](Read-Host '按回车继续...')
 }
 
 function Edit-Config {
@@ -88,6 +93,8 @@ function Edit-Config {
 function Config-Menu {
   $loop = $true
   while ($loop) {
+    Clear-Screen
+    Write-Banner
     Write-Host ''
     Write-Host '  [1] 查看当前配置'
     Write-Host '  [2] 编辑 .env（记事本）'
@@ -101,7 +108,6 @@ function Config-Menu {
       default { Write-Host '无效，请输入 1/2/0。' }
     }
     Write-Host ''
-    if ($loop) { Write-Banner; Write-Menu }
   }
 }
 
@@ -193,11 +199,14 @@ function Service-Status {
   if ($prop) { $installed = ($prop.PSObject.Properties | Where-Object { $_.Name -eq $entryName }) -ne $null }
   if ($installed) { Write-Host '  自启 (HKCU Run): 已安装' } else { Write-Host '  自启 (HKCU Run): 未安装' }
   Write-Host ''
+  [void](Read-Host '按回车继续...')
 }
 
 function Service-Menu {
   $loop = $true
   while ($loop) {
+    Clear-Screen
+    Write-Banner
     Write-Host ''
     Write-Host '  [1] 安装为常驻服务'
     Write-Host '  [2] 启动服务'
@@ -219,7 +228,6 @@ function Service-Menu {
       default { Write-Host '无效，请输入 1-6 或 0。' }
     }
     Write-Host ''
-    if ($loop) { Write-Banner; Write-Menu }
   }
 }
 
@@ -232,11 +240,14 @@ function Direct-Status {
   $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
   if ($c) { Write-Host "  端口 $port : 监听中" } else { Write-Host "  端口 $port : 未监听" }
   Write-Host ''
+  [void](Read-Host '按回车继续...')
 }
 
 function Direct-Menu {
   $loop = $true
   while ($loop) {
+    Clear-Screen
+    Write-Banner
     Write-Host ''
     Write-Host '  [1] 启动程序（临时后台）'
     Write-Host '  [2] 停止程序'
@@ -261,11 +272,11 @@ function Direct-Menu {
       default { Write-Host '无效，请输入 1-3 或 0。' }
     }
     Write-Host ''
-    if ($loop) { Write-Banner; Write-Menu }
   }
 }
 
 # --- 主循环 ---
+Clear-Screen
 Write-Banner
 Write-Menu
 $main = $true
@@ -279,6 +290,6 @@ while ($main) {
     default { Write-Host '无效，请输入 1/2/3/0。' }
   }
   Write-Host ''
-  if ($main) { Write-Banner; Write-Menu }
+  if ($main) { Clear-Screen; Write-Banner; Write-Menu }
 }
 Write-Host '再见。'
