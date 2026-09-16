@@ -11,6 +11,7 @@ from playwright.async_api import async_playwright, expect
 
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
+from mcp_manager.database import McpServer
 
 
 @pytest.fixture
@@ -46,6 +47,44 @@ async def login(page, url):
     await page.get_by_label("密码", exact=True).fill("password12345")
     await page.get_by_role("button", name="登录", exact=True).click()
     await expect(page.get_by_role("heading", name="仪表盘", exact=True)).to_be_visible()
+
+
+@pytest.mark.asyncio
+async def test_profile_hides_disabled_services(running_gateway):
+    app, _web, url, _token, _row = running_gateway
+    async with app.state.db.locked() as session:
+        session.add_all([
+            McpServer(
+                slug="profile-available",
+                name="Available Profile MCP",
+                transport="stdio",
+                mode="lazy",
+                config=app.state.catalog.seal({"command": "never"}),
+            ),
+            McpServer(
+                slug="profile-disabled",
+                name="Disabled Profile MCP",
+                transport="stdio",
+                mode="disabled",
+                config=app.state.catalog.seal({"command": "never"}),
+            ),
+        ])
+
+    async with async_playwright() as pw:
+        executable = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+        browser = await pw.chromium.launch(
+            headless=True,
+            executable_path=executable if os.path.exists(executable) else None,
+        )
+        page = await browser.new_page(viewport={"width": 1280, "height": 900})
+        await login(page, url)
+        await page.goto(url + "/#/profile")
+        services = page.locator("section.card").filter(
+            has=page.get_by_role("heading", name="可访问的服务", exact=True)
+        )
+        await expect(services.get_by_text("Available Profile MCP", exact=True)).to_be_visible()
+        await expect(services.get_by_text("Disabled Profile MCP", exact=True)).to_have_count(0)
+        await browser.close()
 
 
 @pytest.mark.asyncio

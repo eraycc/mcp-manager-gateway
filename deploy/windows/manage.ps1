@@ -36,6 +36,7 @@ function Write-Menu {
   Write-Host '  [1] 配置与管理'
   Write-Host '  [2] 服务管理'
   Write-Host '  [3] 直接启动'
+  Write-Host '  [4] 版本管理'
   Write-Host '  [0] 退出'
   Write-Host ''
 }
@@ -139,12 +140,14 @@ function Install-Service {
   Write-Host "服务已安装（HKCU Run $entryName），下次登录自动启动。"
   Write-Host '现在启动？(y/N) ' -NoNewline
   $yn = Read-Host; if ($yn -and $yn.Trim().StartsWith('y')) { Start-Service }
+  [void](Read-Host '按回车继续...')
 }
 
 function Uninstall-Service {
   Stop-Service
   Remove-ItemProperty -Path $runKey -Name $entryName -ErrorAction SilentlyContinue
   Write-Host "服务已卸载（删除 $entryName 并停止 mmg）。"
+  [void](Read-Host '按回车继续...')
 }
 
 function Start-Service {
@@ -155,6 +158,7 @@ function Start-Service {
   Start-Process powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$daemon" -WindowStyle Hidden
   Start-Sleep 2
   Write-Host '服务已启动（隐藏窗口）。可用状态[6]确认。'
+  [void](Read-Host '按回车继续...')
 }
 
 function Stop-Service {
@@ -175,12 +179,14 @@ function Stop-Service {
   } else {
     Write-Host "已停止（守护 $dcount 个 + mmg）。"
   }
+  [void](Read-Host '按回车继续...')
 }
 
 function Restart-Service {
   Stop-Service
   Start-Sleep 2
   Start-Service
+  [void](Read-Host '按回车继续...')
 }
 
 function Service-Status {
@@ -263,13 +269,157 @@ function Direct-Menu {
           Start-Sleep 2
           Write-Host '已启动（隐藏，临时）。可用[3]查询；重启后不会自动恢复。'
         }
+        [void](Read-Host '按回车继续...')
       }
       '2' {
         Stop-Service
+        [void](Read-Host '按回车继续...')
       }
       '3' { Direct-Status }
       '0' { $loop = $false }
       default { Write-Host '无效，请输入 1-3 或 0。' }
+    }
+    Write-Host ''
+  }
+}
+
+function Get-CurrentVersion {
+  # 返回当前 mmg 版本字符串（如 0.1.6），失败返回空串
+  try {
+    $out = & mmg --version 2>&1
+    $txt = ($out -join ' ').Trim()
+    # 格式: "mcp-manager 0.1.6" → 提取版本号
+    if ($txt -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
+    return ''
+  } catch { return '' }
+}
+
+function Get-PypiVersion {
+  # 查询 PyPI 上 mcp-manager-gateway 最新版本，失败返回空串
+  try {
+    $r = Invoke-RestMethod -Uri 'https://pypi.org/pypi/mcp-manager-gateway/json' -TimeoutSec 15
+    return $r.info.version
+  } catch { return '' }
+}
+
+function Show-VersionInfo {
+  Write-Host ''
+  Write-Host '--- 版本信息 ---'
+  $cur = Get-CurrentVersion
+  if ($cur) { Write-Host "  当前版本: $cur" }
+  else     { Write-Host '  当前版本: 未安装或无法检测' }
+  Write-Host '  查询 PyPI 最新版本中...'
+  $latest = Get-PypiVersion
+  if ($latest) { Write-Host "  PyPI 最新: $latest" }
+  else         { Write-Host '  PyPI 最新: 查询失败（网络问题？）' }
+  if ($cur -and $latest -and $cur -ne $latest) {
+    Write-Host '  状态: 有可用更新'
+  } elseif ($cur -and $latest) {
+    Write-Host '  状态: 已是最新'
+  }
+  Write-Host ''
+  [void](Read-Host '按回车继续...')
+}
+
+function Check-Update {
+  Write-Host ''
+  $cur = Get-CurrentVersion
+  $latest = Get-PypiVersion
+  if (-not $cur) { Write-Host '  当前版本未安装或无法检测。' }
+  elseif (-not $latest) { Write-Host '  PyPI 查询失败，无法判断。' }
+  elseif ($cur -eq $latest) { Write-Host "  已是最新版本 ($cur)。" }
+  else { Write-Host "  当前: $cur → 最新: $latest（有更新可用）" }
+  Write-Host ''
+  [void](Read-Host '按回车继续...')
+}
+
+function Update-Tool {
+  Write-Host ''
+  Write-Host '--- 一键更新 ---'
+  # 1) 自动判断并清理守护/直接启动
+  $running = Get-Process -Name mmg -ErrorAction SilentlyContinue
+  $daemons = Get-RealDaemons
+  if ($running -or $daemons) {
+    Write-Host '  检测到 mmg/守护正在运行，先自动停止...'
+    Stop-Service
+    Start-Sleep 1
+  }
+  # 2) 执行升级
+  Write-Host '  执行 uv tool upgrade mcp-manager-gateway ...'
+  $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  $out = & uv tool upgrade mcp-manager-gateway 2>&1
+  $code = $LASTEXITCODE; $ErrorActionPreference = $prevEAP
+  foreach ($line in $out) { Write-Host "  $line" }
+  # 3) 显示结果
+  if ($code -eq 0) {
+    $newVer = Get-CurrentVersion
+    Write-Host ''
+    Write-Host "  更新完成。当前版本: $(if($newVer){$newVer}else{'未知'})"
+    Write-Host '  可用 [2] 服务管理 或 [3] 直接启动 重新启动。'
+  } else {
+    Write-Host "  更新失败 (exit $code)，请检查网络或重试。"
+  }
+  Write-Host ''
+  [void](Read-Host '按回车继续...')
+}
+
+function Uninstall-Tool {
+  Write-Host ''
+  Write-Host '--- 一键卸载 ---'
+  Write-Host '  将卸载 mcp-manager-gateway（含 mmg / mcp-manager 命令），确认？(y/N) ' -NoNewline
+  $yn = Read-Host; if (-not $yn -or -not $yn.Trim().StartsWith('y')) { Write-Host '  已取消。'; return }
+  # 1) 自动判断并清理守护/直接启动
+  $running = Get-Process -Name mmg -ErrorAction SilentlyContinue
+  $daemons = Get-RealDaemons
+  if ($running -or $daemons) {
+    Write-Host '  检测到 mmg/守护正在运行，先自动停止...'
+    Stop-Service
+    Start-Sleep 1
+  }
+  # 2) 若已安装常驻服务，先卸载服务
+  $prop = Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue
+  if ($prop -and ($prop.PSObject.Properties | Where-Object { $_.Name -eq $entryName })) {
+    Write-Host '  检测到常驻服务，先卸载...'
+    Remove-ItemProperty -Path $runKey -Name $entryName -ErrorAction SilentlyContinue
+    Write-Host '  常驻服务已卸载。'
+  }
+  # 3) 执行卸载
+  Write-Host '  执行 uv tool uninstall mcp-manager-gateway ...'
+  $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  $out = & uv tool uninstall mcp-manager-gateway 2>&1
+  $code = $LASTEXITCODE; $ErrorActionPreference = $prevEAP
+  foreach ($line in $out) { Write-Host "  $line" }
+  # 4) 显示结果
+  if ($code -eq 0) {
+    Write-Host ''
+    Write-Host '  卸载完成。mmg / mcp-manager / mcp-manager-gateway 命令已移除。'
+  } else {
+    Write-Host "  卸载失败 (exit $code)，请重试。"
+  }
+  Write-Host ''
+  [void](Read-Host '按回车继续...')
+}
+
+function Version-Menu {
+  $loop = $true
+  while ($loop) {
+    Clear-Screen
+    Write-Banner
+    Write-Host ''
+    Write-Host '  [1] 查看版本（当前 + PyPI 最新）'
+    Write-Host '  [2] 检查更新'
+    Write-Host '  [3] 一键更新'
+    Write-Host '  [4] 一键卸载'
+    Write-Host '  [0] 返回'
+    Write-Host ''
+    $in = Read-Host '请选择'; if ($null -eq $in) { $loop = $false; break }; $c = $in.Trim()
+    switch ($c) {
+      '1' { Show-VersionInfo }
+      '2' { Check-Update }
+      '3' { Update-Tool }
+      '4' { Uninstall-Tool }
+      '0' { $loop = $false }
+      default { Write-Host '无效，请输入 1-4 或 0。' }
     }
     Write-Host ''
   }
@@ -286,8 +436,9 @@ while ($main) {
     '1' { Config-Menu }
     '2' { Service-Menu }
     '3' { Direct-Menu }
+    '4' { Version-Menu }
     '0' { $main = $false }
-    default { Write-Host '无效，请输入 1/2/3/0。' }
+    default { Write-Host '无效，请输入 1/2/3/4/0。' }
   }
   Write-Host ''
   if ($main) { Clear-Screen; Write-Banner; Write-Menu }
