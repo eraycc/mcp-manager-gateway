@@ -94,16 +94,16 @@ async def test_full_matrix_with_two_downstream_transports(running_gateway, trans
                         "mcp": "*", "tool": "*", "limit": 1, **({"cursor": cursor} if cursor else {})})
                     assert not found.is_error
                     assert json.loads(found.content[0].text) == found.structured_content
-                    for item in found.structured_content["items"]:
+                    for item in found.structured_content["tools"]:
                         assert item["gateway_name"] not in catalog
                         catalog[item["gateway_name"]] = item
-                    cursor = found.structured_content["next_cursor"]
+                    cursor = found.structured_content.get("next_cursor")
                     if not cursor:
                         break
                 scoped = await client.call_tool("gateway_search_tools", {"mcp": remote["id"], "tool": ""})
-                assert [i["gateway_name"] for i in scoped.structured_content["items"]] == ["remote__echo"]
+                assert [i["gateway_name"] for i in scoped.structured_content["tools"]] == ["remote__echo"]
                 by_name = await client.call_tool("gateway_search_tools", {"mcp": "", "tool": "echo"})
-                assert {i["gateway_name"] for i in by_name.structured_content["items"]} == {
+                assert {i["gateway_name"] for i in by_name.structured_content["tools"]} == {
                     "echo__echo", "remote__echo"}
                 native_token = (await web.post("/api/v1/tokens", json={"name": "native-reference",
                                                                      "scope_mode": "all"})).json()["token"]

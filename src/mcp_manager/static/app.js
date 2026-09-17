@@ -149,12 +149,12 @@ const services=(await allPages('/mcps',{},()=>{},signal)).filter(s=>s.mode!=='di
 function connectionGuide(){
 const endpoint=location.origin+'/mcp',command='mcp-manager stdio --url '+endpoint;
 const copyBlock=(label,text)=>el('div',{class:'stack'},el('h3',{},label),el('pre',{},text),button('复制'+label,async()=>{await navigator.clipboard.writeText(text);toast('已复制')}));
-const http='POST '+endpoint+'\nAuthorization: Bearer <你的令牌>\nContent-Type: application/json\nAccept: application/json, text/event-stream\n\n{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"my-client","version":"1.0"}}}';
+const http='POST '+endpoint+'\nAuthorization: Bearer <你的令牌>\nMCP-Protocol-Version: 2026-07-28\nContent-Type: application/json\nAccept: application/json, text/event-stream\n\n{"jsonrpc":"2.0","id":"discover-1","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"my-client","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}';
 const toml='[mcp_servers.manager]\nurl = "'+endpoint+'"\nbearer_token_env_var = "MCP_MANAGER_TOKEN"';
 const json=pretty({mcpServers:{manager:{command:'mcp-manager',args:['stdio','--url',endpoint],env:{MCP_MANAGER_TOKEN:'<你的令牌>'}}}});
 const stdio=['mmg','mcp-manager','mcp-manager-gateway'].map(name=>name+' stdio --url '+endpoint).join('\n')+'\n\n# 或显式传入令牌（任一入口均支持）\n'+command+' --token "<你的令牌>"';
 return el('section',{class:'card'},el('h2',{},'连接 MCP 客户端'),el('p',{class:'notice'},'先启动 MCP Manager 网关并保持运行，再连接客户端。请在“访问令牌”中创建令牌，并替换示例占位符。'),
-tabPanels([['http','HTTP 接入',el('div',{class:'stack'},el('p',{},'支持 Streamable HTTP 的客户端可直接连接此端点。初始化后由客户端继续完成 MCP 握手；后续请求使用返回的会话标识。'),copyBlock('HTTP 请求示例',http))],
+tabPanels([['http','HTTP 接入',el('div',{class:'stack'},el('p',{},'支持 Streamable HTTP 的客户端可直接连接此端点。现代 SDK 会自动使用 server/discover，并在连接旧服务时回退 initialize 握手。'),copyBlock('HTTP 请求示例',http))],
 ['codex','Codex / 客户端配置',el('div',{class:'stack'},el('p',{},'Codex 使用 config.toml。先在运行 Codex 的环境中设置 MCP_MANAGER_TOKEN；以下配置通过环境变量读取令牌。'),copyBlock('Codex TOML',toml),el('p',{},'采用 mcpServers JSON 配置的客户端可使用本地 stdio 桥接。将下面示例合并到客户端配置中。'),copyBlock('客户端 JSON',json))],
 ['stdio','本地 stdio',el('div',{class:'stack'},el('p',{},'使用 uv tool 安装 MCP Manager 后，可在任意目录运行以下命令。mmg、mcp-manager 与 mcp-manager-gateway 是等效入口，任选其一。可设置环境变量 MCP_MANAGER_TOKEN，也可使用 --token 参数。'),copyBlock('环境变量示例','PowerShell:\n$env:MCP_MANAGER_TOKEN = "<你的令牌>"\n\nLinux / macOS:\nexport MCP_MANAGER_TOKEN="<你的令牌>"'),copyBlock('启动命令',stdio))]],{key:'connect_tab',label:'客户端接入方式'}),
 el('div',{class:'notice',style:'margin-top:20px'},'工具目录读取缓存，不会仅因浏览目录而启动服务。新增或修改工具后，请联系管理员刷新目录缓存。默认空闲 24 小时回收服务，可由管理员调整；stdio 桥接退出会释放该客户端连接，共享服务仍可供其他客户端使用。'))}

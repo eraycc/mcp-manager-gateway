@@ -19,8 +19,10 @@ async def test_boolean_property_schema_remains_discoverable(discovery_env):  # n
     app.state.catalog.save_cache(rows["files"], cache)
     assert payload(await invoke("gateway_search_mcps", {}))["total"] == 3
     result = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
-    assert result["items"][0]["inputSchema"] == schema
-    assert result["items"][0]["invocation"]["is_template"] is True
+    assert result["tools"][0]["inputSchema"] == schema
+    assert result["tools"][0]["invocation"] == {
+        "template": {"name": "files__read_file", "arguments": {"payload": "<value>"}},
+    }
 
 
 async def test_revocation_during_service_embedding_prevents_tool_embedding(discovery_env):  # noqa: F811

@@ -43,23 +43,24 @@ async def test_live_embeddings_rank_multilingual_queries_and_discovery(tmp_path)
         assert services["search"]["services"]["semantic_status"] == "ready", services
         assert services["items"][0]["slug"] == "files", services
         found = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "读取文档内容"}))
-        assert found["search"]["tools"]["semantic_status"] == "ready", found
-        assert found["items"][0]["gateway_name"] == "files__read_file", found
-        assert found["items"][0]["inputSchema"] == SCHEMA
-        # Exact lookup bypasses vectors even with the configured real provider.
+        assert found["tools"][0]["gateway_name"] == "files__read_file", found
+        assert found["tools"][0]["inputSchema"] == SCHEMA
+        # Exact lookup still returns the precise callable contract.
         exact = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
-        assert exact["items"][0]["match"]["match_type"] == "exact"
-        assert exact["search"]["tools"]["semantic_status"] == "not_needed"
-        result = await invoke("gateway_call", exact["items"][0]["examples"][0])
+        assert exact["tools"][0]["gateway_name"] == "files__read_file"
+        result = await invoke("gateway_call", {
+            "name": exact["tools"][0]["gateway_name"],
+            "arguments": {"path": "live-check.txt"},
+        })
         assert not result.is_error
         assert len(calls) == 1
         # Semantic page traversal must remain valid after vectors enter the cache.
         args = {"mcp": "*", "tool": "读取文档内容", "limit": 1}
         first = payload(await invoke("gateway_search_tools", args))
-        cursor = first["next_cursor"]
-        seen = [first["items"][0]["gateway_name"]]
+        cursor = first.get("next_cursor")
+        seen = [first["tools"][0]["gateway_name"]]
         while cursor:
             following = payload(await invoke("gateway_search_tools", args | {"cursor": cursor}))
-            seen.extend(x["gateway_name"] for x in following["items"])
-            cursor = following["next_cursor"]
+            seen.extend(x["gateway_name"] for x in following["tools"])
+            cursor = following.get("next_cursor")
         assert len(seen) == len(set(seen)) == first["total"]

@@ -14,6 +14,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from sqlalchemy import select
 from starlette.responses import JSONResponse
 
+from .about import NAME, VERSION
 from .catalog import alias
 from .database import ApiToken, User
 from .discovery import DISCOVERY, Discovery, result_json, validate_meta, validation_error
@@ -377,7 +378,7 @@ class MCPAuthMiddleware:
 
 def install_gateway(app):
     gateway = Gateway(app)
-    protocol = Server("MCP Manager", version="0.1.0", on_list_tools=gateway.list_tools,
+    protocol = Server(NAME, version=VERSION, on_list_tools=gateway.list_tools,
                       on_call_tool=gateway.call_tool, on_list_resources=gateway.list_resources,
                       on_list_resource_templates=gateway.list_templates, on_read_resource=gateway.read_resource,
                       on_list_prompts=gateway.list_prompts, on_get_prompt=gateway.get_prompt)

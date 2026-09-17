@@ -124,6 +124,21 @@ async def test_services_are_separate_from_tools_and_wildcard_is_complete(discove
     assert app.state.runtime.status() == []
 
 
+async def test_search_tools_declares_exact_multi_selector(discovery_env):
+    app, *_ = discovery_env
+    listing = await app.state.gateway.list_tools(discovery_env[3], None)
+    schema = next(tool for tool in listing.tools if tool.name == "gateway_search_tools").input_schema
+
+    assert schema["properties"]["tools"] == {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1, "maxLength": 128},
+        "minItems": 1,
+        "maxItems": 50,
+        "uniqueItems": True,
+        "description": "Exact original tool names or gateway_names to disclose together.",
+    }
+
+
 async def test_generated_service_description_and_tool_names_support_l1_search(discovery_env):
     *_, invoke, web = discovery_env
     body = payload(await invoke("gateway_search_mcps", {"query": "notification"}))
@@ -145,16 +160,181 @@ async def test_generated_service_description_and_tool_names_support_l1_search(di
 async def test_tool_scope_combinations(discovery_env, mcp, tool, want):
     *_, invoke, web = discovery_env
     body = payload(await invoke("gateway_search_tools", {"mcp": mcp, "tool": tool}))
-    assert {x["gateway_name"] for x in body["items"]} == want
+    assert {x["gateway_name"] for x in body["tools"]} == want
+
+
+async def test_exact_multi_tool_query_is_compact_and_reports_missing(discovery_env):
+    app, rows, _calls, _ctx, invoke, _web = discovery_env
+
+    async def unexpected_embeddings(*_args, **_kwargs):
+        raise AssertionError("exact service and tools selectors must bypass embeddings")
+
+    app.state.embeddings.scores = unexpected_embeddings
+    body = payload(await invoke("gateway_search_tools", {
+        "mcp": "files",
+        "tools": ["read_file", "send_message", "missing"],
+    }))
+
+    assert [tool["gateway_name"] for tool in body["tools"]] == [
+        "files__read_file",
+        "files__send_message",
+    ]
+    assert body["missing_tools"] == ["missing"]
+    assert body["mcps"] == [{"id": rows["files"].id, "name": "files", "slug": "files"}]
+    assert set(body) == {
+        "instructions", "mcps", "tools", "truncated", "returned", "total", "missing_tools",
+    }
+    assert body["truncated"] is False
+    assert body["returned"] == body["total"] == 2
+
+    forbidden = {
+        "name", "original_name", "mcp_id", "mcp_name", "mcp_slug",
+        "catalog_status", "match",
+    }
+    assert all(not (forbidden & set(tool)) for tool in body["tools"])
+    assert "invocation" not in body["tools"][1]
+    assert "examples" not in body["tools"][1]
+
+
+async def test_exact_multi_tool_query_keeps_cross_service_matches(discovery_env):
+    *_, invoke, _web = discovery_env
+    body = payload(await invoke("gateway_search_tools", {
+        "mcp": "*",
+        "tools": ["read_file"],
+    }))
+
+    assert [tool["gateway_name"] for tool in body["tools"]] == [
+        "archive__read_file",
+        "files__read_file",
+    ]
+    assert "missing_tools" not in body
+
+
+async def test_empty_schema_is_preserved_without_empty_metadata(discovery_env):
+    app, rows, _calls, _ctx, invoke, _web = discovery_env
+    cache = app.state.catalog.cached(rows["files"])
+    app.state.catalog.save_cache(rows["files"], {
+        **cache,
+        "tools": [*cache["tools"], {
+            "name": "status",
+            "description": "",
+            "inputSchema": {},
+            "annotations": {},
+        }],
+    })
+
+    body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "status"}))
+    assert body["tools"] == [{
+        "gateway_name": "files__status",
+        "inputSchema": {},
+    }]
+
+
+async def test_complex_schema_keeps_examples_and_required_only_template(discovery_env):
+    *_, invoke, _web = discovery_env
+    body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
+
+    assert body["tools"][0]["examples"] == [{
+        "name": "files__read_file",
+        "arguments": {"path": "example.txt", "options": {"limit": 2}},
+    }]
+    assert body["tools"][0]["invocation"] == {
+        "template": {
+            "name": "files__read_file",
+            "arguments": {"path": "<string>"},
+        },
+    }
+
+
+async def test_template_skips_false_union_branch(discovery_env):
+    app, rows, _calls, _ctx, invoke, _web = discovery_env
+    cache = app.state.catalog.cached(rows["files"])
+    cache["tools"][0]["inputSchema"] = {
+        "anyOf": [False, {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        }],
+    }
+    app.state.catalog.save_cache(rows["files"], cache)
+
+    body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
+    assert body["tools"][0]["invocation"]["template"]["arguments"] == {"value": "<string>"}
+
+
+async def test_template_merges_all_allof_requirements(discovery_env):
+    app, rows, _calls, _ctx, invoke, _web = discovery_env
+    cache = app.state.catalog.cached(rows["files"])
+    cache["tools"][0]["inputSchema"] = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "integer"}},
+        "allOf": [{"required": ["a"]}, {"required": ["b"]}],
+    }
+    app.state.catalog.save_cache(rows["files"], cache)
+
+    body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
+    assert body["tools"][0]["invocation"]["template"]["arguments"] == {
+        "a": "<string>",
+        "b": "<integer>",
+    }
+
+
+async def test_template_recursively_merges_overlapping_allof_properties(discovery_env):
+    app, rows, _calls, _ctx, invoke, _web = discovery_env
+    cache = app.state.catalog.cached(rows["files"])
+    cache["tools"][0]["inputSchema"] = {
+        "type": "object",
+        "allOf": [
+            {
+                "properties": {"cfg": {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["a"],
+                }},
+                "required": ["cfg"],
+            },
+            {
+                "properties": {"cfg": {
+                    "type": "object",
+                    "properties": {"b": {"type": "integer"}},
+                    "required": ["b"],
+                }},
+                "required": ["cfg"],
+            },
+        ],
+    }
+    app.state.catalog.save_cache(rows["files"], cache)
+
+    body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
+    assert body["tools"][0]["invocation"]["template"]["arguments"] == {
+        "cfg": {"a": "<string>", "b": "<integer>"},
+    }
+
+
+async def test_conditional_schema_gets_a_required_branch_template(discovery_env):
+    app, rows, _calls, _ctx, invoke, _web = discovery_env
+    cache = app.state.catalog.cached(rows["files"])
+    cache["tools"][0]["inputSchema"] = {
+        "type": "object",
+        "properties": {"kind": {"type": "string"}, "value": {"type": "string"}},
+        "if": {"properties": {"kind": {"const": "text"}}, "required": ["kind"]},
+        "then": {"required": ["value"]},
+    }
+    app.state.catalog.save_cache(rows["files"], cache)
+
+    body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
+    assert body["tools"][0]["invocation"]["template"]["arguments"] == {
+        "kind": "<string>",
+        "value": "<string>",
+    }
 
 
 async def test_full_schema_examples_and_exact_execution(discovery_env):
     app, rows, calls, ctx, invoke, web = discovery_env
     body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
-    item = body["items"][0]
+    item = body["tools"][0]
     assert item["inputSchema"] == SCHEMA
-    assert item["original_name"] == "read_file"
-    assert item["mcp_id"] == rows["files"].id
+    assert body["mcps"] == [{"id": rows["files"].id, "name": "files", "slug": "files"}]
     assert item["examples"][0]["arguments"] == {"path": "example.txt", "options": {"limit": 2}}
     result = await invoke("gateway_call", item["examples"][0])
     assert not result.is_error
@@ -177,9 +357,9 @@ async def test_invalid_nested_arguments_report_path_without_execution(discovery_
 
 async def test_field_search_typos_and_unknown_scope_do_not_expand(discovery_env):
     *_, invoke, web = discovery_env
-    assert payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "recipent"}))["items"][0][
+    assert payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "recipent"}))["tools"][0][
         "gateway_name"] == "files__send_message"
-    assert payload(await invoke("gateway_search_tools", {"mcp": "private", "tool": "*"}))["items"] == []
+    assert payload(await invoke("gateway_search_tools", {"mcp": "private", "tool": "*"}))["tools"] == []
     bad = await invoke("gateway_call", {"name": "read_file", "arguments": {"path": "x"}})
     assert bad.is_error
     assert "private" not in bad.content[0].text
@@ -188,12 +368,17 @@ async def test_field_search_typos_and_unknown_scope_do_not_expand(discovery_env)
 async def test_pagination_has_no_duplicates_and_rejects_changed_catalog(discovery_env):
     app, rows, calls, ctx, invoke, web = discovery_env
     first = payload(await invoke("gateway_search_tools", {"limit": 1}))
-    names = [first["items"][0]["gateway_name"]]
+    assert first["truncated"] is True
+    assert first["next_cursor"]
+    assert "tool" in first["hint"]
+    names = [first["tools"][0]["gateway_name"]]
     cursor = first["next_cursor"]
     while cursor:
         page = payload(await invoke("gateway_search_tools", {"limit": 1, "cursor": cursor}))
-        names.extend(t["gateway_name"] for t in page["items"])
-        cursor = page["next_cursor"]
+        names.extend(t["gateway_name"] for t in page["tools"])
+        cursor = page.get("next_cursor")
+    assert page["truncated"] is False
+    assert "next_cursor" not in page and "hint" not in page
     assert len(names) == len(set(names)) == 4
     assert {m["slug"] for m in first["mcps"]} == {"archive", "empty", "files"}
     cache = app.state.catalog.cached(rows["files"])
@@ -203,8 +388,19 @@ async def test_pagination_has_no_duplicates_and_rejects_changed_catalog(discover
     assert stale.structured_content["error"]["code"] == "catalog_changed"
 
 
-@pytest.mark.parametrize("arguments", [{"mcp": []}, {"tool": None}, {"limit": 0}, {"limit": True},
-                                        {"cursor": "invalid"}, {"unknown": "*"}])
+@pytest.mark.parametrize("arguments", [
+    {"mcp": []},
+    {"tool": None},
+    {"tools": []},
+    {"tools": ["read_file", "read_file"]},
+    {"tools": [1]},
+    {"tools": ["x" * 129]},
+    {"tool": "read_file", "tools": ["read_file"]},
+    {"limit": 0},
+    {"limit": True},
+    {"cursor": "invalid"},
+    {"unknown": "*"},
+])
 async def test_bad_discovery_parameters_are_tool_errors(discovery_env, arguments):
     *_, invoke, web = discovery_env
     result = await invoke("gateway_search_tools", arguments)

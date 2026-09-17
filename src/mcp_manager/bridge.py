@@ -9,6 +9,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
+from .about import NAME, VERSION
 from .protocol_errors import is_request_error
 
 
@@ -155,28 +156,39 @@ class BridgeUpstream:
                     item[0].set_exception(RuntimeError("Bridge connection closed"))
 
 
+def create_bridge_server(upstream):
+    async def tools(ctx, params):
+        return await upstream.request("list_tools", cursor=params.cursor if params else None, cache_mode="bypass")
+
+    async def call(ctx, params):
+        return await upstream.request("call_tool", params.name, params.arguments or {})
+
+    async def resources(ctx, params):
+        return await upstream.request("list_resources", cursor=params.cursor if params else None, cache_mode="bypass")
+
+    async def templates(ctx, params):
+        return await upstream.request("list_resource_templates", cursor=params.cursor if params else None,
+                                      cache_mode="bypass")
+
+    async def read(ctx, params):
+        return await upstream.request("read_resource", params.uri, cache_mode="bypass")
+
+    async def prompts(ctx, params):
+        return await upstream.request("list_prompts", cursor=params.cursor if params else None, cache_mode="bypass")
+
+    async def prompt(ctx, params):
+        return await upstream.request("get_prompt", params.name, params.arguments or {})
+
+    return Server(NAME, version=VERSION, on_list_tools=tools, on_call_tool=call,
+                  on_list_resources=resources, on_list_resource_templates=templates,
+                  on_read_resource=read, on_list_prompts=prompts, on_get_prompt=prompt)
+
+
 async def run_bridge(url, token):
     base = url.rstrip("/")
     if base.endswith("/mcp"):
         base = base[:-4]
     async with BridgeUpstream(base, token) as upstream:
-        async def tools(ctx, params):
-            return await upstream.request("list_tools", cursor=params.cursor if params else None, cache_mode="bypass")
-        async def call(ctx, params):
-            return await upstream.request("call_tool", params.name, params.arguments or {})
-        async def resources(ctx, params):
-            return await upstream.request("list_resources", cursor=params.cursor if params else None, cache_mode="bypass")
-        async def templates(ctx, params):
-            return await upstream.request("list_resource_templates", cursor=params.cursor if params else None,
-                                          cache_mode="bypass")
-        async def read(ctx, params):
-            return await upstream.request("read_resource", params.uri, cache_mode="bypass")
-        async def prompts(ctx, params):
-            return await upstream.request("list_prompts", cursor=params.cursor if params else None, cache_mode="bypass")
-        async def prompt(ctx, params):
-            return await upstream.request("get_prompt", params.name, params.arguments or {})
-        server = Server("MCP Manager stdio bridge", on_list_tools=tools, on_call_tool=call,
-                        on_list_resources=resources, on_list_resource_templates=templates,
-                        on_read_resource=read, on_list_prompts=prompts, on_get_prompt=prompt)
+        server = create_bridge_server(upstream)
         async with stdio_server() as (reader, writer):
             await server.run(reader, writer, server.create_initialization_options())

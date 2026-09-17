@@ -5,7 +5,7 @@ from test_progressive_discovery import SCHEMA, discovery_env, payload  # noqa: F
 async def test_discovery_returns_upstream_tool_fields_without_normalization(discovery_env):  # noqa: F811
     *_, invoke, _web = discovery_env
     body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "send_message"}))
-    tool = body["items"][0]
+    tool = body["tools"][0]
 
     assert tool["title"] == "Notification sender"
     assert tool["description"] == "Send a notification"
@@ -63,4 +63,4 @@ async def test_upstream_schema_alone_controls_extra_arguments(discovery_env):  #
 async def test_strict_schema_is_returned_exactly(discovery_env):  # noqa: F811
     *_, invoke, _web = discovery_env
     body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
-    assert body["items"][0]["inputSchema"] == SCHEMA
+    assert body["tools"][0]["inputSchema"] == SCHEMA
