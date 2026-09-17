@@ -1,10 +1,32 @@
 """MCP protocol identity and modern/legacy compatibility regressions."""
+import tomllib
 from importlib.metadata import PackageNotFoundError
+from pathlib import Path
 
 from mcp import Client
 from test_bug1_catalog import console
 
 from mcp_manager import about, bridge
+
+
+def _find_pyproject(start: Path) -> Path:
+    """Walk up from *start* to locate the repo's pyproject.toml."""
+    for parent in [start, *start.parents]:
+        candidate = parent / "pyproject.toml"
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError("pyproject.toml not found")
+
+
+def _project_identity_from_pyproject() -> tuple[str, str]:
+    """Read (name, version) from the repo's pyproject.toml."""
+    pyproject = _find_pyproject(Path(__file__).resolve())
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    project = data["project"]
+    return project["name"], project["version"]
+
+
+PROJECT_NAME, PROJECT_VERSION = _project_identity_from_pyproject()
 
 
 def test_project_identity_reads_pyproject(tmp_path):
@@ -54,13 +76,13 @@ async def test_gateway_identity_is_project_metadata_in_modern_and_legacy_modes(t
     async with console(tmp_path) as (app, web, _actor):
         async with Client(app.state.protocol, cache=None) as modern:
             assert modern.protocol_version == "2026-07-28"
-            assert modern.server_info.name == "mcp-manager-gateway"
-            assert modern.server_info.version == "0.1.8"
+            assert modern.server_info.name == PROJECT_NAME
+            assert modern.server_info.version == PROJECT_VERSION
 
         async with Client(app.state.protocol, mode="legacy", cache=None) as legacy:
             assert legacy.protocol_version == "2025-11-25"
-            assert legacy.server_info.name == "mcp-manager-gateway"
-            assert legacy.server_info.version == "0.1.8"
+            assert legacy.server_info.name == PROJECT_NAME
+            assert legacy.server_info.version == PROJECT_VERSION
 
         script = await web.get("/app.js")
         assert script.status_code == 200
@@ -80,5 +102,5 @@ async def test_stdio_bridge_advertises_the_same_project_identity():
     server = factory(Upstream())
     async with Client(server, cache=None) as client:
         assert client.protocol_version == "2026-07-28"
-        assert client.server_info.name == "mcp-manager-gateway"
-        assert client.server_info.version == "0.1.8"
+        assert client.server_info.name == PROJECT_NAME
+        assert client.server_info.version == PROJECT_VERSION
