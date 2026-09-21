@@ -2,13 +2,14 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
 from mcp_manager.database import ApiToken, McpProposal, McpServer, User
 from mcp_manager.gateway import discovery_tools
-from mcp_manager.proposals import normalize_proposals, resource_index, submit_proposals
+from mcp_manager.proposals import list_proposals, normalize_proposals, resource_index, submit_proposals
 
 
 def token(**values):
@@ -172,6 +173,88 @@ async def test_admin_proposal_token_approval_and_exact_duplicate_guard(tmp_path)
                 assert len(list((await session.scalars(select(McpServer))).all())) == 1
                 pending = await session.get(McpProposal, duplicate_id)
                 assert pending.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_list_proposals_filters_paginates_and_counts(tmp_path):
+    app = create_app(Settings(
+        data_dir=tmp_path,
+        database_url=f"sqlite:///{tmp_path}/list.db",
+        secret_key="list-test-key",
+        public_url="http://test",
+    ))
+    async with app.router.lifespan_context(app):  # noqa: SIM117
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            await client.post("/api/v1/auth/register", json={
+                "username": "admin", "password": "password12345"
+            })
+            await client.post("/api/v1/auth/login", json={
+                "username": "admin", "password": "password12345"
+            })
+            client.headers["X-CSRF-Token"] = client.cookies["mcp_csrf"]
+            created = await client.post("/api/v1/tokens", json={
+                "name": "proposal-agent", "scope_mode": "all",
+                "enable_resource_tools": True, "enable_mcp_proposals": True,
+            })
+            assert created.status_code == 200, created.text
+            async with app.state.db.session() as session:
+                user = await session.scalar(select(User).where(User.username == "admin"))
+                api_token = await session.scalar(select(ApiToken).where(
+                    ApiToken.id == created.json()["id"]
+                ))
+
+            async def submit(name, purpose):
+                return await submit_proposals(app, user, api_token, {
+                    "name": name, "transport": "stdio",
+                    "config": {"command": "x"}, "purpose": purpose,
+                })
+
+            await submit("context7", "Library docs")
+            await submit("fetch", "Web fetch")
+            await submit("other", "Another")
+
+            all_items = await list_proposals(app, user, status="")
+            assert all_items["total"] == 3
+            assert all_items["counts"] == {
+                "pending": 3, "incomplete": 0, "approved": 0, "rejected": 0
+            }
+            assert all_items["total_pages"] == 1
+            names = {item["name"] for item in all_items["items"]}
+            assert names == {"context7", "fetch", "other"}
+            # payload/config must not leak
+            for item in all_items["items"]:
+                assert "config" not in item and "payload" not in item
+
+            pending_only = await list_proposals(app, user, status="pending")
+            assert pending_only["total"] == 3
+            approved = await list_proposals(app, user, status="approved")
+            assert approved["total"] == 0
+
+            keyword = await list_proposals(app, user, q="library")
+            assert keyword["total"] == 1
+            assert keyword["items"][0]["name"] == "context7"
+
+            paged = await list_proposals(app, user, status="", page=1, page_size=2)
+            assert paged["total"] == 3 and paged["total_pages"] == 2
+            assert len(paged["items"]) == 2
+            paged2 = await list_proposals(app, user, status="", page=2, page_size=2)
+            assert len(paged2["items"]) == 1
+
+            # non-admin cannot list
+            async with app.state.db.session() as session:
+                non_admin = await session.get(User, user.id)
+                non_admin.role = "user"
+            with pytest.raises(HTTPException) as exc:
+                await list_proposals(app, non_admin, status="")
+            assert exc.value.status_code == 403
+
+            with pytest.raises(HTTPException):
+                await list_proposals(app, user, status="bogus")
+
+            with pytest.raises(HTTPException):
+                await list_proposals(app, user, status="", page=0)
 
 
 def test_api_token_feature_defaults_are_closed():

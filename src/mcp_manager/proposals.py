@@ -84,6 +84,58 @@ def normalize_proposals(value: dict) -> list[dict]:
     return result
 
 
+async def list_proposals(app, user, *, q="", status="", page=1, page_size=20):
+    """Read-only listing of MCP proposals with status filter, paging and per-status counts.
+
+    Returns a trimmed, agent-friendly view: per-status counts plus a paged list of
+    metadata fields. The full config payload (which may contain credentials) is
+    intentionally excluded. Permission mirrors submit_proposals (admin only).
+    """
+    if user.role != "admin":
+        raise HTTPException(403, "Administrator required to list MCP proposals")
+    if page < 1 or not 1 <= page_size <= 200:
+        raise HTTPException(422, "Invalid pagination")
+    if status not in {"", "pending", "incomplete", "approved", "rejected"}:
+        raise HTTPException(422, "Invalid status")
+    async with app.state.db.session() as session:
+        rows = list((await session.scalars(select(McpProposal).order_by(
+            McpProposal.created_at.desc(), McpProposal.id
+        ))).all())
+    counts = {key: 0 for key in ("pending", "incomplete", "approved", "rejected")}
+    for row in rows:
+        if row.status in counts:
+            counts[row.status] += 1
+    catalog = app.state.catalog
+    query = q.lower()
+
+    def name_of(row):
+        try:
+            return catalog.unseal(row.payload).get("name", "")
+        except Exception:
+            return ""
+
+    haystack = lambda row: (name_of(row) + " " + (row.purpose or "") + " " + (row.source or "")).lower()
+    filtered = [row for row in rows
+                if (not status or row.status == status)
+                and (not query or query in haystack(row))]
+    total = len(filtered)
+    page_rows = filtered[(page - 1) * page_size: page * page_size]
+    return {
+        "total": total,
+        "counts": counts,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": math.ceil(total / page_size) if total else 0,
+        "items": [
+            {"id": row.id, "name": name_of(row), "status": row.status,
+             "purpose": row.purpose or "", "source": row.source or "",
+             "created_at": row.created_at.isoformat() if row.created_at else "",
+             "updated_at": row.updated_at.isoformat() if row.updated_at else ""}
+            for row in page_rows
+        ],
+    }
+
+
 def resource_index(rows, cached, *, mcp="", keyword=""):
     mcp_key, query = mcp.strip().lower(), keyword.strip().lower()
     result = []

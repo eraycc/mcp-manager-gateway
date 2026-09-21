@@ -18,7 +18,7 @@ from .catalog import alias
 from .database import ApiToken, User
 from .discovery import DISCOVERY, Discovery, result_json, validate_meta, validation_error
 from .identity import authenticate_token, expired
-from .proposals import resource_index, submit_proposals
+from .proposals import list_proposals, resource_index, submit_proposals
 from .runtime import GatewayError
 
 router = APIRouter(prefix="/gateway/v1")
@@ -93,6 +93,18 @@ PROPOSAL_TOOL = {
                         "type": "array", "minItems": 1, "maxItems": 100,
                         "items": {"type": "object"},
                     }
+                },
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "required": ["action"],
+                "properties": {
+                    "action": {"const": "list"},
+                    "q": {"type": "string", "maxLength": 200},
+                    "status": {"enum": ["", "pending", "incomplete", "approved", "rejected"]},
+                    "page": {"type": "integer", "minimum": 1, "default": 1},
+                    "page_size": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
                 },
                 "additionalProperties": False,
             },
@@ -318,6 +330,14 @@ class Gateway:
         name, arguments = params.name, params.arguments or {}
         discovery = token and token.discovery_mode == "discovery"
         if discovery and name == "gateway_propose_mcp":
+            if isinstance(arguments, dict) and arguments.get("action") == "list":
+                return result_json(await list_proposals(
+                    self.app, user,
+                    q=str(arguments.get("q", "")),
+                    status=str(arguments.get("status", "")),
+                    page=int(arguments.get("page", 1)),
+                    page_size=int(arguments.get("page_size", 20)),
+                ))
             return result_json(await submit_proposals(self.app, user, token, arguments))
         user, token, rows, entries = await self.directory(request)
         if discovery and token.enable_resource_tools and name == "gateway_list_resources":
