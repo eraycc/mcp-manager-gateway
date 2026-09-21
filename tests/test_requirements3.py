@@ -176,6 +176,47 @@ async def test_admin_proposal_token_approval_and_exact_duplicate_guard(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_approve_without_mode_isolation_uses_defaults(tmp_path):
+    app = create_app(Settings(
+        data_dir=tmp_path,
+        database_url=f"sqlite:///{tmp_path}/approve_defaults.db",
+        secret_key="approve-defaults-test-key",
+        public_url="http://test",
+    ))
+    async with app.router.lifespan_context(app):  # noqa: SIM117
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            await client.post("/api/v1/auth/register", json={
+                "username": "admin", "password": "password12345"
+            })
+            await client.post("/api/v1/auth/login", json={
+                "username": "admin", "password": "password12345"
+            })
+            client.headers["X-CSRF-Token"] = client.cookies["mcp_csrf"]
+            await client.post("/api/v1/tokens", json={
+                "name": "default-test", "scope_mode": "all",
+                "enable_mcp_proposal": True,
+            })
+            async with app.state.db.session() as session:
+                user = await session.scalar(select(User).where(User.username == "admin"))
+                tok = await session.scalar(select(ApiToken).where(ApiToken.name == "default-test"))
+            submitted = await submit_proposals(app, user, tok, {
+                "name": "Defaults", "transport": "stdio",
+                "config": {"command": "npx", "args": ["-y", "dummy"]},
+                "purpose": "approve defaults test",
+            })
+            pid = submitted["items"][0]["id"]
+            resp = await client.post(f"/api/v1/mcp-proposals/{pid}/approve", json={})
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["status"] == "approved"
+            assert body["mode"] == "lazy"
+            assert body["isolation"] == "service"
+            assert body["config_isolation"] is None
+
+
+@pytest.mark.asyncio
 async def test_list_proposals_filters_paginates_and_counts(tmp_path):
     app = create_app(Settings(
         data_dir=tmp_path,

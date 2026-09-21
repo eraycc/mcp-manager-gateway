@@ -377,11 +377,9 @@ async def approve(proposal_id: str, data: dict, request: Request, user=ADMIN):
         if row.status == "rejected":
             raise HTTPException(409, "Rejected proposal cannot be approved")
         payload = catalog.unseal(row.payload)
-        mode = data.get("mode", row.mode)
-        isolation = data.get("isolation", row.isolation)
-        config_isolation = data.get("config_isolation", row.config_isolation)
-    if not mode or not isolation:
-        raise HTTPException(422, "Configure mode and isolation before approval")
+        mode = data.get("mode") or row.mode or "lazy"
+        isolation = data.get("isolation") or row.isolation or "service"
+        config_isolation = data.get("config_isolation") or row.config_isolation
     config = deepcopy(payload["config"])
     if config.get("auth", {}).get("type") == "oauth" and config_isolation:
         config["auth"]["config_isolation"] = config_isolation
