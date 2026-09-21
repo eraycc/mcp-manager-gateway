@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from filelock import FileLock, Timeout
 from jsonschema import ValidationError
 
-from . import catalog_api, credentials_api, embedding_api, identity, operations_api
+from . import catalog_api, credentials_api, embedding_api, identity, operations_api, proposals
 from .catalog import Catalog
 from .config import PACKAGE_ROOT, Settings
 from .credentials import CredentialStore
@@ -132,6 +132,7 @@ def create_app(config=None):
         try:
             await state.db.initialize()
             state.cors_origins = await get_setting(state.db, "cors_origins", ["*"])
+            state.allowed_hosts = await get_setting(state.db, "allowed_hosts", ["*"])
             from zoneinfo import ZoneInfo
             state.logs.timezone = ZoneInfo(await get_setting(state.db, "timezone", "Asia/Shanghai"))
             state.runtime.idle_seconds = await get_setting(state.db, "idle_seconds", 86400)
@@ -202,6 +203,7 @@ def create_app(config=None):
         operations_api.router,
         oauth_router,
         embedding_api.router,
+        proposals.router,
     ):
         app.include_router(router)
     try:

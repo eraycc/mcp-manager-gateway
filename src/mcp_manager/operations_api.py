@@ -20,7 +20,7 @@ DEFAULTS = {"title": "MCP Manager", "registration_enabled": True, "jwt_days": 30
             "token_auth_enabled": True, "anonymous_scope_mode": "selected", "anonymous_mcp_ids": [],
             "idle_seconds": 86400, "refresh_enabled": False, "refresh_cron": "0 3 * * *",
             "startup_failure_threshold": 3, "timezone": "Asia/Shanghai",
-            "log_retention_days": 0, "cors_origins": ["*"]}
+            "log_retention_days": 0, "cors_origins": ["*"], "allowed_hosts": ["*"]}
 FILTERS = {"q", "username", "user_id", "token_id", "mcp_id", "tool_name", "status", "source",
            "from_time", "to_time"}
 
@@ -163,8 +163,11 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
         raise HTTPException(422, "Title must contain 1–128 characters")
     if result["anonymous_scope_mode"] not in ("selected", "all") or not isinstance(result["anonymous_mcp_ids"], list):
         raise HTTPException(422, "Invalid anonymous scope")
-    from .cors import validate_origins
+    from .cors import validate_hosts, validate_origins
     validate_origins(result["cors_origins"])
+    result["allowed_hosts"] = validate_hosts(result["allowed_hosts"])
+    if "allowed_hosts" in data:
+        data["allowed_hosts"] = result["allowed_hosts"]
     ZoneInfo(result["timezone"])
     CronTrigger.from_crontab(result["refresh_cron"], timezone=result["timezone"])
     async with request.app.state.db.locked() as s:
@@ -177,6 +180,7 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
                 s.add(SystemSetting(key=key, value=value))
     result = await settings(request, user)
     request.app.state.cors_origins = result["cors_origins"]
+    request.app.state.allowed_hosts = result["allowed_hosts"]
     request.app.state.runtime.idle_seconds = result["idle_seconds"]
     request.app.state.catalog.startup_failure_threshold = result["startup_failure_threshold"]
     request.app.state.logs.timezone = ZoneInfo(result["timezone"])

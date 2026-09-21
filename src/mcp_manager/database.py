@@ -51,7 +51,9 @@ class ApiToken(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     scope_mode: Mapped[str] = mapped_column(String(16), default="selected")
     mcp_ids: Mapped[list] = mapped_column(JSON, default=list)
-    discovery_mode: Mapped[str] = mapped_column(String(16), default="native")
+    discovery_mode: Mapped[str] = mapped_column(String(16), default="discovery")
+    enable_resource_tools: Mapped[bool] = mapped_column(Boolean, default=False)
+    enable_mcp_proposals: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -68,6 +70,28 @@ class McpServer(Base):
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class McpProposal(Base):
+    __tablename__ = "mcp_proposals"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_id: Mapped[str] = mapped_column(ForeignKey("api_tokens.id", ondelete="CASCADE"), index=True)
+    source: Mapped[str] = mapped_column(String(128), default="agent")
+    purpose: Mapped[str] = mapped_column(Text, default="")
+    declared_capabilities: Mapped[list] = mapped_column(JSON, default=list)
+    requested_permissions: Mapped[list] = mapped_column(JSON, default=list)
+    payload: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    isolation: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    config_isolation: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    rejection_reason: Mapped[str] = mapped_column(Text, default="")
+    approved_mcp_id: Mapped[str | None] = mapped_column(
+        ForeignKey("mcp_servers.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class SystemSetting(Base):

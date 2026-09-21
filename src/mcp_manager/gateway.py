@@ -3,7 +3,6 @@ import hashlib
 import json
 import secrets
 import time
-from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -19,9 +18,97 @@ from .catalog import alias
 from .database import ApiToken, User
 from .discovery import DISCOVERY, Discovery, result_json, validate_meta, validation_error
 from .identity import authenticate_token, expired
+from .proposals import resource_index, submit_proposals
 from .runtime import GatewayError
 
 router = APIRouter(prefix="/gateway/v1")
+
+RESOURCE_TOOLS = [
+    {
+        "name": "gateway_list_resources",
+        "description": (
+            "List authorized MCP resources, prompts and resource templates as JSON. "
+            "Use only when the client does not support native MCP resource and prompt protocols. "
+            "Filter by mcp and keyword; each result identifies its provider and how readable resources are read."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mcp": {"type": "string", "maxLength": 2000, "default": ""},
+                "keyword": {"type": "string", "maxLength": 2000, "default": ""},
+            },
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    },
+    {
+        "name": "gateway_read_resource",
+        "description": (
+            "Read one authorized resource by the exact URI returned by gateway_list_resources. "
+            "Use only when the client does not support the native MCP resources/read protocol."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "uri": {"type": "string", "minLength": 1, "maxLength": 8192},
+            },
+            "required": ["uri"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    },
+]
+PROPOSAL_TOOL = {
+    "name": "gateway_propose_mcp",
+    "description": (
+        "Submit one MCP configuration or a proposals array for administrator approval. "
+        "Convert configurations to the documented standard JSON first. Valid proposals return approval IDs; "
+        "mode, instance isolation and OAuth config isolation are set only by an approver."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "oneOf": [
+            {
+                "type": "object",
+                "required": ["name", "transport", "config"],
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "slug": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "description": {"type": "string", "maxLength": 4000},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "transport": {"enum": ["stdio", "streamable-http", "http", "sse", "rest"]},
+                    "config": {"type": "object"},
+                    "source": {"type": "string", "maxLength": 128},
+                    "purpose": {"type": "string", "maxLength": 4000},
+                    "declared_capabilities": {"type": "array", "items": {"type": "string"}},
+                    "requested_permissions": {"type": "array", "items": {"type": "string"}},
+                },
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "required": ["proposals"],
+                "properties": {
+                    "proposals": {
+                        "type": "array", "minItems": 1, "maxItems": 100,
+                        "items": {"type": "object"},
+                    }
+                },
+                "additionalProperties": False,
+            },
+        ]
+    },
+}
+
+
+def discovery_tools(token):
+    tools = list(DISCOVERY)
+    if token and token.enable_resource_tools:
+        tools.extend(RESOURCE_TOOLS)
+    if token and token.enable_mcp_proposals:
+        tools.append(PROPOSAL_TOOL)
+    return tools
+
 
 
 
@@ -206,8 +293,8 @@ class Gateway:
     async def list_tools(self, ctx, params):
         _, token, _ = await self.principal(ctx.request)
         if token and token.discovery_mode == "discovery":
-            return types.ListToolsResult(tools=[types.Tool.model_validate(x) for x in DISCOVERY])
-        user, token, rows, entries = await self.directory(ctx.request)
+            return types.ListToolsResult(tools=[types.Tool.model_validate(x) for x in discovery_tools(token)])
+        _user, _token, _rows, entries = await self.directory(ctx.request)
         tools = [e[2] for e in entries]
         return types.ListToolsResult(tools=[types.Tool.model_validate(x) for x in tools])
 
@@ -227,9 +314,55 @@ class Gateway:
 
     async def _call_tool(self, ctx, params):
         request = ctx.request
-        user, token, rows, entries = await self.directory(request)
+        user, token, _ = await self.principal(request)
         name, arguments = params.name, params.arguments or {}
         discovery = token and token.discovery_mode == "discovery"
+        if discovery and name == "gateway_propose_mcp":
+            return result_json(await submit_proposals(self.app, user, token, arguments))
+        user, token, rows, entries = await self.directory(request)
+        if discovery and token.enable_resource_tools and name == "gateway_list_resources":
+            if not isinstance(arguments, dict) or set(arguments) - {"mcp", "keyword"}:
+                raise ValueError("gateway_list_resources accepts only mcp and keyword")
+            mcp_query = str(arguments.get("mcp", ""))
+            keyword = str(arguments.get("keyword", "")).strip()
+            cached = lambda row: self.app.state.catalog.cached(row, user.id if user else None)
+            items = resource_index(rows, cached, mcp=mcp_query)
+            search = {"mode": "keyword", "semantic_status": "disabled"}
+            if keyword:
+                literal = resource_index(rows, cached, mcp=mcp_query, keyword=keyword)
+                literal_keys = {
+                    json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
+                    for item in literal
+                }
+                documents = []
+                keyed = {}
+                for index, item in enumerate(items):
+                    document_id = hashlib.sha256(
+                        json.dumps([item.get("mcp", {}).get("id"), item.get("kind"),
+                                    item.get("uri") or item.get("uriTemplate") or item.get("name"), index],
+                                   ensure_ascii=False).encode()
+                    ).hexdigest()
+                    keyed[document_id] = item
+                    documents.append({"id": document_id, "text": json.dumps(item, ensure_ascii=False, default=str)})
+                from .embedding_api import load_embedding_config
+                config = await load_embedding_config(self.app.state)
+                scope = hashlib.sha256(
+                    json.dumps([user.id if user else "anonymous", token.id if token else "", "resources"]).encode()
+                ).hexdigest()
+                scores, search = await self.app.state.embeddings.scores(scope, documents, keyword, config)
+                items = [
+                    item for document_id, item in keyed.items()
+                    if document_id in scores
+                    or json.dumps(item, sort_keys=True, ensure_ascii=False, default=str) in literal_keys
+                ]
+                for document_id, item in keyed.items():
+                    if document_id in scores and item in items:
+                        item["semantic_score"] = scores[document_id]
+            return result_json({"items": items, "count": len(items), "search": search})
+        if discovery and token.enable_resource_tools and name == "gateway_read_resource":
+            if not isinstance(arguments, dict) or set(arguments) != {"uri"}:
+                raise ValueError("gateway_read_resource requires only uri")
+            return await self.read_resource_tool(request, user, token, rows, str(arguments["uri"]))
         if discovery and name in {"gateway_search_mcps", "gateway_search_tools"}:
             return await self.discovery.search(name, arguments, request)
         if discovery and name == "gateway_search":
@@ -257,7 +390,7 @@ class Gateway:
         row, tool, _ = entry
 
         async def authorize():
-            fresh_user, fresh_token, allowed = await self.principal(request)
+            _fresh_user, _fresh_token, allowed = await self.principal(request)
             fresh = await self.app.state.catalog.get(row.id)
             if row.id not in allowed or fresh.revision != row.revision:
                 raise GatewayError("permission_revoked", "MCP permission or configuration changed")
@@ -271,8 +404,27 @@ class Gateway:
             raise
         return types.CallToolResult.model_validate(result)
 
+    async def read_resource_tool(self, request, user, token, rows, uri):
+        row = next((r for r in rows if uri.startswith("mcp-manager://" + r.id + "/")), None)
+        if not row:
+            raise ValueError("Resource not authorized")
+        original = uri[len("mcp-manager://" + row.id + "/"):]
+        result = await self.app.state.runtime.perform(
+            await self.app.state.catalog.spec(row, user.id if user else None),
+            self.lease(request, user, token).id,
+            "read_resource",
+            original,
+            authorize=lambda: self.ensure(request, row),
+        )
+        for content in result.get("contents", []):
+            content["uri"] = "mcp-manager://" + row.id + "/" + content["uri"]
+        return result_json({
+            "mcp": {"id": row.id, "name": row.name, "slug": row.slug},
+            "contents": result.get("contents", []),
+        })
+
     async def list_resources(self, ctx, params):
-        user, token, rows, _ = await self.directory(ctx.request)
+        user, _token, rows, _ = await self.directory(ctx.request)
         items = []
         for row in rows:
             for item in self.app.state.catalog.cached(row, user.id if user else None)["resources"]:
@@ -280,7 +432,7 @@ class Gateway:
         return types.ListResourcesResult(resources=items)
 
     async def list_templates(self, ctx, params):
-        user, token, rows, _ = await self.directory(ctx.request)
+        user, _token, rows, _ = await self.directory(ctx.request)
         items = []
         for row in rows:
             for item in self.app.state.catalog.cached(row, user.id if user else None)["templates"]:
@@ -297,7 +449,7 @@ class Gateway:
         original = uri[len("mcp-manager://" + row.id + "/"):]
         result = await self.app.state.runtime.perform(await self.app.state.catalog.spec(row, user.id if user else None),
             self.lease(ctx.request, user, token).id, "read_resource", original,
-            authorize=lambda: self.ensure(ctx.request, row))
+            authorize=lambda current=row: self.ensure(ctx.request, current))
         for content in result.get("contents", []):
             content["uri"] = "mcp-manager://" + row.id + "/" + content["uri"]
         return types.ReadResourceResult.model_validate(result)
@@ -309,7 +461,7 @@ class Gateway:
             raise GatewayError("permission_revoked", "MCP access revoked")
 
     async def list_prompts(self, ctx, params):
-        user, token, rows, _ = await self.directory(ctx.request)
+        user, _token, rows, _ = await self.directory(ctx.request)
         prompts = [types.Prompt.model_validate(dict(p, name=alias(row.slug, p["name"])))
                    for row in rows for p in self.app.state.catalog.cached(row, user.id if user else None)["prompts"]]
         return types.ListPromptsResult(prompts=prompts)
@@ -322,7 +474,7 @@ class Gateway:
                     result = await self.app.state.runtime.perform(
                         await self.app.state.catalog.spec(row, user.id if user else None),
                         self.lease(ctx.request, user, token).id, "get_prompt", prompt["name"], params.arguments or {},
-                        authorize=lambda: self.ensure(ctx.request, row))
+                        authorize=lambda current=row: self.ensure(ctx.request, current))
                     return types.GetPromptResult.model_validate(result)
         raise ValueError("Prompt not authorized")
 
@@ -382,9 +534,7 @@ def install_gateway(app):
                       on_call_tool=gateway.call_tool, on_list_resources=gateway.list_resources,
                       on_list_resource_templates=gateway.list_templates, on_read_resource=gateway.read_resource,
                       on_list_prompts=gateway.list_prompts, on_get_prompt=gateway.get_prompt)
-    public = urlsplit(app.state.config.public_url)
-    security = TransportSecuritySettings(allowed_hosts=[public.netloc, "127.0.0.1:*", "localhost:*", "[::1]:*", "test"],
-                                         allowed_origins=[app.state.config.public_url])
+    security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
     endpoint = protocol.streamable_http_app(streamable_http_path="/mcp", session_idle_timeout=None,
                                              transport_security=security)
     app.router.routes.extend(endpoint.router.routes)

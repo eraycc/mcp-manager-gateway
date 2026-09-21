@@ -47,7 +47,7 @@ async def running_gateway(tmp_path):
             # instances. Refresh behavior has its own catalog tests.
             assert row["cache_status"] == "ready"
             assert row["tool_count"] > 0
-            response = await web.post("/api/v1/tokens", json={"name": "agent", "scope_mode": "all"})
+            response = await web.post("/api/v1/tokens", json={"name": "agent", "scope_mode": "all", "discovery_mode": "native"})
             token = response.json()["token"]
             yield app, web, url, token, row
     finally:
@@ -92,3 +92,29 @@ async def test_token_revocation_and_anonymous_range(running_gateway):
     async with httpx2.AsyncClient(trust_env=False) as http:
         async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None) as client:
             assert (await client.list_tools()).tools == []
+
+
+@pytest.mark.asyncio
+async def test_discovery_feature_switches_return_six_protocol_valid_tools(running_gateway):
+    _app, web, url, token, _row = running_gateway
+    token_id = (await web.get("/api/v1/tokens")).json()["items"][0]["id"]
+    updated = await web.patch("/api/v1/tokens/" + token_id, json={
+        "discovery_mode": "discovery",
+        "enable_resource_tools": True,
+        "enable_mcp_proposals": True,
+    })
+    assert updated.status_code == 200, updated.text
+    headers = {"Authorization": "Bearer " + token}
+    async with httpx2.AsyncClient(headers=headers, trust_env=False) as http:  # noqa: SIM117
+        async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None) as client:
+            tools = await client.list_tools()
+    assert [tool.name for tool in tools.tools] == [
+        "gateway_search_mcps",
+        "gateway_search_tools",
+        "gateway_call",
+        "gateway_list_resources",
+        "gateway_read_resource",
+        "gateway_propose_mcp",
+    ]
+    assert tools.tools[3].annotations.read_only_hint is True
+    assert tools.tools[4].annotations.read_only_hint is True

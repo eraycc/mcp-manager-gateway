@@ -54,13 +54,18 @@ REST 默认向工具地址发送 HEAD 请求检查连接，HTTP 405 表示该路
 Authorization: Bearer mcpm_你的Token
 ```
 
-原生工具目录直接列出该 Token 有权使用的全部缓存工具。按需发现提供两个索引工具和一个执行工具：
+新建 Token 默认使用按需发现，基础注册两个索引工具和一个执行工具（3 个）；仍可为兼容旧客户端选择原生工具目录。Token 可选启用资源工具（+2），管理员 Token 还可选启用 MCP 提议（+1），按需发现模式最多注册 6 个网关工具：
 
 | 工具 | 用途 |
 | --- | --- |
 | `gateway_search_mcps(query)` | 搜索服务名称、描述、标签和工具名；空或 `*` 列出全部授权且非 disabled 的 MCP 摘要。failed 服务仍返回 `status`、失败次数、原因与作用域，但 `tools_list` 为空 |
 | `gateway_search_tools(mcp, tool)` | 搜索工具并返回完整原始 inputSchema、描述、归属、精确 gateway_name、示例或参数模板 |
 | `gateway_call(name, arguments)` | 按精确 gateway_name 调用，arguments 必须符合发现结果中的原始 Schema |
+| `gateway_list_resources(mcp, keyword)` | 可选；为不支持原生资源协议的客户端列出资源、提示词和资源模板，返回提供方 MCP 与读取方式；配置 embedding 后融合语义匹配 |
+| `gateway_read_resource(uri)` | 可选；读取 `gateway_list_resources` 返回的精确资源 URI，标注为只读 |
+| `gateway_propose_mcp(...)` | 仅开启该权限的管理员 Token 可见；单条或批量提交标准 MCP JSON，校验成功后进入审批队列 |
+
+Agent 提议不会直接创建服务。管理员在「MCP 审批」页可筛选、分页、修改配置，设置启动策略、实例隔离和 OAuth 配置隔离，执行单条或批量测试/审批/拒绝/删除；通过时再次检查完全相同的 MCP，并添加到「MCP 服务」。
 
 `mcp` 推荐使用返回的服务 ID，也支持名称和 slug。指定 mcp、tool 留空会列出该服务全部工具；mcp 留空或为 `*` 时跨服务搜索；两个参数都留空或为 `*` 时列举全部授权 MCP 和工具。超过页大小时跟随 `next_cursor`，保持查询不变。每页条目还有 1 MiB 的累计 JSON 字节预算，完整 Schema 不拆分；单个条目超过此预算时返回 `catalog_entry_too_large`。错误参数会返回字段路径和修正提示，实际执行不会通过模糊匹配选择工具。
 
@@ -71,6 +76,8 @@ Authorization: Bearer mcpm_你的Token
 关闭 Token 鉴权只影响 MCP 调用，Web 管理仍需登录。匿名范围由管理员单独设置，默认不公开任何服务。请求提供了无效 Token 时，不会退回匿名权限。
 
 系统设置中的跨域来源默认 `*`，作用于 `/mcp` 与 `/gateway/v1`，支持浏览器 Bearer 请求和预检；可改为指定来源列表，保存后立即生效。管理 API 的 Cookie、CSRF 与同源检查保持独立。
+
+「系统设置 → 基本设置」可配置允许的监听 Host / IP 列表，每行一项，支持主机名、IP 或 `Host:端口`；`*` 和 `0.0.0.0` 均表示允许全部，默认 `*`。校验仅作用于 `/mcp` 与 `/gateway/v1`，拒绝响应会返回当前 Host 和允许列表，Web 控制面板继续使用原有同源识别逻辑。
 
 匿名客户端如果显式创建 `/gateway/v1/leases` 租约，需要保存响应中的 `client_secret`，并在后续调用、心跳、释放时携带 `X-MCP-Manager-Client`。stdio 桥接会自动处理。
 

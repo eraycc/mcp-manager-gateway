@@ -136,13 +136,18 @@ async def test_cors_settings(bug1_browser):
     page, url = bug1_browser
     await page.goto(url + "/#/settings")
     cors = page.get_by_label("允许跨域接入的来源", exact=True)
+    hosts = page.get_by_label("允许的监听 Host / IP 列表", exact=True)
     await expect(cors).to_have_value("*")
+    await expect(hosts).to_have_value("*")
     await cors.fill("https://client.example.com\nhttp://localhost:3000")
+    await hosts.fill("0.0.0.0\nmanager.example:8765")
     async with page.expect_response("**/api/v1/settings") as pending:
         await page.get_by_role("button", name="保存设置", exact=True).click()
     response = await pending.value
     assert response.status == 200
-    assert json.loads(response.request.post_data)["cors_origins"] == ["https://client.example.com", "http://localhost:3000"]
+    payload = json.loads(response.request.post_data)
+    assert payload["cors_origins"] == ["https://client.example.com", "http://localhost:3000"]
+    assert payload["allowed_hosts"] == ["0.0.0.0", "manager.example:8765"]
     await expect(page.get_by_text("管理控制台仍只允许同源访问。", exact=False)).to_be_visible()
 
 
