@@ -192,7 +192,7 @@ def proposal_public(row, catalog, *, detail=False):
 
 
 async def submit_proposals(app, user, token, value):
-    if not token or not token.enable_mcp_proposals or user.role != "admin":
+    if not token or not token.enable_mcp_proposal or user.role != "admin":
         raise HTTPException(403, "This administrator token cannot propose MCP services")
     items = normalize_proposals(value)
     rows = []

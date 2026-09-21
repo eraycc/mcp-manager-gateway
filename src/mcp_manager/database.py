@@ -53,7 +53,7 @@ class ApiToken(Base):
     mcp_ids: Mapped[list] = mapped_column(JSON, default=list)
     discovery_mode: Mapped[str] = mapped_column(String(16), default="discovery")
     enable_resource_tools: Mapped[bool] = mapped_column(Boolean, default=False)
-    enable_mcp_proposals: Mapped[bool] = mapped_column(Boolean, default=False)
+    enable_mcp_proposal: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

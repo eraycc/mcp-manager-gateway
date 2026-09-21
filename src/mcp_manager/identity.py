@@ -195,7 +195,7 @@ class TokenCreate(Input):
     mcp_ids: list[str] = Field(default_factory=list)
     discovery_mode: Literal["native", "discovery"] = "discovery"
     enable_resource_tools: bool = False
-    enable_mcp_proposals: bool = False
+    enable_mcp_proposal: bool = False
     expires_at: datetime | None = None
 
 
@@ -205,7 +205,7 @@ class TokenPatch(Input):
     mcp_ids: list[str] | None = None
     discovery_mode: Literal["native", "discovery"] | None = None
     enable_resource_tools: bool | None = None
-    enable_mcp_proposals: bool | None = None
+    enable_mcp_proposal: bool | None = None
     expires_at: datetime | None = None
     disabled: bool | None = None
 
@@ -531,7 +531,7 @@ async def create_token(data: TokenCreate, request: Request, response: Response, 
         owner = await s.get(User, owner_id)
         if not owner or owner.disabled:
             raise HTTPException(400, "Token owner is unavailable")
-        if data.enable_mcp_proposals and (user.role != "admin" or owner.role != "admin"):
+        if data.enable_mcp_proposal and (user.role != "admin" or owner.role != "admin"):
             raise HTTPException(403, "Only administrators may create proposal-enabled tokens")
         await scope_check(db, owner, data.scope_mode, data.mcp_ids)
         secret, digest, prefix = mint_token()
@@ -583,7 +583,7 @@ async def patch_token(token_id: str, data: TokenPatch, request: Request, user=CU
         token = await owned_token(s, token_id, user)
         owner = await s.get(User, token.user_id)
         values = data.model_dump(exclude_unset=True)
-        if values.get("enable_mcp_proposals") and (user.role != "admin" or owner.role != "admin"):
+        if values.get("enable_mcp_proposal") and (user.role != "admin" or owner.role != "admin"):
             raise HTTPException(403, "Only administrators may enable MCP proposals")
         scope_changed = ((data.scope_mode is not None and data.scope_mode != token.scope_mode)
                          or (data.mcp_ids is not None and set(data.mcp_ids) != set(token.mcp_ids)))
@@ -596,7 +596,7 @@ async def patch_token(token_id: str, data: TokenPatch, request: Request, user=CU
         result = public(token)
         revoke = (token.disabled or expired(token.expires_at) or scope_changed
                   or "discovery_mode" in values or "enable_resource_tools" in values
-                  or "enable_mcp_proposals" in values)
+                  or "enable_mcp_proposal" in values)
     if revoke:
         await revoke_token_leases(request, token_id)
     return result

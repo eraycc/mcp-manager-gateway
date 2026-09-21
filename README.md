@@ -63,7 +63,7 @@ Authorization: Bearer mcpm_你的Token
 | `gateway_call(name, arguments)` | 按精确 gateway_name 调用，arguments 必须符合发现结果中的原始 Schema |
 | `gateway_list_resources(mcp, keyword)` | 可选；为不支持原生资源协议的客户端列出资源、提示词和资源模板，返回提供方 MCP 与读取方式；配置 embedding 后融合语义匹配 |
 | `gateway_read_resource(uri)` | 可选；读取 `gateway_list_resources` 返回的精确资源 URI，标注为只读 |
-| `gateway_propose_mcp(...)` | 仅开启该权限的管理员 Token 可见；单条或批量提交标准 MCP JSON，校验成功后进入审批队列 |
+| `gateway_mcp_proposals(...)` | 仅开启该权限的管理员 Token 可见；单条或批量提交标准 MCP JSON 进入审批队列，也可传 `{"action": "list"}` 查询提案审核状态（状态过滤/分页/计数） |
 
 Agent 提议不会直接创建服务。管理员在「MCP 审批」页可筛选、分页、修改配置，设置启动策略、实例隔离和 OAuth 配置隔离，执行单条或批量测试/审批/拒绝/删除；通过时再次检查完全相同的 MCP，并添加到「MCP 服务」。
 

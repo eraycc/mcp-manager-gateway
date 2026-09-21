@@ -84,7 +84,7 @@ async function tokenEditor(row){
   '客户端直接获取当前令牌授权范围内的全部工具定义。';
  discovery.input.onchange=describe;describe();
  const expiry=field('到期时间（可选）',row?.expires_at?new Date(new Date(row.expires_at).getTime()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16):'','datetime-local');
- const resourceTools=check('启用资源工具',row?.enable_resource_tools),proposalTools=check('允许 Agent 提议批量配置 MCP',row?.enable_mcp_proposals),resourceHelp=el('div',{class:'stack'},resourceTools.node,el('p',{class:'muted'},'启用后新增 gateway_list_resources 与 gateway_read_resource，用于不支持原生资源协议的客户端检索和读取资源。')),proposalHelp=el('div',{class:'stack'},proposalTools.node,el('p',{class:'muted'},'仅管理员 Token 可启用；新增 gateway_propose_mcp，Agent 可单条或批量提交 MCP 配置进入审批队列，不会直接创建服务。')),disabled=check('禁用令牌',row?.disabled),parts=[name.node,scope.node,discovery.node,help,resourceHelp,...(admin()?[proposalHelp]:[]),expiry.node];
+ const resourceTools=check('启用资源工具',row?.enable_resource_tools),proposalTools=check('允许 Agent 提交/查询 MCP 提案',row?.enable_mcp_proposal),resourceHelp=el('div',{class:'stack'},resourceTools.node,el('p',{class:'muted'},'启用后新增 gateway_list_resources 与 gateway_read_resource，用于不支持原生资源协议的客户端检索和读取资源。')),proposalHelp=el('div',{class:'stack'},proposalTools.node,el('p',{class:'muted'},'仅管理员 Token 可启用；新增 gateway_mcp_proposals，Agent 可单条或批量提交 MCP 配置进入审批队列，也可查询提案审核状态，不会直接创建服务。')),disabled=check('禁用令牌',row?.disabled),parts=[name.node,scope.node,discovery.node,help,resourceHelp,...(admin()?[proposalHelp]:[]),expiry.node];
  if(row){
   parts.push(disabled.node);let data;
   if(row.secret_available){try{data=await api('/tokens/'+row.id+'/secret')}catch(e){if(e.code!=='token_secret_unavailable')throw e}}
@@ -96,7 +96,7 @@ async function tokenEditor(row){
  }
  formDialog(row?'编辑访问令牌':'创建访问令牌',parts,async()=>{
   const result=await api('/tokens'+(row?'/'+row.id:''),{method:row?'PATCH':'POST',body:{
-   name:name.input.value,...scope.value(),discovery_mode:discovery.input.value,enable_resource_tools:resourceTools.input.checked,...(admin()?{enable_mcp_proposals:proposalTools.input.checked}:{}),
+   name:name.input.value,...scope.value(),discovery_mode:discovery.input.value,enable_resource_tools:resourceTools.input.checked,...(admin()?{enable_mcp_proposal:proposalTools.input.checked}:{}),
    expires_at:expiry.input.value?new Date(expiry.input.value).toISOString():null,...(row?{disabled:disabled.input.checked}:{})}});
   await refresh();if(result.token)secret(result.token);
  });
@@ -121,7 +121,7 @@ async function tokens(main,signal){
  await tablePage(main,{path:'/tokens',signal,columns:[
   ['名称',x=>el('div',{},x.name,el('span',{class:'subtext code'},x.prefix+'…'))],
   ...(admin()?[['所属用户',x=>x.username||x.user_id]]:[]),
-  ['工具目录',x=>el('div',{},badge(x.discovery_mode),el('span',{class:'subtext'},'网关工具 '+(3+(x.enable_resource_tools?2:0)+(x.enable_mcp_proposals?1:0))+' 个'))],['范围',x=>x.scope_mode==='all'?'全部授权服务':(x.mcp_ids?.length||0)+' 个服务'],
+  ['工具目录',x=>el('div',{},badge(x.discovery_mode),el('span',{class:'subtext'},'网关工具 '+(3+(x.enable_resource_tools?2:0)+(x.enable_mcp_proposal?1:0))+' 个'))],['范围',x=>x.scope_mode==='all'?'全部授权服务':(x.mcp_ids?.length||0)+' 个服务'],
   ['状态',x=>badge(x.disabled?'disabled':'active')],
   ['调用次数',x=>el('div',{},x.call_count??'—',el('span',{class:'subtext'},'成功 '+(x.success_count??'—')+' / 失败 '+(x.failed_count??'—')))],
   ['到期',x=>date(x.expires_at)]],

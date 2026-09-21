@@ -59,7 +59,7 @@ RESOURCE_TOOLS = [
     },
 ]
 PROPOSAL_TOOL = {
-    "name": "gateway_propose_mcp",
+    "name": "gateway_mcp_proposals",
     "description": (
         "Submit one MCP configuration or a proposals array for administrator approval, "
         "or list approval status. "
@@ -122,7 +122,7 @@ def discovery_tools(token):
     tools = list(DISCOVERY)
     if token and token.enable_resource_tools:
         tools.extend(RESOURCE_TOOLS)
-    if token and token.enable_mcp_proposals:
+    if token and token.enable_mcp_proposal:
         tools.append(PROPOSAL_TOOL)
     return tools
 
@@ -334,7 +334,7 @@ class Gateway:
         user, token, _ = await self.principal(request)
         name, arguments = params.name, params.arguments or {}
         discovery = token and token.discovery_mode == "discovery"
-        if discovery and name == "gateway_propose_mcp":
+        if discovery and name == "gateway_mcp_proposals":
             if isinstance(arguments, dict) and arguments.get("action") == "list":
                 return result_json(await list_proposals(
                     self.app, user,

@@ -16,7 +16,7 @@ def token(**values):
     defaults = {
         "discovery_mode": "discovery",
         "enable_resource_tools": False,
-        "enable_mcp_proposals": False,
+        "enable_mcp_proposal": False,
     }
     defaults.update(values)
     return SimpleNamespace(**defaults)
@@ -32,9 +32,9 @@ def test_gateway_tool_count_is_token_scoped_and_bounded():
         "gateway_list_resources",
         "gateway_read_resource",
     ]
-    all_tools = discovery_tools(token(enable_resource_tools=True, enable_mcp_proposals=True))
+    all_tools = discovery_tools(token(enable_resource_tools=True, enable_mcp_proposal=True))
     assert len(all_tools) == 6
-    assert all_tools[-1]["name"] == "gateway_propose_mcp"
+    assert all_tools[-1]["name"] == "gateway_mcp_proposals"
     assert all_tools[3]["annotations"]["readOnlyHint"] is True
     assert all_tools[4]["annotations"]["readOnlyHint"] is True
 
@@ -112,11 +112,11 @@ async def test_admin_proposal_token_approval_and_exact_duplicate_guard(tmp_path)
                 "name": "proposal-agent",
                 "scope_mode": "all",
                 "enable_resource_tools": True,
-                "enable_mcp_proposals": True,
+                "enable_mcp_proposal": True,
             })
             assert created.status_code == 200, created.text
             assert created.json()["enable_resource_tools"] is True
-            assert created.json()["enable_mcp_proposals"] is True
+            assert created.json()["enable_mcp_proposal"] is True
 
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -133,7 +133,7 @@ async def test_admin_proposal_token_approval_and_exact_duplicate_guard(tmp_path)
                 })
                 assert resource_only.status_code == 200
                 forbidden = await ordinary.post("/api/v1/tokens", json={
-                    "name": "proposal", "enable_mcp_proposals": True,
+                    "name": "proposal", "enable_mcp_proposal": True,
                 })
                 assert forbidden.status_code == 403
 
@@ -196,7 +196,7 @@ async def test_list_proposals_filters_paginates_and_counts(tmp_path):
             client.headers["X-CSRF-Token"] = client.cookies["mcp_csrf"]
             created = await client.post("/api/v1/tokens", json={
                 "name": "proposal-agent", "scope_mode": "all",
-                "enable_resource_tools": True, "enable_mcp_proposals": True,
+                "enable_resource_tools": True, "enable_mcp_proposal": True,
             })
             assert created.status_code == 200, created.text
             async with app.state.db.session() as session:
@@ -259,4 +259,4 @@ async def test_list_proposals_filters_paginates_and_counts(tmp_path):
 
 def test_api_token_feature_defaults_are_closed():
     assert ApiToken.enable_resource_tools.property.columns[0].default.arg is False
-    assert ApiToken.enable_mcp_proposals.property.columns[0].default.arg is False
+    assert ApiToken.enable_mcp_proposal.property.columns[0].default.arg is False

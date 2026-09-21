@@ -101,7 +101,7 @@ async def test_discovery_feature_switches_return_six_protocol_valid_tools(runnin
     updated = await web.patch("/api/v1/tokens/" + token_id, json={
         "discovery_mode": "discovery",
         "enable_resource_tools": True,
-        "enable_mcp_proposals": True,
+        "enable_mcp_proposal": True,
     })
     assert updated.status_code == 200, updated.text
     headers = {"Authorization": "Bearer " + token}
@@ -114,7 +114,7 @@ async def test_discovery_feature_switches_return_six_protocol_valid_tools(runnin
         "gateway_call",
         "gateway_list_resources",
         "gateway_read_resource",
-        "gateway_propose_mcp",
+        "gateway_mcp_proposals",
     ]
     assert tools.tools[3].annotations.read_only_hint is True
     assert tools.tools[4].annotations.read_only_hint is True
