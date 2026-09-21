@@ -35,6 +35,23 @@ class ProposedMcp(BaseModel):
     requested_permissions: list[str] = Field(default_factory=list, max_length=100)
 
 
+def _unwrap_json_strings(value: dict) -> dict:
+    """Restore dict/list fields that the host MCP client flattened to JSON strings."""
+    if not isinstance(value, dict):
+        return value
+    unwrapped: dict = {}
+    for k, v in value.items():
+        if isinstance(v, str) and v.startswith(("{", "[")):
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, (dict, list)):
+                    v = parsed
+            except json.JSONDecodeError:
+                pass
+        unwrapped[k] = v
+    return unwrapped
+
+
 def normalize_proposals(value: dict) -> list[dict]:
     if not isinstance(value, dict):
         raise ValueError("MCP 提议必须是 JSON 对象")  # noqa: TRY004
@@ -49,8 +66,10 @@ def normalize_proposals(value: dict) -> list[dict]:
         raise ValueError("proposals 必须包含 1-100 条记录")
     result = []
     for item in raw:
-        if isinstance(item, dict) and APPROVAL_FIELDS & item.keys():
-            raise ValueError("启动策略、实例隔离和 OAuth 配置隔离由审批人设置")
+        if isinstance(item, dict):
+            item = _unwrap_json_strings(item)
+            if APPROVAL_FIELDS & item.keys():
+                raise ValueError("启动策略、实例隔离和 OAuth 配置隔离由审批人设置")
         try:
             proposal = ProposedMcp.model_validate(item)
         except PydanticValidationError as exc:
