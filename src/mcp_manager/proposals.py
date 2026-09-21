@@ -62,6 +62,11 @@ def normalize_proposals(value: dict) -> list[dict]:
         raw = [value]
     elif set(value) != {"proposals"}:
         raise ValueError("批量提交只能包含 proposals 字段")
+    if isinstance(raw, str) and raw.startswith("["):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            pass
     if not isinstance(raw, list) or not 1 <= len(raw) <= 100:
         raise ValueError("proposals 必须包含 1-100 条记录")
     result = []
