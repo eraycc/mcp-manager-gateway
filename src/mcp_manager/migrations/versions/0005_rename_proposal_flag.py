@@ -4,9 +4,11 @@ The agent-facing tool was renamed from gateway_propose_mcp to
 gateway_mcp_proposals; the token feature flag is renamed accordingly
 (renamed as a column on api_tokens). Data is preserved.
 
-MySQL offline SQL (``alembic upgrade --sql``) requires an explicit type
-on CHANGE COLUMN, so ``type_`` / ``nullable`` / ``server_default`` are
-passed explicitly for cross-database compatibility.
+Dialect-aware: MySQL (online and offline ``--sql``) requires an
+explicit type on CHANGE COLUMN, so it is passed together with
+``existing_type``.  SQLite does not support ``ALTER COLUMN TYPE`` or
+``SET NOT NULL`` outside batch mode, so only a pure ``RENAME COLUMN``
+is emitted there.
 """
 
 import sqlalchemy as sa
@@ -19,22 +21,36 @@ depends_on = None
 
 
 def upgrade():
-    op.alter_column(
-        "api_tokens",
-        "enable_mcp_proposals",
-        new_column_name="enable_mcp_proposal",
-        type_=sa.Boolean(),
-        nullable=False,
-        server_default=sa.false(),
-    )
+    dialect = op.get_context().dialect.name
+    if dialect == "mysql":
+        op.alter_column(
+            "api_tokens",
+            "enable_mcp_proposals",
+            new_column_name="enable_mcp_proposal",
+            existing_type=sa.Boolean(),
+            type_=sa.Boolean(),
+        )
+    else:
+        op.alter_column(
+            "api_tokens",
+            "enable_mcp_proposals",
+            new_column_name="enable_mcp_proposal",
+        )
 
 
 def downgrade():
-    op.alter_column(
-        "api_tokens",
-        "enable_mcp_proposal",
-        new_column_name="enable_mcp_proposals",
-        type_=sa.Boolean(),
-        nullable=False,
-        server_default=sa.false(),
-    )
+    dialect = op.get_context().dialect.name
+    if dialect == "mysql":
+        op.alter_column(
+            "api_tokens",
+            "enable_mcp_proposal",
+            new_column_name="enable_mcp_proposals",
+            existing_type=sa.Boolean(),
+            type_=sa.Boolean(),
+        )
+    else:
+        op.alter_column(
+            "api_tokens",
+            "enable_mcp_proposal",
+            new_column_name="enable_mcp_proposals",
+        )
