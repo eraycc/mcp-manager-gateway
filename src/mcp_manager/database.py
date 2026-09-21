@@ -90,6 +90,10 @@ class McpProposal(Base):
     approved_mcp_id: Mapped[str | None] = mapped_column(
         ForeignKey("mcp_servers.id", ondelete="SET NULL"), nullable=True
     )
+    test_status: Mapped[str] = mapped_column(String(32), default="pending")
+    test_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    test_error: Mapped[str] = mapped_column(Text, default="")
+    tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 

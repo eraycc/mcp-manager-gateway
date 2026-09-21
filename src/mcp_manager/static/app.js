@@ -153,6 +153,23 @@ async function proposalEditor(row){
  })
 }
 async function rejectProposal(row){const reason=field('拒绝原因','','textarea');reason.input.required=true;formDialog('拒绝 MCP 提议',[reason.node],async()=>{await api('/mcp-proposals/'+row.id+'/reject',{method:'POST',body:{reason:reason.input.value}});refresh()},{saveLabel:'确认拒绝'})}
+function proposalTestResult(row){
+ const result=row.test_result||{},tested=row.tested_at?el('span',{class:'subtext'},'最近测试：'+date(row.tested_at)):null;
+ if(row.test_status==='success')return el('div',{},'成功 '+(result.tool_count??0)+' 工具',el('span',{class:'subtext'},'资源 '+(result.resource_count??0)+' · 提示词 '+(result.prompt_count??0)+' · 模板 '+(result.template_count??0)),tested);
+ if(row.test_status==='failed')return el('div',{},el('span',{class:'danger'},'测试失败'),el('span',{class:'subtext danger'},row.test_error||'原因未知'),tested);
+ if(row.test_status==='cancelled')return el('div',{},'已取消',tested);
+ return el('div',{},'待测试（pending）',tested)
+}
+function proposalTestButton(row){
+ let control;
+ control=button('工具 / 测试',async()=>{
+  control.disabled=true;toast('正在测试 MCP 连接…','info');
+  try{const result=await api('/mcp-proposals/'+row.id+'/test',{method:'POST'});toast('测试成功','success');detail('测试结果',result)}
+  catch(e){toast('测试失败：'+e.message,'fail')}
+  finally{control.disabled=false;refresh()}
+ });
+ return control
+}
 async function proposals(main,signal){
  main.append(title('MCP 审批','审核 Agent 提交的标准 MCP 配置，配置策略并测试后加入服务列表。'));
  await tablePage(main,{path:'/mcp-proposals',signal,columns:[
@@ -160,20 +177,20 @@ async function proposals(main,signal){
   ['来源',x=>el('div',{},x.source||'agent',el('span',{class:'subtext code'},x.token_id))],
   ['协议',x=>badge(x.transport)],['声明能力',x=>(x.declared_capabilities||[]).join('、')||'—'],
   ['请求权限',x=>(x.requested_permissions||[]).join('、')||'—'],['状态',x=>badge(x.status)],
-  ['策略 / 隔离',x=>(x.mode||'待配置')+' / '+(x.isolation||'待配置')],['提交时间',x=>date(x.created_at)]],
+  ['测试结果',proposalTestResult],['策略 / 隔离',x=>(x.mode||'待配置')+' / '+(x.isolation||'待配置')],['提交时间',x=>date(x.created_at)]],
   filters:[['status','状态',[['pending','待审批'],['incomplete','待完善配置'],['approved','已审批'],['rejected','已拒绝']]]],
   rowActions:r=>[
    button('详情',async()=>detail('提议详情',await api('/mcp-proposals/'+r.id))),
    ...(!['approved','rejected'].includes(r.status)?[
     button('配置',()=>proposalEditor(r)),
-    button('工具 / 测试',async()=>detail('测试结果',await api('/mcp-proposals/'+r.id+'/test',{method:'POST'}))),
+    proposalTestButton(r),
     button('通过',()=>ask('确认通过并添加到 MCP 服务列表？'+(r.mode&&r.isolation?'':'（未配置启动策略/实例隔离，将使用默认值：按需/服务共享。也可稍后在 MCP 服务列表内配置）'),async()=>{await api('/mcp-proposals/'+r.id+'/approve',{method:'POST',body:{}});refresh()}),'primary'),
     button('拒绝',()=>rejectProposal(r),'danger')
    ]:[]),
    button('删除',()=>ask('从审批列表删除“'+r.name+'”？',async()=>{await api('/mcp-proposals/'+r.id,{method:'DELETE'});refresh()}),'danger')],
   bulk:[
    ['批量配置',ids=>{const mode=selectField('启动策略','lazy',[['lazy','按需'],['eager','常驻'],['disabled','禁用']]),isolation=selectField('实例隔离','service',[['service','服务共享'],['user','用户隔离'],['session','会话隔离']]),ci=selectField('OAuth 配置隔离','shared',[['shared','共享配置'],['user','独享配置']]);formDialog('批量配置',[mode.node,isolation.node,ci.node],async()=>{detail('批量结果',await api('/mcp-proposals/batch',{method:'POST',body:{action:'configure',ids,configuration:{mode:mode.input.value,isolation:isolation.input.value,config_isolation:ci.input.value}}}));refresh()})}],
-   ['批量测试',async ids=>{const results=[];for(const id of ids){try{results.push({id,ok:true,result:await api('/mcp-proposals/'+id+'/test',{method:'POST'})})}catch(e){results.push({id,ok:false,error:e.message})}}detail('批量测试结果',results)}],
+   ['批量测试',async ids=>{toast('已提交批量测试','info');const job=await api('/mcp-proposals/batch-test',{method:'POST',body:{ids}});await jobDialog(job,{title:'MCP 批量测试',stopLabel:'停止测试',completeLabel:'关闭'});refresh()}],
    ['批量通过',ids=>ask('通过 '+ids.length+' 条提议并添加服务？（未配置启动策略/实例隔离的将使用默认值：按需/服务共享。也可稍后在 MCP 服务列表内配置）',async()=>{detail('批量结果',await api('/mcp-proposals/batch',{method:'POST',body:{action:'approve',ids}}));refresh()})],
    ['批量拒绝',ids=>{const reason=field('统一拒绝原因','','textarea');reason.input.required=true;formDialog('批量拒绝',[reason.node],async()=>{detail('批量结果',await api('/mcp-proposals/batch',{method:'POST',body:{action:'reject',ids,reason:reason.input.value}}));refresh()})}],
    ['批量删除',ids=>ask('删除 '+ids.length+' 条审批记录？',async()=>{detail('批量结果',await api('/mcp-proposals/batch',{method:'POST',body:{action:'delete',ids}}));refresh()})]

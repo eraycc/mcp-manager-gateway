@@ -4,8 +4,8 @@ import logging
 from pathlib import Path
 from uuid import uuid4
 
-from .logs import redact
 from .jsonl_store import JsonlStore
+from .logs import redact
 
 
 class Jobs:
@@ -34,7 +34,7 @@ class Jobs:
         except OSError:
             logging.getLogger(__name__).exception("Job snapshot write failed")
 
-    def submit(self, action, items, operation, user_id=None):
+    def submit(self, action, items, operation, user_id=None, cancel_operation=None):
         job = {"id": str(uuid4()), "action": action, "status": "queued", "total": len(items),
                "completed": 0, "results": [], "user_id": user_id}
         self.items[job["id"]] = job
@@ -71,9 +71,16 @@ class Jobs:
                         result = await operation(item)
                     record(index, {"item": item, "ok": True, "result": result})
                 except asyncio.CancelledError:
+                    if cancel_operation:
+                        try:
+                            await asyncio.shield(cancel_operation(item))
+                        except Exception:
+                            logging.getLogger(__name__).exception(
+                                "Job cancellation callback failed"
+                            )
                     cancelled(index, item)
                     raise
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - isolate failures per job item
                     record(index, {"item": item, "ok": False, "error": str(exc)})
 
             children = [asyncio.create_task(one(index, item)) for index, item in enumerate(items)]

@@ -1,4 +1,5 @@
 """Agent MCP proposals and administrator approval workflow."""
+import asyncio
 import json
 import math
 from copy import deepcopy
@@ -116,7 +117,7 @@ async def list_proposals(app, user, *, q="", status="", page=1, page_size=20):
     def name_of(row):
         try:
             return catalog.unseal(row.payload).get("name", "")
-        except Exception:
+        except Exception:  # noqa: BLE001 - one corrupt proposal must not break listing
             return ""
 
     haystack = lambda row: (name_of(row) + " " + (row.purpose or "") + " " + (row.source or "")).lower()
@@ -188,6 +189,10 @@ def proposal_public(row, catalog, *, detail=False):
         "config_isolation": row.config_isolation,
         "rejection_reason": row.rejection_reason,
         "approved_mcp_id": row.approved_mcp_id,
+        "test_status": row.test_status,
+        "test_result": row.test_result or {},
+        "test_error": row.test_error or "",
+        "tested_at": row.tested_at,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
@@ -310,9 +315,21 @@ async def configure(proposal_id: str, data: dict, request: Request, user=ADMIN):
         return proposal_public(row, request.app.state.catalog, detail=True)
 
 
-@router.post("/{proposal_id}/test")
-async def test_proposal(proposal_id: str, request: Request, user=ADMIN):
-    await web_authorizer(request)()
+async def _persist_test_result(request, proposal_id, status, *, result=None, error=""):
+    async with request.app.state.db.locked() as session:
+        row = await session.get(McpProposal, proposal_id)
+        if not row:
+            raise HTTPException(404, "Proposal not found")
+        row.test_status = status
+        row.test_result = result or {}
+        row.test_error = error[:4000]
+        if status != "pending":
+            row.tested_at = now()
+        row.updated_at = now()
+
+
+async def run_proposal_test(request, proposal_id, user):
+    actor = await web_authorizer(request)()
     catalog = request.app.state.catalog
     async with request.app.state.db.session() as session:
         row = await session.get(McpProposal, proposal_id)
@@ -320,10 +337,12 @@ async def test_proposal(proposal_id: str, request: Request, user=ADMIN):
         raise HTTPException(404, "Proposal not found")
     payload = catalog.unseal(row.payload)
     isolation = row.isolation or "service"
-    validate_service_config(payload["transport"], isolation, payload["config"])
+    await _persist_test_result(request, proposal_id, "pending")
     runtime = request.app.state.runtime
-    lease = runtime.create_lease(user.id, "diagnostic", kind="maintenance")
+    lease = None
     try:
+        validate_service_config(payload["transport"], isolation, payload["config"])
+        lease = runtime.create_lease(actor.id, "diagnostic", kind="maintenance")
         spec = ServerSpec(
             "diagnose-proposal-" + uuid4().hex,
             payload["transport"],
@@ -332,16 +351,51 @@ async def test_proposal(proposal_id: str, request: Request, user=ADMIN):
             isolation,
         )
         discovered = await runtime.discover(spec, lease.id)
-        return {
-            "ok": True,
+        result = {
             "tool_count": len(discovered.get("tools", [])),
             "resource_count": len(discovered.get("resources", [])),
             "prompt_count": len(discovered.get("prompts", [])),
             "template_count": len(discovered.get("templates", [])),
-            "capabilities": discovered,
         }
+        await _persist_test_result(request, proposal_id, "success", result=result)
+        return {"ok": True, **result, "capabilities": discovered}
+    except asyncio.CancelledError:
+        await asyncio.shield(_persist_test_result(
+            request, proposal_id, "cancelled", error="Operation cancelled"
+        ))
+        raise
+    except Exception as exc:
+        error = str(getattr(exc, "detail", exc)) or type(exc).__name__
+        await _persist_test_result(request, proposal_id, "failed", error=error)
+        raise
     finally:
-        await runtime.release(lease.id)
+        if lease:
+            await runtime.release(lease.id)
+
+
+@router.post("/{proposal_id}/test")
+async def test_proposal(proposal_id: str, request: Request, user=ADMIN):
+    return await run_proposal_test(request, proposal_id, user)
+
+
+@router.post("/batch-test")
+async def batch_test(data: dict, request: Request, user=ADMIN):
+    await web_authorizer(request)()
+    ids = list(dict.fromkeys(data.get("ids", [])))
+    if not 1 <= len(ids) <= 500:
+        raise HTTPException(422, "Select between 1 and 500 proposals")
+
+    async def operation(proposal_id):
+        return await run_proposal_test(request, proposal_id, user)
+
+    async def cancelled(proposal_id):
+        await _persist_test_result(
+            request, proposal_id, "cancelled", error="Operation cancelled"
+        )
+
+    return request.app.state.jobs.submit(
+        "mcp.proposal.test", ids, operation, user.id, cancel_operation=cancelled
+    )
 
 
 @router.post("/batch")

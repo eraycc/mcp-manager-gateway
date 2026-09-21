@@ -36,7 +36,7 @@ export async function watchJob(job,signal,onProgress=()=>{}){if(!job?.id)return 
 export async function jobDialog(job,options={}){
  if(!job?.id){detail('操作结果',job);return job}
  const abort=new AbortController(),status=el('pre',{},pretty(job)),actions=el('div',{class:'actions'});
- const cancel=button('取消后台任务',async()=>{await api('/jobs/'+job.id+'/cancel',{method:'POST'});toast('已请求取消任务','info')});actions.append(cancel);
+ const cancel=button(options.stopLabel||'取消后台任务',async()=>{await api('/jobs/'+job.id+'/cancel',{method:'POST'});toast('已请求取消任务','info')});actions.append(cancel);
  const hint=el('p',{class:'muted'},'关闭窗口仅停止状态观察，后台任务继续执行。');
  const d=dialog(options.title||'后台任务',el('div',{class:'stack'},hint,status,actions));
  d.addEventListener('close',()=>abort.abort());
@@ -44,7 +44,7 @@ export async function jobDialog(job,options={}){
   const result=await watchJob(job,abort.signal,current=>status.textContent=pretty(current));
   status.textContent=pretty(result);hint.textContent='任务已结束，可查看结果并关闭窗口。';
   const success=['completed','complete','done','success'].includes(result.status);
-  actions.replaceChildren(el('span',{class:success?'muted':'error'},success?'已完成':'任务结束，请查看详情'),button('关闭',()=>d.close()));
+  actions.replaceChildren(el('span',{class:success?'muted':'error'},success?'已完成':'任务结束，请查看详情'),button(options.completeLabel||'关闭',()=>d.close()));
   if(success&&options.autoCloseOnSuccess)d.close();
   return result
  }catch(e){if(e.name!=='AbortError'){status.textContent=e.message;actions.replaceChildren(button('关闭',()=>d.close()));toast(e.message,'fail')}return null}
