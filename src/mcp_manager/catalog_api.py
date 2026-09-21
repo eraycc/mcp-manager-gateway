@@ -255,11 +255,15 @@ async def batch(data: dict, request: Request, user=ADMIN):
 
 
 @router.get("/mcps/{server_id}")
-async def detail(server_id: str, request: Request, user=USER):
+async def detail(server_id: str, request: Request, response: Response,
+                 reveal: bool = False, user=USER):
     row = await permitted(request, server_id, user)
     cat = request.app.state.catalog
     if user.role == "admin":
-        return await cat.detail(row, user.id)
+        if reveal:
+            await web_authorizer(request)()
+            response.headers["Cache-Control"] = "no-store"
+        return await cat.detail(row, user.id, reveal=reveal)
     return cat.public(row, user_id=user.id, runtime_user_id=user.id)
 
 

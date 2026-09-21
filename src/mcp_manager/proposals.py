@@ -6,13 +6,13 @@ from copy import deepcopy
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 
-from .catalog import masked, restore, web_authorizer
-from .database import McpProposal, now
+from .catalog import masked, restore, validate_slug, web_authorizer
+from .database import McpProposal, McpServer, now
 from .identity import admin_user
 from .runtime import GatewayError, ServerSpec
 from .transports import validate_service_config
@@ -20,6 +20,15 @@ from .transports import validate_service_config
 router = APIRouter(prefix="/api/v1/mcp-proposals")
 ADMIN = Depends(admin_user)
 APPROVAL_FIELDS = {"mode", "isolation", "config_isolation"}
+OAUTH_TEST_MESSAGE = "OAuth 类型需要在审批通过并授权后验证"
+
+
+def validate_proposal_oauth(auth):
+    if auth.get("type") != "oauth":
+        return
+    for field in ("authorization_url", "token_url", "client_id", "client_secret"):
+        if not isinstance(auth.get(field), str) or not auth[field].strip():
+            raise HTTPException(422, "OAuth " + field + " is required")
 
 
 class ProposedMcp(BaseModel):
@@ -133,10 +142,14 @@ async def list_proposals(app, user, *, q="", status="", page=1, page_size=20):
         "page_size": page_size,
         "total_pages": math.ceil(total / page_size) if total else 0,
         "items": [
-            {"id": row.id, "name": name_of(row), "status": row.status,
-             "purpose": row.purpose or "", "source": row.source or "",
-             "created_at": row.created_at.isoformat() if row.created_at else "",
-             "updated_at": row.updated_at.isoformat() if row.updated_at else ""}
+            {
+                "id": row.id, "name": name_of(row), "status": row.status,
+                "purpose": row.purpose or "", "source": row.source or "",
+                "created_at": row.created_at.isoformat() if row.created_at else "",
+                "updated_at": row.updated_at.isoformat() if row.updated_at else "",
+                **({"rejection_reason": row.rejection_reason or ""}
+                   if row.status == "rejected" else {}),
+            }
             for row in page_rows
         ],
     }
@@ -171,7 +184,7 @@ def resource_index(rows, cached, *, mcp="", keyword=""):
     return result
 
 
-def proposal_public(row, catalog, *, detail=False):
+def proposal_public(row, catalog, *, detail=False, reveal=False):
     payload = catalog.unseal(row.payload)
     result = {
         "id": row.id,
@@ -183,6 +196,7 @@ def proposal_public(row, catalog, *, detail=False):
         "requested_permissions": row.requested_permissions,
         "name": payload["name"],
         "transport": payload["transport"],
+        "auth_type": payload.get("config", {}).get("auth", {}).get("type", "none"),
         "status": row.status,
         "mode": row.mode,
         "isolation": row.isolation,
@@ -197,7 +211,7 @@ def proposal_public(row, catalog, *, detail=False):
         "updated_at": row.updated_at,
     }
     if detail:
-        result["payload"] = masked(payload)
+        result["payload"] = payload if reveal else masked(payload)
     return result
 
 
@@ -260,19 +274,37 @@ async def listing(request: Request, q: str = "", status: str = "", page: int = 1
 
 
 @router.get("/{proposal_id}")
-async def detail(proposal_id: str, request: Request, user=ADMIN):
+async def detail(proposal_id: str, request: Request, response: Response,
+                 reveal: bool = False, user=ADMIN):
     async with request.app.state.db.session() as session:
         row = await session.get(McpProposal, proposal_id)
     if not row:
         raise HTTPException(404, "Proposal not found")
-    return proposal_public(row, request.app.state.catalog, detail=True)
+    if reveal:
+        await web_authorizer(request)()
+        response.headers["Cache-Control"] = "no-store"
+    return proposal_public(
+        row, request.app.state.catalog, detail=True, reveal=reveal
+    )
 
 
-async def _configure(row, values, catalog):
+async def _configure(row, values, catalog, session=None):
     payload = catalog.unseal(row.payload)
     for key in ("name", "slug", "description", "tags", "transport"):
         if key in values:
             payload[key] = values[key]
+    slug = payload.get("slug")
+    if slug:
+        try:
+            validate_slug(slug)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if session is not None:
+            duplicate = await session.scalar(
+                select(McpServer.id).where(McpServer.slug == slug)
+            )
+            if duplicate:
+                raise HTTPException(409, "MCP slug already exists")
     if "config" in values:
         payload["config"] = restore(values["config"], payload["config"])
     if APPROVAL_FIELDS & values.keys():
@@ -280,7 +312,7 @@ async def _configure(row, values, catalog):
             row.mode = values["mode"]
         if values.get("isolation") is not None:
             row.isolation = values["isolation"]
-        if values.get("config_isolation") is not None:
+        if "config_isolation" in values:
             row.config_isolation = values["config_isolation"]
     mode = row.mode
     isolation = row.isolation
@@ -293,8 +325,12 @@ async def _configure(row, values, catalog):
     if payload["transport"] != "stdio" and isolation == "session":
         raise HTTPException(422, "Session isolation is stdio-only")
     auth = payload["config"].get("auth", {})
-    if auth.get("type") == "oauth" and row.config_isolation:
-        auth["config_isolation"] = row.config_isolation
+    if auth.get("type") == "oauth":
+        validate_proposal_oauth(auth)
+        if row.config_isolation:
+            auth["config_isolation"] = row.config_isolation
+        else:
+            auth.pop("config_isolation", None)
     validate_service_config(payload["transport"], isolation or "service", payload["config"])
     row.payload = catalog.seal(payload)
     row.status = "pending" if mode and isolation else "incomplete"
@@ -310,7 +346,7 @@ async def configure(proposal_id: str, data: dict, request: Request, user=ADMIN):
             raise HTTPException(404, "Proposal not found")
         if row.status in {"approved", "rejected"}:
             raise HTTPException(409, "Finalized proposal cannot be edited")
-        await _configure(row, data, request.app.state.catalog)
+        await _configure(row, data, request.app.state.catalog, session)
         await session.flush()
         return proposal_public(row, request.app.state.catalog, detail=True)
 
@@ -337,6 +373,8 @@ async def run_proposal_test(request, proposal_id, user):
         raise HTTPException(404, "Proposal not found")
     payload = catalog.unseal(row.payload)
     isolation = row.isolation or "service"
+    if payload["config"].get("auth", {}).get("type") == "oauth":
+        raise HTTPException(409, OAUTH_TEST_MESSAGE)
     await _persist_test_result(request, proposal_id, "pending")
     runtime = request.app.state.runtime
     lease = None
@@ -440,8 +478,12 @@ async def approve(proposal_id: str, data: dict, request: Request, user=ADMIN):
         isolation = data.get("isolation") or row.isolation or "service"
         config_isolation = data.get("config_isolation") or row.config_isolation
     config = deepcopy(payload["config"])
-    if config.get("auth", {}).get("type") == "oauth" and config_isolation:
-        config["auth"]["config_isolation"] = config_isolation
+    if config.get("auth", {}).get("type") == "oauth":
+        validate_proposal_oauth(config["auth"])
+        if config_isolation:
+            config["auth"]["config_isolation"] = config_isolation
+        else:
+            config["auth"].pop("config_isolation", None)
     canonical = json.dumps(
         {"transport": payload["transport"], "config": config, "isolation": isolation},
         sort_keys=True, ensure_ascii=False, separators=(",", ":"),

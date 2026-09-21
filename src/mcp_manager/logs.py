@@ -13,14 +13,19 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
-def redact(value):
+def redact(value, parent=""):
     if isinstance(value, dict):
         secret = {"authorization", "password", "current_password", "secret", "secret_key",
                   "token", "access_token", "refresh_token", "client_secret", "cookie",
-                  "database_url", "api_key"}
-        return {k: "[REDACTED]" if k.lower() in secret else redact(v) for k, v in value.items()}
+                  "database_url", "api_key", "value"}
+        return {
+            key: "[REDACTED]"
+            if (key.lower() in secret or parent in {"env", "headers", "env_headers"}) and item
+            else redact(item, key.lower())
+            for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [redact(v) for v in value]
+        return [redact(item, parent) for item in value]
     return value
 
 

@@ -63,6 +63,17 @@ def restore(value, previous):
     return value
 
 
+def slug_base(name):
+    """Build the stable, human-readable base used for generated service slugs."""
+    value = re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-")
+    return (value or "mcp")[:64].rstrip("-") or "mcp"
+
+
+def validate_slug(slug):
+    if not isinstance(slug, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", slug) or "__" in slug:
+        raise ValueError("Slug must contain 1–64 ASCII letters, digits, hyphens or single underscores")
+
+
 def diagnostic_cause(exc):
     """Return the most specific downstream cause from wrapped failures."""
     current = exc
@@ -220,13 +231,13 @@ class Catalog:
             result["config"] = masked(self.unseal(row.config))
         return result
 
-    async def detail(self, row, user_id=None):
-        """Return a masked editor model resolved only for the current owner."""
+    async def detail(self, row, user_id=None, *, reveal=False):
+        """Return an editor model resolved only for the current owner."""
         result = self.public(row, user_id=user_id)
         config = await self.credentials.materialize(
             row, user_id, require=False
         )
-        result["config"] = masked(config)
+        result["config"] = config if reveal else masked(config)
         return result
 
     def cache_key(self, row, user_id=None):
@@ -605,25 +616,35 @@ class Catalog:
         name = values.get("name", "").strip()
         if not name or len(name) > 128:
             raise ValueError("Name must contain 1–128 characters")
-        generated = (re.sub(r"[^a-zA-Z0-9-]+", "_", name).strip("_") or "mcp")[:57]
-        slug = values.get("slug") or generated + "_" + uuid4().hex[:6]
-        if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", slug) or "__" in slug:
-            raise ValueError("Slug must contain 1–64 ASCII letters, digits, hyphens or single underscores")
-        row = McpServer(
-            id=str(uuid4()),
-            name=name,
-            slug=slug,
-            description=values.get("description", ""),
-            tags=values.get("tags", []),
-            transport=transport,
-            mode=mode,
-            isolation=isolation,
-            config=self.seal({}),
-        )
+        requested_slug = values.get("slug")
+        if requested_slug:
+            validate_slug(requested_slug)
         try:
             async with self.db.locked() as s:
                 if authorize:
                     await authorize(s)
+                if requested_slug:
+                    slug = requested_slug
+                else:
+                    base = slug_base(name)
+                    existing = set((await s.scalars(select(McpServer.slug))).all())
+                    slug = base
+                    suffix = 2
+                    while slug in existing:
+                        tail = "-" + str(suffix)
+                        slug = base[:64 - len(tail)].rstrip("-") + tail
+                        suffix += 1
+                row = McpServer(
+                    id=str(uuid4()),
+                    name=name,
+                    slug=slug,
+                    description=values.get("description", ""),
+                    tags=values.get("tags", []),
+                    transport=transport,
+                    mode=mode,
+                    isolation=isolation,
+                    config=self.seal({}),
+                )
                 s.add(row)
                 await s.flush()
                 stored = await self.credentials.persist_config(

@@ -1,5 +1,5 @@
 import{$,el,icon,pretty,api,button,toast,run,field,selectField,check,jsonField,dialog,formDialog,detail,download,badge,date,route,navigate,title,loading,empty,allPages,jobDialog,tablePage,cacheInfo,pagedList,tabPanels,enableTableDragging}from './core.js';
-import{mcpEditor,mcpTools,mcpImport,oauthDialog,credentialDialog,credentialStateLabel}from './mcps.js';
+import{mcpEditor,proposalEditor,mcpTools,mcpImport,oauthDialog,credentialDialog,credentialStateLabel}from './mcps.js';
 import{embeddingSettings}from './search-settings.js';
 let me,bootstrap,abort,refreshTimer;
 const nav=[['dashboard','仪表盘','grid'],['mcps','MCP 服务','server',true],['proposals','MCP 审批','logs',true],['tokens','访问令牌','key'],['logs','调用日志','logs'],['users','用户管理','users',true],['profile','个人资料','user'],['settings','系统设置','settings',true]];
@@ -142,16 +142,6 @@ async function userEditor(row){const username=field('用户名',row?.username||'
 async function mcps(main,signal){main.append(title('MCP 服务','集中配置服务，按需启动，共享工具能力。',[button('导入配置',()=>mcpImport(refresh)),button('新增服务',()=>mcpEditor(null,refresh),'primary')]));await tablePage(main,{path:'/mcps',signal,columns:[['服务名称',x=>el('div',{},el('strong',{},x.name),el('span',{class:'subtext'},x.description||x.slug),x.status==='failed'?el('span',{class:'subtext danger'},'连续启动失败 '+x.startup_failure_count+' 次 · '+(x.last_startup_error||'原因未知')):null)],['传输',x=>badge(x.transport)],['运行策略',x=>badge(x.mode)],['运行状态',x=>badge(x.status||'stopped')],['工具',x=>x.tool_count??0],['缓存状态 / 时间',x=>cacheInfo(x)]],filters:[['transport','传输',[['stdio','stdio'],['streamable-http','Streamable HTTP'],['sse','SSE'],['rest','REST']]],['mode','策略',[['lazy','按需'],['eager','常驻'],['disabled','禁用']]],['status','状态',[['running','运行中'],['ready','就绪'],['stopped','已停止'],['failed','启动失败']]]],rowActions:r=>[button('工具 / 测试',()=>mcpTools(r,admin())),button('编辑',()=>mcpEditor(r,refresh)),button('更多',()=>mcpMore(r))],bulk:[...['start','stop','refresh','lazy','enable','disable','delete'].map((a,i)=>[['启动','停止','刷新缓存','设为按需','设为常驻','禁用','删除'][i],ids=>ask('对 '+ids.length+' 个服务执行此操作？',async()=>{for(let offset=0;offset<ids.length;offset+=500){toast('提交批次 '+(Math.floor(offset/500)+1)+' / '+Math.ceil(ids.length/500));const result=await jobDialog(await api('/mcps/batch',{method:'POST',body:{action:a,ids:ids.slice(offset,offset+500)}}),{autoCloseOnSuccess:a==='delete',title:a==='delete'?'正在删除服务':'后台任务'});if(!result||!['completed','complete','done','success'].includes(result.status)){toast('操作未全部完成，请查看任务详情','fail');refresh();return}}if(a==='delete')toast('删除完成','success');refresh()})]),['导出',async ids=>download('mcp-services.json',await api('/mcps/export',{method:'POST',body:{ids,include_secrets:false}}))]]})}
 function mcpMore(r){const d=dialog(r.name+' · 服务操作',el('div',{class:'stack'},...['start','stop','refresh','copy'].map((a,i)=>button(['启动服务','停止服务','刷新工具缓存','复制服务'][i],async()=>{try{const data=await api('/mcps/'+r.id+'/'+a,{method:'POST'});detail('操作结果',data)}finally{refresh()}})),r.auth_type==='oauth'?button('OAuth 授权',()=>oauthDialog(r,admin(),refresh)):null,button('删除服务',()=>ask('删除服务“'+r.name+'”？',async()=>{await api('/mcps/'+r.id,{method:'DELETE'});d.close();refresh()}),'danger')))}
 
-async function proposalEditor(row){
- const full=await api('/mcp-proposals/'+row.id),payload=jsonField('提议配置',full.payload,'可修改 Agent 填错的名称、协议或连接配置；已脱敏字段保持不变。');
- const mode=selectField('启动策略',full.mode||'lazy',[['lazy','按需'],['eager','常驻'],['disabled','禁用']]);
- const isolation=selectField('实例隔离',full.isolation||'service',[['service','服务共享'],['user','用户隔离'],['session','会话隔离（仅 stdio）']]);
- const configIsolation=selectField('OAuth 配置隔离',full.config_isolation||'shared',[['shared','共享配置'],['user','独享配置']]);
- formDialog('配置 MCP 提议',[payload.node,el('div',{class:'form-grid'},mode.node,isolation.node,configIsolation.node)],async()=>{
-  await api('/mcp-proposals/'+row.id,{method:'PATCH',body:{...payload.value(),mode:mode.input.value,isolation:isolation.input.value,config_isolation:configIsolation.input.value}});
-  toast('审批配置已保存');refresh()
- })
-}
 async function rejectProposal(row){const reason=field('拒绝原因','','textarea');reason.input.required=true;formDialog('拒绝 MCP 提议',[reason.node],async()=>{await api('/mcp-proposals/'+row.id+'/reject',{method:'POST',body:{reason:reason.input.value}});refresh()},{saveLabel:'确认拒绝'})}
 function proposalTestResult(row){
  const result=row.test_result||{},tested=row.tested_at?el('span',{class:'subtext'},'最近测试：'+date(row.tested_at)):null;
@@ -163,6 +153,7 @@ function proposalTestResult(row){
 function proposalTestButton(row){
  let control;
  control=button('工具 / 测试',async()=>{
+  if(row.auth_type==='oauth'){toast('OAuth 类型需要在审批通过并授权后验证','warning');return}
   control.disabled=true;toast('正在测试 MCP 连接…','info');
   try{const result=await api('/mcp-proposals/'+row.id+'/test',{method:'POST'});toast('测试成功','success');detail('测试结果',result)}
   catch(e){toast('测试失败：'+e.message,'fail')}
@@ -182,14 +173,14 @@ async function proposals(main,signal){
   rowActions:r=>[
    button('详情',async()=>detail('提议详情',await api('/mcp-proposals/'+r.id))),
    ...(!['approved','rejected'].includes(r.status)?[
-    button('配置',()=>proposalEditor(r)),
+    button('配置',()=>proposalEditor(r,refresh)),
     proposalTestButton(r),
     button('通过',()=>ask('确认通过并添加到 MCP 服务列表？'+(r.mode&&r.isolation?'':'（未配置启动策略/实例隔离，将使用默认值：按需/服务共享。也可稍后在 MCP 服务列表内配置）'),async()=>{await api('/mcp-proposals/'+r.id+'/approve',{method:'POST',body:{}});refresh()}),'primary'),
     button('拒绝',()=>rejectProposal(r),'danger')
    ]:[]),
    button('删除',()=>ask('从审批列表删除“'+r.name+'”？',async()=>{await api('/mcp-proposals/'+r.id,{method:'DELETE'});refresh()}),'danger')],
   bulk:[
-   ['批量配置',ids=>{const mode=selectField('启动策略','lazy',[['lazy','按需'],['eager','常驻'],['disabled','禁用']]),isolation=selectField('实例隔离','service',[['service','服务共享'],['user','用户隔离'],['session','会话隔离']]),ci=selectField('OAuth 配置隔离','shared',[['shared','共享配置'],['user','独享配置']]);formDialog('批量配置',[mode.node,isolation.node,ci.node],async()=>{detail('批量结果',await api('/mcp-proposals/batch',{method:'POST',body:{action:'configure',ids,configuration:{mode:mode.input.value,isolation:isolation.input.value,config_isolation:ci.input.value}}}));refresh()})}],
+   ['批量配置',ids=>{const mode=selectField('启动策略','lazy',[['lazy','按需'],['eager','常驻'],['disabled','禁用']]),isolation=selectField('实例隔离','service',[['service','服务共享'],['user','用户隔离'],['session','会话隔离']]),ci=selectField('OAuth 配置隔离','',[['','未设置'],['shared','共享配置'],['user','独享配置']]);formDialog('批量配置',[mode.node,isolation.node,ci.node],async()=>{detail('批量结果',await api('/mcp-proposals/batch',{method:'POST',body:{action:'configure',ids,configuration:{mode:mode.input.value,isolation:isolation.input.value,config_isolation:ci.input.value||null}}}));refresh()})}],
    ['批量测试',async ids=>{toast('已提交批量测试','info');const job=await api('/mcp-proposals/batch-test',{method:'POST',body:{ids}});await jobDialog(job,{title:'MCP 批量测试',stopLabel:'停止测试',completeLabel:'关闭'});refresh()}],
    ['批量通过',ids=>ask('通过 '+ids.length+' 条提议并添加服务？（未配置启动策略/实例隔离的将使用默认值：按需/服务共享。也可稍后在 MCP 服务列表内配置）',async()=>{detail('批量结果',await api('/mcp-proposals/batch',{method:'POST',body:{action:'approve',ids}}));refresh()})],
    ['批量拒绝',ids=>{const reason=field('统一拒绝原因','','textarea');reason.input.required=true;formDialog('批量拒绝',[reason.node],async()=>{detail('批量结果',await api('/mcp-proposals/batch',{method:'POST',body:{action:'reject',ids,reason:reason.input.value}}));refresh()})}],

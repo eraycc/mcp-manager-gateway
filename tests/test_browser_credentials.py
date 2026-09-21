@@ -60,14 +60,14 @@ async def test_editor_limits_session_isolation_to_stdio(running_gateway):  # noq
             "网络传输不支持会话隔离"
         )
         await page.get_by_label("认证方式", exact=True).select_option("oauth")
-        config_isolation = page.get_by_label("配置隔离", exact=True)
+        config_isolation = page.get_by_label("OAuth 配置隔离", exact=True)
         assert await config_isolation.locator("option").all_text_contents() == [
             "共享配置",
             "独享配置",
         ]
         await expect(config_isolation).to_be_enabled()
         await isolation.select_option("service")
-        await expect(page.get_by_label("配置隔离", exact=True)).to_be_disabled()
+        await expect(page.get_by_label("OAuth 配置隔离", exact=True)).to_be_disabled()
         await isolation.select_option("user")
         await transport.select_option("stdio")
         assert await isolation.locator("option").all_text_contents() == [
