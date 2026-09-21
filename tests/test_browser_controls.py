@@ -47,7 +47,7 @@ async def test_frontend_controls(running_gateway):  # noqa: F811
         await page.goto(url + "/#/tokens")
         await page.get_by_role("button", name="创建令牌", exact=True).click()
         await expect(page.get_by_label("启用资源工具", exact=True)).to_be_visible()
-        await expect(page.get_by_label("允许 Agent 提议批量配置 MCP", exact=True)).to_be_visible()
+        await expect(page.get_by_label("允许 Agent 提交/查询 MCP 提案", exact=True)).to_be_visible()
         await expect(page.get_by_text("gateway_list_resources", exact=False)).to_be_visible()
         await expect(page.get_by_text("gateway_mcp_proposals", exact=False)).to_be_visible()
         await page.get_by_label("令牌名称", exact=True).fill("Selected snapshot")
