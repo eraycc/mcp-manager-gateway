@@ -61,9 +61,14 @@ RESOURCE_TOOLS = [
 PROPOSAL_TOOL = {
     "name": "gateway_propose_mcp",
     "description": (
-        "Submit one MCP configuration or a proposals array for administrator approval. "
-        "Convert configurations to the documented standard JSON first. Valid proposals return approval IDs; "
-        "mode, instance isolation and OAuth config isolation are set only by an approver."
+        "Submit one MCP configuration or a proposals array for administrator approval, "
+        "or list approval status. "
+        "Submit: convert configurations to the documented standard JSON first; valid proposals "
+        "return approval IDs; mode, instance isolation and OAuth config isolation are set only "
+        "by an approver. "
+        "List: pass {\"action\": \"list\"} with optional q (keyword), status "
+        "('', 'pending', 'incomplete', 'approved', 'rejected'), page and page_size (<=200) to "
+        "query proposal approval status with per-status counts."
     ),
     "inputSchema": {
         "type": "object",
