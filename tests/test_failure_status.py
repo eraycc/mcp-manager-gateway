@@ -166,7 +166,8 @@ async def test_status_filter_and_failed_agent_summary(tmp_path):
         assert listing["items"][0]["mode"] == "lazy"
 
         user = SimpleNamespace(id=actor["id"], username="admin")
-        token = SimpleNamespace(id="token", discovery_mode="discovery")
+        token = SimpleNamespace(id="token", discovery_mode="discovery",
+                                enable_resource_tools=False, enable_mcp_proposal=False)
 
         async def principal(request):
             return user, token, [failed.id, disabled.id]

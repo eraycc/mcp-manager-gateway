@@ -110,6 +110,8 @@ async def test_full_matrix_with_two_downstream_transports(running_gateway, trans
                 async with gateway_client("http", url, native_token) as reference:
                     original = await reference.list_tools()
                     for item in original.tools:
+                        if item.name.startswith("gateway_"):
+                            continue
                         assert catalog[item.name]["inputSchema"] == item.model_dump(by_alias=True)["inputSchema"]
             assert set(catalog) == {"echo__echo", "echo__structured", "remote__echo"}
             assert not any(x["phase"] == "ready" for x in app.state.runtime.status())
