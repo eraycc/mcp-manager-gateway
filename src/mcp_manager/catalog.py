@@ -18,15 +18,18 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from .credentials import catalog_owner, credential_owner
-from .database import ApiToken, McpServer, SystemSetting, User, now
+from .database import ApiToken, McpServer, SystemSetting, User, invalidate_setting_cache, now
 from .identity import public as public_model
 from .identity import revalidate_user
 from .jsonl_store import JsonlStore
 from .runtime import GatewayError, ServerSpec
 from .transports import validate_service_config
 
-SECRET_KEYS = {"password", "token", "access_token", "refresh_token", "client_secret",
-               "authorization", "cookie", "api_key", "value"}
+SECRET_KEYS = {
+    "password", "current_password", "secret", "secret_key", "database_url",
+    "token", "access_token", "refresh_token", "client_secret",
+    "authorization", "cookie", "api_key", "value",
+}
 CAPABILITY_KEYS = ("tools", "resources", "prompts", "templates")
 FAILURE_DEFAULTS = {
     "runtime_status": "stopped",
@@ -44,7 +47,7 @@ FAILURE_DEFAULTS = {
 
 def masked(value, parent=""):
     if isinstance(value, dict):
-        return {k: ("[REDACTED]" if (k.lower() in SECRET_KEYS or parent in {"env", "headers"})
+        return {k: ("[REDACTED]" if (k.lower() in SECRET_KEYS or parent in {"env", "headers", "env_headers"})
                     and v else masked(v, k.lower())) for k, v in value.items()}
     if isinstance(value, list):
         return [masked(v, parent) for v in value]
@@ -499,7 +502,7 @@ class Catalog:
         if current.revision != row.revision or current.mode == "disabled":
             raise GatewayError("revision_changed", "MCP configuration changed during discovery")
         if spec is not None:
-            self.runtime._available(spec)
+            self.runtime.mark_available(spec)
         result = result | {
             "cache_at": now().isoformat(),
             "cache_attempt_at": now().isoformat(),
@@ -730,6 +733,9 @@ class Catalog:
                     anonymous = await s.get(SystemSetting, "anonymous_mcp_ids")
                     if anonymous:
                         anonymous.value = [item for item in anonymous.value if item != server_id]
+                invalidate_setting_cache(
+                    self.db, ["tests:" + server_id, "anonymous_mcp_ids"]
+                )
                 self.cache_store.delete_prefix(server_id + "-")
                 for key in list(self._cache_failures):
                     if key.startswith(server_id + "-"):

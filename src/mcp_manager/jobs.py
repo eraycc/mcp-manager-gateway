@@ -90,7 +90,7 @@ class Jobs:
             except asyncio.CancelledError:
                 # gather does not cancel siblings when just one child is cancelled.
                 for child in children:
-                    if not child.done():
+                    if not child.done() and not child.cancelling():
                         child.cancel()
                 await asyncio.gather(*children, return_exceptions=True)
                 finish_cancelled()

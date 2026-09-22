@@ -1,4 +1,6 @@
 """Async database models and Alembic initialization."""
+import copy
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -159,10 +161,36 @@ class Database:
                 raise
 
 
+SETTING_CACHE_TTL = 60.0
+
+
+def invalidate_setting_cache(db: Database, keys=None) -> None:
+    cache = getattr(db, "_setting_cache", None)
+    if not cache:
+        return
+    if keys is None:
+        cache.clear()
+        return
+    for key in keys:
+        cache.pop(key, None)
+
+
 async def get_setting(db: Database, key: str, default: Any = None) -> Any:
+    cache = getattr(db, "_setting_cache", None)
+    if cache is None:
+        cache = db._setting_cache = {}
+    cached = cache.get(key)
+    current = time.monotonic()
+    if cached and cached[0] > current:
+        return copy.deepcopy(cached[1])
     async with db.session() as session:
         item = await session.get(SystemSetting, key)
-        return item.value if item else default
+        if not item:
+            cache.pop(key, None)
+            return default
+        value = copy.deepcopy(item.value)
+        cache[key] = (current + SETTING_CACHE_TTL, value)
+        return copy.deepcopy(value)
 
 
 async def set_setting(db: Database, key: str, value: Any) -> None:
@@ -172,3 +200,4 @@ async def set_setting(db: Database, key: str, value: Any) -> None:
             item.value = value
         else:
             session.add(SystemSetting(key=key, value=value))
+    invalidate_setting_cache(db, [key])

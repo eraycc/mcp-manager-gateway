@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
-from mcp_manager.database import McpServer, SystemSetting, User
+from mcp_manager.database import McpServer, SystemSetting, User, get_setting
 from mcp_manager.identity import admin_user, current_user
 
 
@@ -37,6 +37,18 @@ async def web(tmp_path):
     finally:
         finished.set()
         await asyncio.wait_for(owner, 10)
+
+
+async def test_test_case_update_invalidates_setting_cache(web):
+    app, client, _actor, row = web
+    path = f"/api/v1/mcps/{row.id}/test-cases"
+    first = [{"tool": "one"}]
+    second = [{"tool": "two"}]
+
+    assert (await client.put(path, json={"cases": first})).status_code == 200
+    assert await get_setting(app.state.db, "tests:" + row.id, []) == first
+    assert (await client.put(path, json={"cases": second})).status_code == 200
+    assert await get_setting(app.state.db, "tests:" + row.id, []) == second
 
 
 @pytest.mark.parametrize("operation", [

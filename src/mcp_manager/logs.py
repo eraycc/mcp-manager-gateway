@@ -12,15 +12,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .catalog import SECRET_KEYS
+
 
 def redact(value, parent=""):
     if isinstance(value, dict):
-        secret = {"authorization", "password", "current_password", "secret", "secret_key",
-                  "token", "access_token", "refresh_token", "client_secret", "cookie",
-                  "database_url", "api_key", "value"}
         return {
             key: "[REDACTED]"
-            if (key.lower() in secret or parent in {"env", "headers", "env_headers"}) and item
+            if (key.lower() in SECRET_KEYS or parent in {"env", "headers", "env_headers"}) and item
             else redact(item, key.lower())
             for key, item in value.items()
         }
@@ -60,6 +59,8 @@ class LogStore:
             tool_name TEXT, status TEXT, source TEXT, duration_ms REAL)""")
         self.conn.execute("CREATE INDEX IF NOT EXISTS calls_user_time ON calls(user_id,timestamp)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS calls_token ON calls(token_id)")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS index_offsets (
+            path TEXT PRIMARY KEY, offset INTEGER NOT NULL)""")
         self.conn.commit()
         self._rebuild()
 
@@ -99,6 +100,7 @@ class LogStore:
                 f.flush()
                 os.fsync(f.fileno())
             self._index(event, path, offset, len(raw))
+            self._set_offset(path.name, offset + len(raw))
             self.conn.commit()
         return event["id"]
 
@@ -112,22 +114,58 @@ class LogStore:
                               self.normalize_time(event["timestamp"], default_timezone=timezone.utc)
                               if f == "timestamp" else event.get(f) for f in fields])
 
-    def _rebuild(self):
+    def _set_offset(self, path, offset):
+        self.conn.execute(
+            "INSERT INTO index_offsets(path,offset) VALUES(?,?) "
+            "ON CONFLICT(path) DO UPDATE SET offset=excluded.offset",
+            [path, offset],
+        )
+
+    def _rebuild(self, *, full=False):
         with self.lock:
-            self.conn.execute("DELETE FROM calls")
-            for path in sorted(self.root.glob("????-??-??.jsonl")):
-                with path.open("rb") as f:
+            if full:
+                self.conn.execute("DELETE FROM calls")
+                self.conn.execute("DELETE FROM index_offsets")
+            paths = sorted(self.root.glob("????-??-??.jsonl"))
+            names = {path.name for path in paths}
+            indexed_names = {
+                row[0] for row in self.conn.execute("SELECT path FROM index_offsets")
+            }
+            removed = indexed_names - names
+            for name in removed:
+                self.conn.execute("DELETE FROM calls WHERE path=?", [name])
+                self.conn.execute("DELETE FROM index_offsets WHERE path=?", [name])
+            if self.deleted:
+                self.conn.execute(
+                    "DELETE FROM calls WHERE id IN (" + ",".join("?" for _ in self.deleted) + ")",
+                    list(self.deleted),
+                )
+            for path in paths:
+                saved = self.conn.execute(
+                    "SELECT offset FROM index_offsets WHERE path=?", [path.name]
+                ).fetchone()
+                start = saved["offset"] if saved else 0
+                size = path.stat().st_size
+                if not saved or start > size:
+                    self.conn.execute("DELETE FROM calls WHERE path=?", [path.name])
+                    start = 0
+                committed = start
+                with path.open("rb") as stream:
+                    stream.seek(start)
                     while True:
-                        offset = f.tell()
-                        raw = f.readline()
+                        offset = stream.tell()
+                        raw = stream.readline()
                         if not raw:
                             break
+                        if not raw.endswith(b"\n"):
+                            break
+                        committed = stream.tell()
                         try:
                             event = json.loads(raw)
                             self._index(event, path, offset, len(raw))
                         except (ValueError, KeyError, TypeError):
-                            # A torn tail does not make earlier complete events disappear.
                             continue
+                self._set_offset(path.name, committed)
             if self.active:
                 self.conn.execute("UPDATE calls SET status='outcome_unknown' WHERE status='running' AND id NOT IN (" +
                                   ",".join("?" for _ in self.active) + ")", list(self.active))
@@ -136,7 +174,7 @@ class LogStore:
             self.conn.commit()
 
     async def rebuild(self):
-        await asyncio.to_thread(self._rebuild)
+        await asyncio.to_thread(self._rebuild, full=True)
 
     @staticmethod
     def normalize_time(value, *, default_timezone):
@@ -245,7 +283,7 @@ class LogStore:
             try:
                 self._rewrite_deleted(selected)
             finally:
-                self._rebuild()
+                self._rebuild(full=True)
             return len(selected)
 
     def _rewrite_deleted(self, selected):

@@ -1,6 +1,7 @@
 """Dashboard, JSONL log operations, settings and background jobs."""
 import asyncio
 import json
+from collections import deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -10,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 
 from .catalog import web_authorizer
-from .database import ApiToken, SystemSetting
+from .database import ApiToken, SystemSetting, invalidate_setting_cache
 from .identity import admin_user, current_user, effective_mcp_ids
 
 router = APIRouter(prefix="/api/v1")
@@ -23,6 +24,35 @@ DEFAULTS = {"title": "MCP Manager", "registration_enabled": True, "jwt_days": 30
             "log_retention_days": 0, "cors_origins": ["*"], "allowed_hosts": ["*"]}
 FILTERS = {"q", "username", "user_id", "token_id", "mcp_id", "tool_name", "status", "source",
            "from_time", "to_time"}
+
+
+def format_sse_heartbeat():
+    return ": heartbeat\n\n"
+
+
+class DashboardEventBuffer:
+    """Small per-user replay window for native EventSource reconnections."""
+
+    def __init__(self, maxlen=32):
+        self.sequence = 0
+        self.events = deque(maxlen=maxlen)
+
+    def publish(self, payload):
+        self.sequence += 1
+        event = (
+            f"id: {self.sequence}\n"
+            "event: dashboard\n"
+            f"data: {json.dumps(payload, default=str)}\n\n"
+        )
+        self.events.append((self.sequence, event))
+        return event
+
+    def replay(self, last_event_id):
+        try:
+            cursor = int(last_event_id)
+        except (TypeError, ValueError):
+            cursor = 0
+        return [event for event_id, event in self.events if event_id > cursor]
 
 
 def log_filters(request, user, values=None):
@@ -178,6 +208,7 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
                 row.value = value
             else:
                 s.add(SystemSetting(key=key, value=value))
+    invalidate_setting_cache(request.app.state.db, data)
     result = await settings(request, user)
     request.app.state.cors_origins = result["cors_origins"]
     request.app.state.allowed_hosts = result["allowed_hosts"]
@@ -231,15 +262,38 @@ async def cancel_job(job_id: str, request: Request, user=USER):
 
 @router.get("/events")
 async def events(request: Request, user=USER):
+    state = request.app.state
+    buffers = getattr(state, "dashboard_events", None)
+    if buffers is None:
+        buffers = state.dashboard_events = {}
+    buffer = buffers.setdefault(user.id, DashboardEventBuffer())
+
     async def stream():
+        for event in buffer.replay(request.headers.get("last-event-id")):
+            yield event
+        loop = asyncio.get_running_loop()
+        dashboard_at = 0.0
+        heartbeat_at = loop.time()
         while not await request.is_disconnected():
-            # Revalidate cookie revocation between updates.
-            try:
-                actor = await current_user(request)
-            except HTTPException:
-                break
-            result = await dashboard(request, actor)
-            yield "event: dashboard\ndata: " + json.dumps(result, default=str) + "\n\n"
-            await asyncio.sleep(10)
-    return StreamingResponse(stream(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+            current = loop.time()
+            if current >= dashboard_at:
+                try:
+                    actor = await current_user(request)
+                except HTTPException:
+                    break
+                yield buffer.publish(await dashboard(request, actor))
+                dashboard_at = current + 10
+            if current - heartbeat_at >= 15:
+                yield format_sse_heartbeat()
+                heartbeat_at = current
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )

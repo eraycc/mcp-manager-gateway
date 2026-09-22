@@ -287,6 +287,16 @@ class Runtime:
     async def discover(self, spec, lease_id):
         return await self.perform(spec, lease_id, "discover", business=False)
 
+    def mark_available(self, spec: ServerSpec):
+        """Reject unavailable revisions through the public runtime boundary."""
+        self._available(spec)
+
+    async def stop_instance(self, instance: Instance, *, force=False, only_unreferenced=False):
+        """Stop one runtime instance without exposing lifecycle internals."""
+        await self._stop_instance(
+            instance, force=force, only_unreferenced=only_unreferenced
+        )
+
     async def _stop_instance(self, instance: Instance, *, force=False, only_unreferenced=False):
         lock = self._locks.setdefault(instance.key, asyncio.Lock())
         async with lock:

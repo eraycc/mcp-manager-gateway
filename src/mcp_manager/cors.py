@@ -71,7 +71,12 @@ def validate_hosts(hosts):
 def host_allowed(current, allowed):
     try:
         current_host, current_port = _host_parts(current)
-        configured = [_host_parts(value) for value in validate_hosts(allowed)]
+        configured = (
+            allowed
+            if isinstance(allowed, tuple)
+            and all(isinstance(item, tuple) and len(item) == 2 for item in allowed)
+            else tuple(_host_parts(value) for value in validate_hosts(allowed))
+        )
     except (TypeError, ValueError):
         return False
     if any(host in {"*", "0.0.0.0"} for host, _port in configured):
@@ -83,6 +88,16 @@ def host_allowed(current, allowed):
 class GatewayCORSMiddleware:
     def __init__(self, app, root_app):
         self.app, self.root_app = app, root_app
+        self._host_source = None
+        self._validated_hosts = None
+
+    def validated_hosts(self):
+        source = tuple(getattr(self.root_app.state, "allowed_hosts", ["*"]))
+        if source != self._host_source:
+            normalized = validate_hosts(list(source))
+            self._host_source = source
+            self._validated_hosts = tuple(_host_parts(value) for value in normalized)
+        return self._validated_hosts
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or not (
@@ -91,7 +106,11 @@ class GatewayCORSMiddleware:
         headers = Headers(scope=scope)
         current_host = headers.get("host", "")
         allowed_hosts = getattr(self.root_app.state, "allowed_hosts", ["*"])
-        if not host_allowed(current_host, allowed_hosts):
+        try:
+            configured_hosts = self.validated_hosts()
+        except (TypeError, ValueError):
+            configured_hosts = ()
+        if not host_allowed(current_host, configured_hosts):
             return await JSONResponse({
                 "detail": "Host is not allowed",
                 "host": current_host,

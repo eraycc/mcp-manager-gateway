@@ -4,7 +4,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from .catalog import SECRET_KEYS, restore, sanitize_diagnostic_error, web_authorizer
-from .database import McpServer, SystemSetting, get_setting
+from .database import McpServer, SystemSetting, get_setting, invalidate_setting_cache
 from .identity import admin_user, current_user, effective_mcp_ids
 from .imports import deduplicate, normalize_import, scan_sources
 from .runtime import GatewayError, ServerSpec
@@ -369,6 +369,7 @@ async def save_cases(server_id: str, data: dict, request: Request, user=ADMIN):
             row.value = cases
         else:
             s.add(SystemSetting(key=key, value=cases))
+    invalidate_setting_cache(request.app.state.db, [key])
     return {"cases": cases}
 
 
