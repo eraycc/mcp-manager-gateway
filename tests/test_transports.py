@@ -1,9 +1,11 @@
 import json
 import sys
 from pathlib import Path
+
 import httpx
 import pytest
-from mcp_manager.runtime import ServerSpec, Runtime
+
+from mcp_manager.runtime import Runtime, ServerSpec
 from mcp_manager.transports import RestConnection, connect
 
 
@@ -29,6 +31,37 @@ async def test_rest_http_error_is_tool_error():
         connection = RestConnection({"tools": [{"name": "x", "request": {"url": "https://example.test/x"}}]}, client)
         result = await connection.call("x", {})
         assert result["isError"] is True
+
+
+@pytest.mark.asyncio
+async def test_android_stdio_uses_posix_transport(monkeypatch):
+    from mcp_manager import posix_transport, transports
+
+    wrapped_source = object()
+    client_sources = []
+
+    def wrap_source(source):
+        return wrapped_source
+
+    class FakeClient:
+        def __init__(self, source, **kwargs):
+            client_sources.append(source)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(transports.sys, "platform", "android")
+    monkeypatch.setattr(posix_transport, "posix_stdio", wrap_source)
+    monkeypatch.setattr(transports, "Client", FakeClient)
+    spec = ServerSpec(id="android", transport="stdio", config={"command": "ignored"})
+
+    async with transports.connect(spec):
+        pass
+
+    assert client_sources == [wrapped_source]
 
 
 @pytest.mark.asyncio

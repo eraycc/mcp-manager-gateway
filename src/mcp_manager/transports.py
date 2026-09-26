@@ -370,7 +370,7 @@ async def connect(spec: ServerSpec):
         source = StdioServerParameters(command=config["command"], args=config.get("args", []),
                                        env=stdio_environment(config.get("env", {})), cwd=config.get("cwd"),
                                        encoding=config.get("encoding", "utf-8"))
-        if sys.platform == "linux":
+        if sys.platform != "win32":
             from .posix_transport import posix_stdio
             source = posix_stdio(source)
         client = Client(source, read_timeout_seconds=float(config.get("call_timeout", 60)), cache=None)
