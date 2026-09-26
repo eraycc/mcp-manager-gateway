@@ -6,9 +6,22 @@ import sys
 from contextlib import asynccontextmanager, suppress
 
 import anyio
-from mcp.client.stdio import get_default_environment
 from mcp.shared.message import SessionMessage
 from mcp_types import jsonrpc_message_adapter
+
+
+def _build_env(user_env):
+    env = dict(os.environ)
+    for key, value in (user_env or {}).items():
+        if "\0" in key or "=" in key:
+            raise ValueError(f"invalid env key: {key!r}")
+        if value is None:
+            env.pop(key, None)
+        elif isinstance(value, str):
+            env[key] = value
+        else:
+            env[key] = str(value)
+    return env
 
 
 def group_alive(pgid):
@@ -44,7 +57,7 @@ async def posix_stdio(parameters):
     process = await asyncio.create_subprocess_exec(
         parameters.command, *parameters.args, stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=sys.stderr, start_new_session=True,
-        cwd=parameters.cwd, env=get_default_environment() | (parameters.env or {}))
+        cwd=parameters.cwd, env=_build_env(parameters.env))
     to_client, incoming = anyio.create_memory_object_stream(0)
     outgoing, from_client = anyio.create_memory_object_stream(0)
 
