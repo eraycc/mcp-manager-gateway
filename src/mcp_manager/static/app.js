@@ -145,7 +145,10 @@ function mcpMore(r){const d=dialog(r.name+' · 服务操作',el('div',{class:'st
 async function rejectProposal(row){const reason=field('拒绝原因','','textarea');reason.input.required=true;formDialog('拒绝 MCP 提议',[reason.node],async()=>{await api('/mcp-proposals/'+row.id+'/reject',{method:'POST',body:{reason:reason.input.value}});refresh()},{saveLabel:'确认拒绝'})}
 function proposalTestResult(row){
  const result=row.test_result||{},tested=row.tested_at?el('span',{class:'subtext'},'最近测试：'+date(row.tested_at)):null;
- if(row.test_status==='success')return el('div',{},'成功 '+(result.tool_count??0)+' 工具',el('span',{class:'subtext'},'资源 '+(result.resource_count??0)+' · 提示词 '+(result.prompt_count??0)+' · 模板 '+(result.template_count??0)),tested);
+ if(row.test_status==='success'){
+  const errors=new Map((result.capability_errors||[]).map(x=>[x.capability,x.error])),part=(key,label,count)=>errors.has(key)?label+'不可用（'+errors.get(key)+'）':label+' '+(count??0)+(key==='tools'?' 个':'');
+  return el('div',{},errors.size?'部分可用':'成功',el('span',{class:'subtext'},[['tools','工具',result.tool_count],['resources','资源',result.resource_count],['prompts','提示词',result.prompt_count],['templates','模板',result.template_count]].map(x=>part(...x)).join(' · ')),tested)
+ }
  if(row.test_status==='failed')return el('div',{},el('span',{class:'danger'},'测试失败'),el('span',{class:'subtext danger'},row.test_error||'原因未知'),tested);
  if(row.test_status==='cancelled')return el('div',{},'已取消',tested);
  return el('div',{},'待测试（pending）',tested)

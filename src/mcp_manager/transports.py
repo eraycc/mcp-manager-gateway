@@ -326,14 +326,41 @@ class SdkConnection:
     async def discover(self):
         caps = wire(self.client.server_capabilities) or {}
         result = {"tools": [], "resources": [], "prompts": [], "templates": []}
+        probes = []
         if "tools" in caps:
-            result["tools"] = [tool for tool in await self._list("list_tools", "tools")
-                               if self.tool_allowed(tool["name"])]
+            probes.append(("tools", "list_tools", "tools"))
         if "resources" in caps:
-            result["resources"] = await self._list("list_resources", "resources")
-            result["templates"] = await self._list("list_resource_templates", "resourceTemplates")
+            probes.extend((
+                ("resources", "list_resources", "resources"),
+                ("templates", "list_resource_templates", "resourceTemplates"),
+            ))
         if "prompts" in caps:
-            result["prompts"] = await self._list("list_prompts", "prompts")
+            probes.append(("prompts", "list_prompts", "prompts"))
+        if not probes:
+            raise GatewayError("discovery_failed", "Downstream declared no discoverable capabilities")
+
+        errors = []
+        succeeded = 0
+        for capability, method, key in probes:
+            try:
+                items = await self._list(method, key)
+                if capability == "tools":
+                    items = [tool for tool in items if self.tool_allowed(tool["name"])]
+                result[capability] = items
+                succeeded += 1
+            except Exception as exc:  # noqa: BLE001 - isolate each declared capability probe
+                errors.append({
+                    "capability": capability,
+                    "error": (str(exc) or type(exc).__name__)[:500],
+                })
+        if not succeeded:
+            summary = "; ".join(
+                item["capability"] + ": " + item["error"] for item in errors
+            )
+            raise GatewayError(
+                "discovery_failed", "All declared MCP capabilities failed: " + summary
+            )
+        result["capability_errors"] = errors
         result["serverInfo"] = wire(self.client.server_info) if self.client.server_info else {}
         result["protocolVersion"] = self.client.protocol_version
         return result

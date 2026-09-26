@@ -41,6 +41,9 @@ async def test_proposal_test_feedback_and_batch_job_dialog(running_gateway, monk
         return {
             "tools": [{"name": "one"}, {"name": "two"}],
             "resources": [], "prompts": [], "templates": [],
+            "capability_errors": [
+                {"capability": "resources", "error": "Method not found"}
+            ],
         }
 
     monkeypatch.setattr(app.state.runtime, "discover", discover)
@@ -70,7 +73,8 @@ async def test_proposal_test_feedback_and_batch_job_dialog(running_gateway, monk
         await page.get_by_role("dialog", name="测试结果", exact=True).get_by_role(
             "button", name="关闭", exact=True
         ).click()
-        await expect(single).to_contain_text("成功 2 工具")
+        await expect(single).to_contain_text("部分可用")
+        await expect(single).to_contain_text("资源不可用（Method not found）")
 
         batch = page.locator(f'tr[data-row-id="{batch_id}"]')
         await batch.get_by_role("checkbox").check()

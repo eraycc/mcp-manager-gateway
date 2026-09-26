@@ -394,6 +394,7 @@ async def run_proposal_test(request, proposal_id, user):
             "resource_count": len(discovered.get("resources", [])),
             "prompt_count": len(discovered.get("prompts", [])),
             "template_count": len(discovered.get("templates", [])),
+            "capability_errors": discovered.get("capability_errors", []),
         }
         await _persist_test_result(request, proposal_id, "success", result=result)
         return {"ok": True, **result, "capabilities": discovered}

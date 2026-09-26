@@ -94,6 +94,7 @@ async def test_single_test_success_failure_and_retest_are_persisted(proposal_web
         "resource_count": 1,
         "prompt_count": 1,
         "template_count": 1,
+        "capability_errors": [],
     }
     assert success["test_error"] == ""
     assert success["tested_at"]
@@ -113,6 +114,33 @@ async def test_single_test_success_failure_and_retest_are_persisted(proposal_web
     assert detail["test_result"]["tool_count"] == 1
     assert detail["test_error"] == ""
     assert detail["tested_at"] >= failed_at
+
+
+@pytest.mark.asyncio
+async def test_partial_capability_success_is_persisted(proposal_web, monkeypatch):
+    app, client, submit = proposal_web
+    proposal_id = await submit("Partial", "partial")
+
+    async def discover(spec, lease_id):
+        return {
+            "tools": [{"name": "fetch"}],
+            "resources": [],
+            "prompts": [],
+            "templates": [],
+            "capability_errors": [
+                {"capability": "resources", "error": "Method not found"}
+            ],
+        }
+
+    monkeypatch.setattr(app.state.runtime, "discover", discover)
+    response = await client.post(f"/api/v1/mcp-proposals/{proposal_id}/test")
+
+    assert response.status_code == 200, response.text
+    detail = (await client.get(f"/api/v1/mcp-proposals/{proposal_id}")).json()
+    assert detail["test_status"] == "success"
+    assert detail["test_result"]["capability_errors"] == [
+        {"capability": "resources", "error": "Method not found"}
+    ]
 
 
 @pytest.mark.asyncio
