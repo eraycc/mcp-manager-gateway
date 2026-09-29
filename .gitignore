@@ -12,4 +12,3 @@ docs/
 .git/
 example/
 .code-review-graph/
-uv.lock
