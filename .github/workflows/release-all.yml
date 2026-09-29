@@ -2,6 +2,10 @@ name: Release All (PyPI + GitHub Release)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ master ]
+    paths:
+      - 'pyproject.toml'
 
 jobs:
   check-version:
@@ -25,10 +29,12 @@ jobs:
       - name: Compare with PyPI version
         id: compare
         shell: bash
+        env:
+          LOCAL_VERSION: ${{ steps.local.outputs.version }}
         run: |
           pip install packaging --quiet
           python << 'EOF'
-          import json, os, urllib.request
+          import json, os, urllib.request, urllib.error
           from packaging.version import Version
 
           pypi_url = "https://pypi.org/pypi/mcp-manager-gateway/json"
@@ -44,7 +50,7 @@ jobs:
           except Exception:
               pypi_version = "0.0.0"
 
-          local_version = os.environ.get("LOCAL_VERSION")
+          local_version = os.environ["LOCAL_VERSION"]
           should = Version(local_version) > Version(pypi_version)
 
           print(f"PyPI 最新版本: {pypi_version}")
@@ -55,8 +61,14 @@ jobs:
               f.write(f"pypi_version={pypi_version}\n")
               f.write(f"should_release={str(should).lower()}\n")
           EOF
-        env:
-          LOCAL_VERSION: ${{ steps.local.outputs.version }}
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "### Release Check" >> "$GITHUB_STEP_SUMMARY"
+          echo "- PyPI 最新: \`${{ steps.compare.outputs.pypi_version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 本地版本: \`${{ steps.local.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 是否发布: \`${{ steps.compare.outputs.should_release }}\`" >> "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: check-version
