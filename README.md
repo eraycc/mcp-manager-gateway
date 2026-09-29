@@ -6,6 +6,8 @@
 [![Python](https://img.shields.io/pypi/pyversions/mcp-manager-gateway)](https://pypi.org/project/mcp-manager-gateway/)
 [![License](https://img.shields.io/github/license/eraycc/mcp-manager-gateway)](LICENSE)
 
+📚 [完整公开文档与运维指南](wiki/README.md)
+
 MCP 很有用，但 MCP 越配越多以后，问题也会一起放大：
 
 - 每个 Agent 启动时都要连接大量 MCP，启动越来越慢；
@@ -91,7 +93,7 @@ mmg
 
 首次启动会自动创建用户目录、`.env`、SQLite 数据库和密钥：
 
-- Windows：`C:\Users\<用户名>\.mcp-manager`
+- Windows：`%USERPROFILE%\.mcp-manager`
 - Linux / macOS：`~/.mcp-manager`
 
 需要修改端口时：
@@ -188,7 +190,7 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 
 保留备份，不删除无关配置，不删除 MMG 自身。完成后，每个 Agent 只需保留一个网关入口。
 
-详细导入规则见 [导入工作流](docs/import-workflow.md)。
+详细导入规则见 [迁移已有 MCP](wiki/guides/migrate-mcps.md)。
 
 ## Agent 如何渐进式使用工具
 
@@ -205,7 +207,7 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 
 一个可靠的 Agent 不应猜测工具名或参数：先搜索 MCP，再搜索工具，最后使用返回的精确名称调用。搜索和目录分页不会唤醒 `lazy` 服务。
 
-[渐进式发现设计](docs/2026-09-14-progressive-discovery-design.md)解释了搜索、分页、完整 Schema 与精确路由的契约。
+[渐进式发现](wiki/concepts/progressive-discovery.md)解释了搜索、分页、完整 Schema 与精确路由的契约。
 
 ## 管理能力概览
 
@@ -250,10 +252,19 @@ MMG 当前按单节点、单网关运行时设计。不要用多个 worker 或�
 
 ## 升级与维护
 
+软件包升级由安装方式决定：
+
 ~~~console
+# uv tool 安装
 uv tool upgrade mcp-manager-gateway
-mmg upgrade
+
+# pip 虚拟环境安装
+pip install --upgrade mcp-manager-gateway
 ~~~
+
+源码和 Docker 用户应分别使用 Git + uv 或重新构建/拉取镜像。`mmg upgrade` 只执行数据库 Schema 迁移，不会更新软件包；服务启动通常会自动完成数据库初始化。
+
+完整升级矩阵见 [部署与升级](wiki/operations/deployment-and-upgrades.md)。
 
 常用维护命令：
 
@@ -278,11 +289,12 @@ uv build
 - 前端静态资源：`src/mcp_manager/static/`
 - 数据库迁移：`src/mcp_manager/migrations/`
 - 测试：`tests/`
-- 传输插件说明：[docs/plugins.md](docs/plugins.md)
-- 运行时设计：[docs/runtime-design.md](docs/runtime-design.md)
-- 验证记录：[docs/validation.md](docs/validation.md)
+- 传输插件说明：[传输插件](wiki/development/transport-plugins.md)
+- 运行时设计：[运行时与生命周期](wiki/concepts/runtime-and-lifecycle.md)
+- 开发与验证：[参与开发](wiki/development/contributing.md)
+- CLI 参考：[命令行参考](wiki/reference/cli.md)
 
-API 文档在运行中的 `/docs`。
+完整公开文档见 [Wiki 首页](wiki/README.md)。运行实例的 OpenAPI 页面位于 `http://<MMG_HOST>:<PORT>/docs`。
 
 ## 安全边界
 
@@ -296,4 +308,4 @@ MCP 配置可以启动本地进程、访问网络和读取数据，应当视为�
 
 ## License
 
-[Apache License 2.0](LICENSE)
+Copyright 2026 eraycc. Licensed under the [Apache License 2.0](LICENSE).
