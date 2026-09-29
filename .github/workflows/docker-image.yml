@@ -1,0 +1,117 @@
+name: 构建并推送 Docker 镜像 (GHCR + Docker Hub)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # GHCR 镜像名：ghcr.io/<owner>/mcp-manager-gateway
+  IMAGE_NAME_GHCR: ${{ github.repository_owner }}/mcp-manager-gateway
+  # Docker Hub 镜像名：<dockerhub_user>/mcp-manager-gateway
+  # 如果你希望直接用 mcp-manager-gateway（无 namespace），改成：IMAGE_NAME_DOCKERHUB: mcp-manager-gateway
+  IMAGE_NAME_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME }}/mcp-manager-gateway
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 读取 pyproject.toml 中的项目版本
+        id: project
+        shell: bash
+        run: |
+          set -e
+          # 从 [project] 段落中提取 version = "x.y.z"
+          VERSION=$(grep -E '^version\s*=' pyproject.toml | head -n1 | sed -E 's/.*"(.*)".*/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "未能从 pyproject.toml 读取版本号" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "检测到项目版本: $VERSION"
+
+      - name: 生成北京时间构建时间戳
+        id: timestamp
+        shell: bash
+        run: echo "build_ts=$(TZ='Asia/Shanghai' date +'%Y%m%d%H%M%S')" >> "$GITHUB_OUTPUT"
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录到 GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 登录到 Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ---------- 生成 GHCR 标签 ----------
+      - name: 提取 GHCR 元数据
+        id: meta_ghcr
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_GHCR }}
+          tags: |
+            # 始终写入 pyproject.toml 里的版本号，例如 1.0.9
+            type=raw,value=${{ steps.project.outputs.version }}
+            # 时间戳标签（北京时间），方便回溯每次构建
+            type=raw,value=${{ steps.timestamp.outputs.build_ts }}
+            # git tag 触发时（v1.2.3）产生 1.2.3、1.2
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # 默认分支始终更新 latest
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # ---------- 生成 Docker Hub 标签 ----------
+      - name: 提取 Docker Hub 元数据
+        id: meta_dockerhub
+        uses: docker/metadata-action@v5
+        with:
+          images: docker.io/${{ env.IMAGE_NAME_DOCKERHUB }}
+          tags: |
+            type=raw,value=${{ steps.project.outputs.version }}
+            type=raw,value=${{ steps.timestamp.outputs.build_ts }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # ---------- 单次构建，同时推送到两个仓库 ----------
+      - name: 构建并推送 Docker 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: production
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ steps.meta_ghcr.outputs.tags }}
+            ${{ steps.meta_dockerhub.outputs.tags }}
+          labels: |
+            ${{ steps.meta_ghcr.outputs.labels }}
+            org.opencontainers.image.version=${{ steps.project.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
