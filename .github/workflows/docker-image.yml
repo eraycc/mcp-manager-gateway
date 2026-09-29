@@ -10,14 +10,96 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # GHCR 镜像名：ghcr.io/<owner>/mcp-manager-gateway
   IMAGE_NAME_GHCR: ${{ github.repository_owner }}/mcp-manager-gateway
-  # Docker Hub 镜像名：<dockerhub_user>/mcp-manager-gateway
-  # 如果你希望直接用 mcp-manager-gateway（无 namespace），改成：IMAGE_NAME_DOCKERHUB: mcp-manager-gateway
   IMAGE_NAME_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME }}/mcp-manager-gateway
 
 jobs:
+  # ==========================================================
+  # Job 1: 检查是否值得构建
+  #   - push to master：仅当 pyproject.toml 版本 > PyPI 版本时通过
+  #   - push tag v*.*.*：始终通过（明确发布意图）
+  #   - PR：始终通过（只验证构建）
+  #   - workflow_dispatch：始终通过（手动强制）
+  # ==========================================================
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare.outputs.should_build }}
+      local_version: ${{ steps.local.outputs.version }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 读取 pyproject.toml 中的版本
+        id: local
+        shell: bash
+        run: |
+          set -e
+          VERSION=$(grep -E '^version\s*=' pyproject.toml | head -n1 | sed -E 's/.*"(.*)".*/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "未能从 pyproject.toml 读取版本号" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "本地版本: $VERSION"
+
+      - name: 与 PyPI 版本比对
+        id: compare
+        shell: bash
+        env:
+          LOCAL_VERSION: ${{ steps.local.outputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          pip install packaging --quiet
+
+          # 非 push 到 master 的场景，直接放行
+          if [ "$EVENT_NAME" != "push" ] || [ "$REF_TYPE" != "branch" ]; then
+            echo "事件类型: $EVENT_NAME / $REF_TYPE → 跳过版本比对，直接构建"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python << 'EOF'
+          import json, os, urllib.request, urllib.error
+          from packaging.version import Version
+
+          pypi_url = "https://pypi.org/pypi/mcp-manager-gateway/json"
+          try:
+              with urllib.request.urlopen(pypi_url, timeout=10) as resp:
+                  data = json.load(resp)
+                  pypi_version = data["info"]["version"]
+          except urllib.error.HTTPError as e:
+              pypi_version = "0.0.0" if e.code == 404 else (_ for _ in ()).throw(e)
+          except Exception:
+              pypi_version = "0.0.0"
+
+          local_version = os.environ["LOCAL_VERSION"]
+          should = Version(local_version) > Version(pypi_version)
+
+          print(f"PyPI 最新版本: {pypi_version}")
+          print(f"本地版本: {local_version}")
+          print(f"是否构建: {should}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"pypi_version={pypi_version}\n")
+              f.write(f"should_build={str(should).lower()}\n")
+          EOF
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "### Docker Build Check" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 本地版本: \`${{ steps.local.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 是否构建: \`${{ steps.compare.outputs.should_build }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================
+  # Job 2: 构建并推送
+  # ==========================================================
   build:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -27,20 +109,6 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
-
-      - name: 读取 pyproject.toml 中的项目版本
-        id: project
-        shell: bash
-        run: |
-          set -e
-          # 从 [project] 段落中提取 version = "x.y.z"
-          VERSION=$(grep -E '^version\s*=' pyproject.toml | head -n1 | sed -E 's/.*"(.*)".*/\1/')
-          if [ -z "$VERSION" ]; then
-            echo "未能从 pyproject.toml 读取版本号" >&2
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "检测到项目版本: $VERSION"
 
       - name: 生成北京时间构建时间戳
         id: timestamp
@@ -66,37 +134,33 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ---------- 生成 GHCR 标签 ----------
+      # ---------- GHCR 标签 ----------
       - name: 提取 GHCR 元数据
         id: meta_ghcr
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_GHCR }}
           tags: |
-            # 始终写入 pyproject.toml 里的版本号，例如 1.0.9
-            type=raw,value=${{ steps.project.outputs.version }}
-            # 时间戳标签（北京时间），方便回溯每次构建
+            type=raw,value=${{ needs.check-version.outputs.local_version }}
             type=raw,value=${{ steps.timestamp.outputs.build_ts }}
-            # git tag 触发时（v1.2.3）产生 1.2.3、1.2
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            # 默认分支始终更新 latest
             type=raw,value=latest,enable={{is_default_branch}}
 
-      # ---------- 生成 Docker Hub 标签 ----------
+      # ---------- Docker Hub 标签 ----------
       - name: 提取 Docker Hub 元数据
         id: meta_dockerhub
         uses: docker/metadata-action@v5
         with:
           images: docker.io/${{ env.IMAGE_NAME_DOCKERHUB }}
           tags: |
-            type=raw,value=${{ steps.project.outputs.version }}
+            type=raw,value=${{ needs.check-version.outputs.local_version }}
             type=raw,value=${{ steps.timestamp.outputs.build_ts }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      # ---------- 单次构建，同时推送到两个仓库 ----------
+      # ---------- 单次构建，双仓库推送 ----------
       - name: 构建并推送 Docker 镜像
         uses: docker/build-push-action@v6
         with:
@@ -110,7 +174,7 @@ jobs:
             ${{ steps.meta_dockerhub.outputs.tags }}
           labels: |
             ${{ steps.meta_ghcr.outputs.labels }}
-            org.opencontainers.image.version=${{ steps.project.outputs.version }}
+            org.opencontainers.image.version=${{ needs.check-version.outputs.local_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true
