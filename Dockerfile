@@ -1,7 +1,7 @@
 FROM python:3.11-slim-bullseye AS build
 COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /usr/local/bin/
 WORKDIR /build
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
 RUN sed -i 's/requires-python = ">=3.12"/requires-python = ">=3.11"/' pyproject.toml \
     && uv lock --python 3.11 \
