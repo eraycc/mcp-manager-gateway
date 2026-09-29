@@ -1,0 +1,132 @@
+name: Release All (PyPI + GitHub Release)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.compare.outputs.should_release }}
+      local_version: ${{ steps.local.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read local version from pyproject.toml
+        id: local
+        shell: bash
+        run: |
+          VERSION=$(grep -E '^version\s*=' pyproject.toml | head -n1 | sed -E 's/.*"(.*)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "本地版本: $VERSION"
+
+      - name: Compare with PyPI version
+        id: compare
+        shell: bash
+        run: |
+          pip install packaging --quiet
+          python << 'EOF'
+          import json, os, urllib.request
+          from packaging.version import Version
+
+          pypi_url = "https://pypi.org/pypi/mcp-manager-gateway/json"
+          try:
+              with urllib.request.urlopen(pypi_url, timeout=10) as resp:
+                  data = json.load(resp)
+                  pypi_version = data["info"]["version"]
+          except urllib.error.HTTPError as e:
+              if e.code == 404:
+                  pypi_version = "0.0.0"
+              else:
+                  raise
+          except Exception:
+              pypi_version = "0.0.0"
+
+          local_version = os.environ.get("LOCAL_VERSION")
+          should = Version(local_version) > Version(pypi_version)
+
+          print(f"PyPI 最新版本: {pypi_version}")
+          print(f"本地版本: {local_version}")
+          print(f"是否发布: {should}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"pypi_version={pypi_version}\n")
+              f.write(f"should_release={str(should).lower()}\n")
+          EOF
+        env:
+          LOCAL_VERSION: ${{ steps.local.outputs.version }}
+
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Build package
+        run: uv build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish-pypi:
+    needs: [check-version, build]
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mcp-manager-gateway/${{ needs.check-version.outputs.local_version }}/
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+  github-release:
+    needs: [check-version, build, publish-pypi]
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.local_version }}
+          name: v${{ needs.check-version.outputs.local_version }}
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
