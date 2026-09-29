@@ -1,235 +1,299 @@
-# MCP Manager
+# MCP Manager Gateway
 
-Python MCP 管理与代理网关，提供独立 Web 管理台、Token 授权、缓存工具目录及按会话复用的懒加载运行时。系统独立保存配置，不修改 Codex 的 config.toml。
+> 让 MCP 像 Skills 一样按需发现、按需启动：Agent 只看见一个稳定入口，需要时再找到并调用真正的工具。
 
-## 安装与启动
+[![PyPI](https://img.shields.io/pypi/v/mcp-manager-gateway)](https://pypi.org/project/mcp-manager-gateway/)
+[![Python](https://img.shields.io/pypi/pyversions/mcp-manager-gateway)](https://pypi.org/project/mcp-manager-gateway/)
+[![License](https://img.shields.io/github/license/eraycc/mcp-manager-gateway)](LICENSE)
 
-需要 [uv](https://docs.astral.sh/uv/)。从本地构建好的 wheel 安装（Windows / Linux）：
+MCP 很有用，但 MCP 越配越多以后，问题也会一起放大：
 
-```console
-uv tool install ./dist/mcp_manager_gateway-0.1.3-py3-none-any.whl
-mcp-manager
-```
+- 每个 Agent 启动时都要连接大量 MCP，启动越来越慢；
+- 全量工具定义被提前塞进上下文，真正开始工作前就消耗大量 token；
+- 很多 MCP 平时根本用不到，却仍然常驻、占用进程和连接；
+- 每换一个 Agent 都要重新复制、修改和维护配置；
+- Agent 能读懂现有配置，却无法一次性提交给人审核，只能由人逐项手工录入。
 
-安装后提供三个等价命令：`mmg`、`mcp-manager`、`mcp-manager-gateway`，均支持本文的全部子命令和参数。`mcp-manager` 默认启动 Web 服务，也可执行 `mcp-manager serve`。使用 `-h` / `--help` 查看帮助，`-v` / `--version` 查看安装版本。无需进入源码目录。包发布到 PyPI 后，可使用 `uv tool install mcp-manager-gateway`；本仓库的构建操作不会自动发布到 PyPI。
+MCP Manager Gateway（简称 **MMG**）把这些 MCP 收到一个网关后面。Agent 默认只需要几个发现与调用工具；搜索目录不会启动下游服务，只有真正调用时才会懒启动对应 MCP。管理员可以在 Web 控制台统一配置、授权、测试、审计和管理生命周期。
 
-打开 http://127.0.0.1:8765 。首次注册账户为管理员，密码至少 10 个字符。
+~~~
+Agent / IDE
+    │ 只配置一次 MMG
+    ▼
+MCP Manager Gateway
+    ├── 搜索 MCP 与工具（不启动下游）
+    ├── 精确调用（需要时才启动）
+    ├── Token / 用户 / 权限 / OAuth
+    └── 提议 → 人工审核 → 测试 → 批准
+            │
+            ├── Filesystem MCP
+            ├── Database MCP
+            ├── Browser MCP
+            └── 其他 stdio / HTTP / SSE / REST 服务
+~~~
 
-首次启动自动建立用户目录、.env、SQLite 数据库和密钥，并执行数据库迁移：
+## 核心价值
 
-- Windows：`C:\Users\用户名\.mcp-manager`
-- Linux：`~/.mcp-manager`
+### 更快、更轻的 Agent 启动
 
-工具目录与服务失败状态集中保存在 `cache/catalog.jsonl`，后台任务状态集中保存在 `jobs/jobs.jsonl`。缓存文件缺失时，启动后会在后台为已启用服务重建目录，按需服务发现完成即释放实例。连续启动失败达到系统阈值后，服务标记为 `failed` 并清空能力缓存，但不会修改 `mode`；普通服务全局共享失败状态，个人 OAuth 按用户隔离。已有可用缓存时，单次 `tools/list` 刷新失败会保留上一版能力并单独记录刷新警告。更新采用追加写入并自动合并重复快照；缓存按服务和授权用户保存最新版本，不再按版本创建文件。启动时会迁移可读取的旧 `.json` 快照，持久化成功后删除旧文件；无法读取的文件会保留并记录迁移错误。日志仍按日期保存为 JSONL，系统数据库、日志 SQLite 索引与 `.env` 保持各自格式。
+按需发现模式默认只向 Agent 暴露 3 个核心网关工具，而不是一次注入所有下游 MCP 的全部 Schema。Agent 先搜索，再读取目标工具的完整参数定义，最后精确调用。
 
-环境变量优先于用户目录内的 .env；源码目录和当前工作目录的 .env 不会被自动读取。可设置 `MCP_MANAGER_HOME`，或执行 `mcp-manager --home /自定义目录 serve` 指定另一份配置与数据。
+这是一种和 Skills 相似的渐进式披露：先知道“有哪些能力”，需要时再展开细节。
 
-修改用户目录下的 .env 后重启服务。更换端口可修改 PORT；使用 OAuth 时还需同步 PUBLIC_URL 中的回调地址。也可执行：
+### 真正的懒加载与懒启动
 
-```console
-mcp-manager serve --port 8766
-```
+查询 MCP、搜索工具和翻页都不会启动下游服务。`lazy` 服务只在第一次业务调用时启动，并在安全的空闲周期后回收；常用服务也可以设为 `eager` 预热，不需要的服务可以设为 `disabled`。
 
-控制台按浏览器实际访问地址识别同源请求，可使用 localhost、内网 IP 或域名登录，无需把每个地址加入白名单。PUBLIC_URL 用于 OAuth 回调，也作为反向代理场景的额外可信来源。远程访问设置 HOST=0.0.0.0，例如通过 http://192.168.2.111:8765 打开控制台。HTTPS 反向代理场景设置 PUBLIC_URL=https://你的域名、COOKIE_SECURE=true。配置示例见 [.env.example](.env.example)。
+### 一次接入，多 Agent 长期复用
 
-## 使用顺序
+每个 Agent 只连接 MMG，不再分别维护几十份 MCP 配置。服务、凭据、权限和运行状态由网关集中管理；同一套 MCP 可以安全地分配给不同用户和 Token。
 
-1. 管理员添加 MCP。支持 stdio、Streamable HTTP、旧 SSE、REST 转 MCP；http 是 Streamable HTTP 的导入别名。
-2. 添加或修改启用中的 MCP 后自动发现工具；连接启动时再次更新缓存。lazy 的维护发现完成后释放实例。非 OAuth 服务的启动、连接或发现失败会自动将运行策略设为 disabled，移除可用工具目录并保留失败原因。OAuth 未授权、过期或发现失败只清除当前用户的目录和实例，保留服务运行策略，不影响其他用户。配置仍会保存，便于修复；修复后管理员可点击启动、刷新自动禁用的服务，或重新设置 lazy/eager，读取最新工具成功才恢复可用目录。自动禁用后的重试恢复此前策略；旧记录未保存此前策略时默认 lazy。手动禁用的服务仅在显式启动或设置启用策略后恢复，刷新不会自行启用。已禁用的 OAuth 服务仍可完成授权，但授权不会自动启用服务。REST 刷新会先探测 HTTP 连接，不能仅凭本地定义生成可用缓存。
-3. 给普通用户分配可用 MCP；用户只能在自己的授权范围创建 Token。
-4. 在访问令牌页面创建凭据并配置客户端。令牌值加密保存，可在列表复制或编辑时查看。旧版本仅保存哈希的令牌无法还原，轮换一次后即可回显和复制。普通用户只管理自己的令牌；管理员默认查看自己的令牌，可切换全部用户并按用户名筛选。
-5. 实际调用才启动按需服务。查询工具目录不会启动下游进程。
+### Agent 提议，人类审批
 
-REST 默认向工具地址发送 HEAD 请求检查连接，HTTP 405 表示该路由不支持 HEAD，视为连通；连接失败、鉴权失败、404 或服务器错误会使发现失败。可在表单中填写健康检查 URL（配置字段 `healthcheck_url`），改用 GET 检查固定健康端点并要求 2xx；工具 URL 含参数时必须配置该地址。此检查不执行 POST、PUT、DELETE 等业务工具，也不代替具体工具的功能测试。
+迁移 MCP 时，不建议在管理台里逐条重建。给受信任的管理员 Token 开启“MCP 提议”权限后，Agent 可以：
 
-管理员可新建、修改、复制、搜索、筛选、分页和批量处理 MCP；支持通用 JSON、Codex TOML、Claude 和 DSH Cordis/registry 导入、诊断、去重、导入冲突策略、脱敏导出、缓存刷新和真实工具测试。批量工具测试运行保存的显式参数用例；先检查参数再执行可能产生写入的工具。
+1. 读取 Codex、Claude、通用 JSON 或 DSH/Cordis 等现有配置；
+2. 将多个 MCP 标准化后批量提交到 MMG（单批最多 100 条）；
+3. 查询每条提议的审核状态；
+4. 由用户在 Web 控制台检查配置、补充隔离策略、真实测试并批准；
+5. 批准后立即进入网关目录，已连接的 Agent 无需重启；
+6. 全部验证通过并得到用户明确同意后，再删除旧配置中的 MCP 条目，只保留 MMG。
 
-服务标识 slug 是稳定的工具路由名称，创建后不修改；需要新的标识时创建副本。原生工具名通常为 slug__tool，过长或含特殊字符时会生成稳定的短名称。输入 Schema、结构化结果、文本、图像、音频及资源/提示词都通过 MCP 协议返回。
+这让迁移从“人工复制配置”变为“Agent 整理并提议，人类掌握最终决定”。Agent 不能在提议阶段自行指定启动策略或隔离级别，也不能绕过审批直接创建服务。
 
-## HTTP 接入
+## 5 分钟开始使用
 
-统一端点：POST/GET/DELETE /mcp，使用 MCP Streamable HTTP 客户端。
+要求 Python 3.12 或更高版本。项目已发布到 [PyPI](https://pypi.org/project/mcp-manager-gateway/)，无需下载本地 wheel。
 
-```http
+### 使用 uv 安装（推荐）
+
+~~~console
+uv tool install mcp-manager-gateway
+mmg
+~~~
+
+升级：
+
+~~~console
+uv tool upgrade mcp-manager-gateway
+~~~
+
+### 使用 pip 安装
+
+建议安装在独立虚拟环境中：
+
+~~~console
+pip install --upgrade mcp-manager-gateway
+mmg
+~~~
+
+安装后 `mmg`、`mcp-manager` 和 `mcp-manager-gateway` 是等价命令。默认启动地址为 <http://127.0.0.1:8765>。首次注册的账户是管理员，密码至少 10 个字符。
+
+首次启动会自动创建用户目录、`.env`、SQLite 数据库和密钥：
+
+- Windows：`C:\Users\<用户名>\.mcp-manager`
+- Linux / macOS：`~/.mcp-manager`
+
+需要修改端口时：
+
+~~~console
+mmg serve --port 8766
+~~~
+
+## 把 Agent 接到 MMG
+
+先在 Web 控制台中创建访问 Token。个人中心会根据当前地址生成可直接复制的 HTTP、stdio、Codex 和通用客户端配置。
+
+统一的 Streamable HTTP 端点是：
+
+~~~text
+http://127.0.0.1:8765/mcp
 Authorization: Bearer mcpm_你的Token
-```
+~~~
 
-新建 Token 默认使用按需发现，基础注册两个索引工具和一个执行工具（3 个）；仍可为兼容旧客户端选择原生工具目录。Token 可选启用资源工具（+2），管理员 Token 还可选启用 MCP 提议（+1），按需发现模式最多注册 6 个网关工具：
+不支持远程 HTTP MCP 的客户端可使用 stdio 桥接：
 
-| 工具 | 用途 |
-| --- | --- |
-| `gateway_search_mcps(query)` | 搜索服务名称、描述、标签和工具名；空或 `*` 列出全部授权且非 disabled 的 MCP 摘要。failed 服务仍返回 `status`、失败次数、原因与作用域，但 `tools_list` 为空 |
-| `gateway_search_tools(mcp, tool)` | 搜索工具并返回完整原始 inputSchema、描述、归属、精确 gateway_name、示例或参数模板 |
-| `gateway_call(name, arguments)` | 按精确 gateway_name 调用，arguments 必须符合发现结果中的原始 Schema |
-| `gateway_list_resources(mcp, keyword)` | 可选；为不支持原生资源协议的客户端列出资源、提示词和资源模板，返回提供方 MCP 与读取方式；配置 embedding 后融合语义匹配 |
-| `gateway_read_resource(uri)` | 可选；读取 `gateway_list_resources` 返回的精确资源 URI，标注为只读 |
-| `gateway_mcp_proposals(...)` | 仅开启该权限的管理员 Token 可见；单条或批量提交标准 MCP JSON 进入审批队列，也可传 `{"action": "list"}` 查询提案审核状态（状态过滤/分页/计数） |
-
-Agent 提议不会直接创建服务。管理员在「MCP 审批」页可筛选、分页、修改配置，设置启动策略、实例隔离和 OAuth 配置隔离，执行单条或批量测试/审批/拒绝/删除；通过时再次检查完全相同的 MCP，并添加到「MCP 服务」。
-
-审批测试会长期保存最近一次状态、时间、失败原因以及工具/资源/提示词/模板数量。批量测试作为可取消的后台任务运行，任务弹窗会逐条显示结果；页面刷新后仍可查看最近一次测试结论。
-
-`mcp` 推荐使用返回的服务 ID，也支持名称和 slug。指定 mcp、tool 留空会列出该服务全部工具；mcp 留空或为 `*` 时跨服务搜索；两个参数都留空或为 `*` 时列举全部授权 MCP 和工具。超过页大小时跟随 `next_cursor`，保持查询不变。每页条目还有 1 MiB 的累计 JSON 字节预算，完整 Schema 不拆分；单个条目超过此预算时返回 `catalog_entry_too_large`。错误参数会返回字段路径和修正提示，实际执行不会通过模糊匹配选择工具。
-
-管理员可在「系统设置 → 工具检索」配置 OpenAI 兼容 embedding 接口、模型、密钥、超时与最低相似度，并测试已保存的连接。例如接口 `https://api.siliconflow.cn`、模型 `BAAI/bge-m3`；也可接本地模型。裸地址自动补全 `/v1/embeddings`，支持 `/v1` 或完整 embeddings 地址。
-
-精确名称优先，其他查询融合字段关键词、拼写模糊匹配和真实向量相似度。向量默认关闭；启用后模型故障会明确回退关键词模式。最低相似度默认 `0.5`；已有管理员自定义值保持不变，并应结合所选模型和实际查询评估。单次超过 1,000 个候选时语义阶段返回 `input_too_large` 并回退关键词，完整目录分页仍可用。文档向量和查询向量均缓存，并按接口、模型、授权身份和内容隔离，使同一查询的分页评分保持稳定；仅向模型发送描述性元数据与检索语句，不发送连接凭据或实际调用参数。重排序模型使用独立的 rerank 协议，不能填入 embedding 模型栏。
-
-关闭 Token 鉴权只影响 MCP 调用，Web 管理仍需登录。匿名范围由管理员单独设置，默认不公开任何服务。请求提供了无效 Token 时，不会退回匿名权限。
-
-系统设置中的跨域来源默认 `*`，作用于 `/mcp` 与 `/gateway/v1`，支持浏览器 Bearer 请求和预检；可改为指定来源列表，保存后立即生效。管理 API 的 Cookie、CSRF 与同源检查保持独立。
-
-「系统设置 → 基本设置」可配置允许的监听 Host / IP 列表，每行一项，支持主机名、IP 或 `Host:端口`；`*` 和 `0.0.0.0` 均表示允许全部，默认 `*`。校验仅作用于 `/mcp` 与 `/gateway/v1`，拒绝响应会返回当前 Host 和允许列表，Web 控制面板继续使用原有同源识别逻辑。
-
-匿名客户端如果显式创建 `/gateway/v1/leases` 租约，需要保存响应中的 `client_secret`，并在后续调用、心跳、释放时携带 `X-MCP-Manager-Client`。stdio 桥接会自动处理。
-
-## 本地 stdio 接入
-
-网关服务必须已经运行。桥接进程只连接网关，全部下游 MCP 仍由同一个网关运行时管理。
-
-以下三个命令完全等价，客户端 JSON 的 `command` 也可任选其中一个：
-
-```console
-mmg stdio --url http://127.0.0.1:8765
-mcp-manager stdio --url http://127.0.0.1:8765
-mcp-manager-gateway stdio --url http://127.0.0.1:8765
-```
-
-Windows PowerShell：
-
-```powershell
-$env:MCP_MANAGER_TOKEN = "mcpm_你的Token"
-mcp-manager stdio --url http://127.0.0.1:8765
-```
-
-Linux：
-
-```sh
-MCP_MANAGER_TOKEN=mcpm_你的Token mcp-manager stdio --url http://127.0.0.1:8765
-```
-
-也支持 --token 参数；URL 可通过 MCP_MANAGER_URL 设置。客户端的通用 JSON 配置：
-
-```json
+~~~json
 {
   "mcpServers": {
     "mcp-manager": {
-      "command": "mcp-manager",
+      "command": "mmg",
       "args": ["stdio", "--url", "http://127.0.0.1:8765"],
-      "env": {"MCP_MANAGER_TOKEN": "mcpm_你的Token"}
+      "env": {
+        "MCP_MANAGER_TOKEN": "mcpm_你的Token"
+      }
     }
   }
 }
-```
+~~~
 
-个人中心提供可复制的 HTTP、stdio、Codex 及通用客户端配置示例。
+桥接进程只负责连接网关；所有下游 MCP 仍由 MMG 统一运行和回收。
 
-## 生命周期
+## 推荐迁移方式：让 Agent 批量提议
 
-- lazy：首次工具调用启动；同一共享范围的并发调用只创建一个实例。
-- eager：服务共享实例在启动时预热；已有授权的个人 OAuth 按用户预热。其他用户/会话隔离实例需要对应身份首次接入后建立。会话隔离实例在最后引用释放后关闭。
-- disabled：不进入可用工具目录，也不接受业务调用。
-- 手动停止会设置临时停止状态，直到显式启动或保存新的启用策略。
-- 公共服务共享实例；个人 OAuth 按用户隔离；其他有状态服务可选服务、用户、会话隔离。
-- stdio 桥接有独立租约，每 30 秒心跳、90 秒失联到期，正常退出主动释放。心跳异常或连接失效后，在下一次新请求前重建连接，已经派发的业务调用不会重放。
-- 支持 MCP 会话的 HTTP 客户端可用 DELETE 释放；未报告退出的通用 HTTP 客户端采用保留租约。
-- 只有所有引用释放后，按需实例才停止。默认 24 小时没有业务调用也会回收；心跳和目录刷新不算业务调用。活动调用不会被空闲回收杀死。系统设置中的空闲回收时间设为 `0` 时，关闭业务空闲超时回收；主动断开和桥接失联租约仍正常释放。
-- 单实例并发、排队、启动、调用与停止超时可配置；停止和配置换代会阻止继续派发排队请求。
-- `mode` 仅表示 `lazy`、`eager`、`disabled` 策略；`status` 独立表示 `stopped`、`ready`、`running`、`failed`。阈值默认为 3，可在系统设置中调整。
+### 1. 开启受控的提议入口
 
-管理 API 的 `status` 按固定顺序推导：`mode=disabled` 时返回 `stopped`；当前作用域存在执行中调用时返回 `running`；存在就绪实例时返回 `ready`；没有实时实例时再读取 `catalog.jsonl` 的持久化基线，返回 `failed` 或 `stopped`。因此 `running/ready` 来自实时运行时，`stopped/failed` 来自无实时实例时的持久化状态。`cache_status` 与 `status` 是独立维度，服务保持 `ready/stopped` 时仍可通过 `last_refresh_error*` 展示刷新警告。`GET /api/v1/mcps` 支持 `status=running|ready|stopped|failed` 筛选，并返回启动失败次数、最近启动失败与刷新失败字段。`failure_scope` 当前为 `global` 或 `user`，枚举允许未来扩展。
-- 发送后失去结果标记为 outcome_unknown，不自动重放调用。
+在 Web 控制台创建管理员 Token，并仅为迁移用途开启“MCP 提议”权限。普通用户 Token 看不到提议工具。
 
-Windows 使用 MCP SDK 的 Job Object 清理子进程树；Linux 使用独立进程组。Linux 作为长期服务运行时，建议使用附带的 systemd 单元（KillMode=control-group）或 Docker init，以在网关异常终止时一起回收进程。
+### 2. 给 Agent 明确任务
 
-## OAuth
+可以直接告诉 Agent：
 
-在 MCP 认证配置中选择 oauth，填写 authorization_url、token_url、client_id、client_secret（可选）和 scopes。`scopes` 是 OAuth 权限列表（例如 `mcp:read`）；网关的 `scope` 固定为 `user`，每位用户独立授权。支持授权码、PKCE、一次性 state、Token 刷新及 client_secret_post/client_secret_basic。
+> 读取我当前客户端中的 MCP 配置，转换为 MMG 提议并批量提交。不要修改原配置；等待我在控制台审核、测试和批准后，再检查迁移状态。只有在我明确同意后，才能删除旧 MCP 配置，只保留 MMG。
 
-回调地址为 PUBLIC_URL/api/v1/oauth/callback。用户在个人中心或 MCP 服务授权入口完成自己的授权；访问令牌调用时使用令牌所属用户的 OAuth 凭据。凭据、能力目录和运行实例按用户隔离。旧配置中省略 scope 或设置 service 的 OAuth 也按用户隔离运行，旧共享凭据不会复用，各用户需重新授权。断开或授权失效仅影响本人。
+更完整的 Agent 操作约束见 [AGENTS.md](AGENTS.md)。
 
-调用日志默认对管理员展示全部用户，可按用户名或用户 ID 搜索筛选；普通用户的列表、详情和导出始终限于本人。
+### 3. Agent 提交标准提议
 
-## 数据和迁移
+Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量参数：
 
-默认配置：
+~~~json
+{
+  "proposals": [
+    {
+      "name": "Example Filesystem",
+      "slug": "example-filesystem",
+      "description": "访问指定项目目录",
+      "tags": ["filesystem", "development"],
+      "transport": "stdio",
+      "config": {
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+      },
+      "source": "codex-config",
+      "purpose": "迁移现有开发工具",
+      "declared_capabilities": ["读取和管理项目文件"],
+      "requested_permissions": ["访问 /workspace"]
+    }
+  ]
+}
+~~~
 
-```dotenv
-DATABASE_URL=sqlite://mcp-manager.sqlite
-# 或
-DATABASE_URL=mysql://user:password@host:3306/dbname?charset=utf8mb4
-```
+提议不会直接创建或启动 MCP。`mode`、`isolation` 和 `config_isolation` 是审批阶段由人决定的字段，Agent 不应把它们塞进提议。
 
-MySQL 数据库需要提前创建；系统自动执行表结构升级。SQLite 相对路径以 DATA_DIR 为基准，DATA_DIR 默认是用户配置目录，也支持 Windows/Linux 绝对路径。URL 中密码的特殊字符需要 URL 编码。
+### 4. 人类审核与真实测试
 
-目录（可由 MCP_MANAGER_HOME / DATA_DIR 覆盖）：
+打开“MCP 审批”页面，逐项检查命令、地址、环境变量、目录权限和凭据；根据风险设置：
 
-| 路径 | 用途 |
+- 运行策略：`lazy` / `eager` / `disabled`；
+- 实例隔离：服务、用户或会话级；
+- OAuth 配置隔离；
+- 测试参数与预期结果。
+
+测试通过后批准。批准时 MMG 会再次校验相同配置，再将服务加入可用目录。
+
+### 5. 验证后再精简旧配置
+
+让 Agent 查询提议状态，并通过 MMG 搜索、调用已批准工具。只有当所有目标 MCP 均已批准且验证成功，并且用户明确授权清理时，Agent 才能删除旧客户端配置中的对应 MCP 条目。
+
+保留备份，不删除无关配置，不删除 MMG 自身。完成后，每个 Agent 只需保留一个网关入口。
+
+详细导入规则见 [导入工作流](docs/import-workflow.md)。
+
+## Agent 如何渐进式使用工具
+
+按需发现模式的标准顺序是：
+
+| 工具 | 用途 |
 | --- | --- |
-| ~/.mcp-manager/.env | 用户配置 |
-| ~/.mcp-manager/mcp-manager.sqlite | 默认系统数据库 |
-| ~/.mcp-manager/secret.key | JWT 与配置加密的根密钥 |
-| ~/.mcp-manager/cache/ | 按配置版本、身份隔离的能力缓存 |
-| ~/.mcp-manager/indexes/embeddings.jsonl | 模型、授权作用域与文档内容隔离的向量缓存 |
-| ~/.mcp-manager/jobs/ | 可恢复查看的任务状态，不自动重放中断任务 |
-| ~/.mcp-manager/logs/YYYY-MM-DD.jsonl | 调用日志原文 |
-| ~/.mcp-manager/logs/audit/ | 管理审计 |
-| ~/.mcp-manager/logs/deletions/ | 防止删除记录恢复的删除日志 |
-| ~/.mcp-manager/indexes/logs.sqlite | 可重建的日志查询与统计索引 |
+| `gateway_search_mcps` | 搜索或列出当前 Token 有权访问的 MCP |
+| `gateway_search_tools` | 获取目标工具的完整 `inputSchema` 和精确 `gateway_name` |
+| `gateway_call` | 使用精确名称和符合 Schema 的参数执行工具 |
+| `gateway_list_resources` | 可选：列出资源、提示词和模板 |
+| `gateway_read_resource` | 可选：读取精确资源 URI |
+| `gateway_mcp_proposals` | 可选：管理员 Token 批量提交或查询 MCP 提议 |
 
-日志保留天数默认为 `0`（无限保留）。设为 `7` 时，后台自动清理超过 7 天的调用日志原文和查询索引；保存设置后在下一轮维护中检查（通常 5 秒内），之后每小时检查。审计日志独立保留。
+一个可靠的 Agent 不应猜测工具名或参数：先搜索 MCP，再搜索工具，最后使用返回的精确名称调用。搜索和目录分页不会唤醒 `lazy` 服务。
 
-个人资料的登录会话显示登录 IP 和设备 UA，支持撤销或彻底删除其他登录会话；旧会话未采集的信息显示为未知。
+[渐进式发现设计](docs/2026-09-14-progressive-discovery-design.md)解释了搜索、分页、完整 Schema 与精确路由的契约。
 
-系统设置的关于页面提供安装版本、[项目主页](https://github.com/eraycc/mcp-manager-gateway)、[发布地址](https://github.com/eraycc/mcp-manager-gateway/release)、[Issue 反馈](https://github.com/eraycc/mcp-manager-gateway/issues)和[作者主页](https://github.com/eraycc)。
+## 管理能力概览
 
-备份时保留用户目录内的 .env、整个 DATA_DIR 及系统数据库；SECRET_KEY 或 secret.key 必须保留，否则原凭据无法解密。
+- **多种接入方式**：stdio、Streamable HTTP、旧 SSE、REST 转 MCP；
+- **统一导入**：通用 JSON、Codex TOML、Claude、DSH Cordis/registry；
+- **授权边界**：用户、Token、匿名范围和 MCP 分配相互独立；
+- **OAuth 隔离**：个人凭据、能力目录和运行实例按用户隔离；
+- **生命周期**：`lazy`、`eager`、`disabled`，支持失败状态与恢复；
+- **运行隔离**：共享、用户和会话实例；
+- **可观察性**：调用日志、审计日志、后台任务、缓存与失败原因；
+- **工具检索**：关键词、拼写模糊匹配，以及可选的 OpenAI 兼容 embedding；
+- **安全审批**：Agent 提议、配置编辑、真实测试、批准或拒绝；
+- **数据后端**：默认 SQLite，也支持 MySQL。
 
-旧版源码目录数据可以离线复制到一个空用户目录（原目录保留）：
+## 配置与数据
 
-```console
-mcp-manager --home ~/.mcp-manager migrate-home --from-data /旧项目/data
-```
+环境变量优先于用户目录中的 `.env`。源码目录和当前工作目录下的 `.env` 不会被自动读取。完整示例见 [.env.example](.env.example)。
 
-旧版本有 .env 时同时传入 `--from-env /旧项目/.env`。命令保留有效密钥，检查 SQLite 完整性；源实例运行中、目标非空或配置文件不存在时拒绝迁移。也可以在完全停止网关后，将整个旧 data 目录直接剪切为新的用户目录，必须保留 secret.key 与日志等配套文件。
+常用配置：
 
-停止网关后迁移到一个空目标数据库：
+~~~dotenv
+HOST=127.0.0.1
+PORT=8765
+PUBLIC_URL=http://127.0.0.1:8765
+COOKIE_SECURE=false
+DATABASE_URL=
+~~~
 
-```console
-mcp-manager migrate-db --target-database-url "mysql://user:password@host:3306/newdb?charset=utf8mb4"
-```
+可通过 `MCP_MANAGER_HOME` 或 `mmg --home /path serve` 指定另一套配置和数据。默认数据包括数据库、`secret.key`、能力缓存、任务状态、调用日志和审计日志。
 
-也支持 MySQL → SQLite。迁移保留用户、Token、授权、系统设置、配置和 OAuth 密文；日志与能力缓存继续使用原 DATA_DIR。完成后修改 DATABASE_URL 再启动。目标有业务数据时拒绝覆盖。
+备份时必须同时保留数据目录、`.env` 和 `secret.key`；密钥丢失后，已有密文凭据无法解密。
 
-仅升级表结构：mcp-manager upgrade。
-停止网关后离线重建日志索引：mcp-manager rebuild-logs；运行中可在日志管理执行重建任务。
+## Docker 部署
 
-## Docker / Linux 服务
-
-```console
+~~~console
 docker compose up --build -d
-```
+~~~
 
-Compose 使用单个网关进程，数据持久化到命名卷 mcp-manager-data，容器内用户目录为 /data。需要宿主机目录时，将挂载项替换为 /你的持久化目录:/data。生产镜像安装构建出的 wheel，不依赖源码 checkout。容器内配置的 stdio 命令必须安装在容器中；Node 等额外运行时需要在派生镜像中安装。访问其他容器的服务应使用其容器网络地址。
+默认仅绑定 `127.0.0.1:8765`，数据保存到命名卷 `mcp-manager-data`。远程或生产环境建议使用 HTTPS 反向代理，并设置正确的 `PUBLIC_URL` 与 `COOKIE_SECURE=true`。
 
-构建环境无法访问 PyPI 时，可通过 `docker build --build-arg UV_DEFAULT_INDEX=https://你的镜像/simple --target production -t mcp-manager .` 指定 Python 包索引；默认仍使用 PyPI。
+MMG 当前按单节点、单网关运行时设计。不要用多个 worker 或多个副本共享同一套下游进程调度。
 
-原生 Linux 服务运行时，网关自身会管理 Windows/Linux 子进程清理（Job Object / 进程组）。每个部署只运行一个网关实例，不使用多 worker 或多副本共享进程调度。
+## 升级与维护
 
-## 开发
+~~~console
+uv tool upgrade mcp-manager-gateway
+mmg upgrade
+~~~
 
-后端为 src/mcp_manager 下的独立模块；包内 static/ 为原生 JS ES 模块，通过 /api/v1 与后端通信。迁移脚本在包内 migrations/，测试在 tests/，生成的截图和验收产物在 artifacts/。前端可单独部署，由同源反向代理转发 /api、/gateway 和 /mcp。
+常用维护命令：
 
-```console
+~~~console
+mmg --version
+mmg --help
+mmg rebuild-logs
+mmg migrate-db --help
+mmg migrate-home --help
+~~~
+
+## 本地开发
+
+~~~console
 uv sync --frozen --group dev
-uv run mcp-manager serve
 uv run pytest tests -q
 node --test tests/frontend/core.test.mjs
 uv build
-```
+~~~
 
-浏览器测试需要本机 Chrome 或 Playwright Chromium。MySQL 专项测试通过 MCP_TEST_MYSQL_URL 指向专用的空测试数据库。API 文档在 /docs。
+- 后端：`src/mcp_manager/`
+- 前端静态资源：`src/mcp_manager/static/`
+- 数据库迁移：`src/mcp_manager/migrations/`
+- 测试：`tests/`
+- 传输插件说明：[docs/plugins.md](docs/plugins.md)
+- 运行时设计：[docs/runtime-design.md](docs/runtime-design.md)
+- 验证记录：[docs/validation.md](docs/validation.md)
 
-传输插件使用 Python entry point 组 mcp_manager.transports；实现 validate(config) 和异步上下文 connect(spec)，连接对象提供 discover()、call(name, arguments)，可选 read_resource/get_prompt。网关统一处理授权、租约、并发、日志和关闭。插件接口说明见 docs/plugins.md。
+API 文档在运行中的 `/docs`。
 
-本版的部署边界是单节点、单运行时。自定义下游进程可以执行操作系统命令，MCP 配置权限属于管理员；为不同信任域配置不同运行账户或隔离容器。
+## 安全边界
+
+MCP 配置可以启动本地进程、访问网络和读取数据，应当视为管理员权限。MMG 提供审核、授权、隔离、脱敏和加密存储，但不能把不受信任的 MCP 自动变成安全程序。
+
+- 使用最小权限的运行账户和 Token；
+- 提议中不要明文提交真实密钥；
+- 对不同信任域使用不同账户或容器；
+- 调用有副作用的工具前先核对参数；
+- `outcome_unknown` 表示请求可能已经送达，Agent 不应自动重放。
+
+## License
+
+[Apache License 2.0](LICENSE)
