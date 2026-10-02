@@ -11,8 +11,10 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 
 from .catalog import web_authorizer
-from .database import ApiToken, SystemSetting, invalidate_setting_cache
+from .database import ApiToken, SystemSetting, get_setting, invalidate_setting_cache
 from .identity import admin_user, current_user, effective_mcp_ids
+from .translation import DEFAULT_TRANSLATION_CONFIG, normalize_translation_config
+from .updates import cached_update_status, ignore_update, update_status
 
 router = APIRouter(prefix="/api/v1")
 USER = Depends(current_user)
@@ -21,7 +23,8 @@ DEFAULTS = {"title": "MCP Manager", "registration_enabled": True, "jwt_days": 30
             "token_auth_enabled": True, "anonymous_scope_mode": "selected", "anonymous_mcp_ids": [],
             "idle_seconds": 86400, "refresh_enabled": False, "refresh_cron": "0 3 * * *",
             "startup_failure_threshold": 3, "timezone": "Asia/Shanghai",
-            "log_retention_days": 0, "cors_origins": ["*"], "allowed_hosts": ["*"]}
+            "log_retention_days": 0, "cors_origins": ["*"], "allowed_hosts": ["*"],
+            "update_auto_check": True, "translation_config": DEFAULT_TRANSLATION_CONFIG}
 FILTERS = {"q", "username", "user_id", "token_id", "mcp_id", "tool_name", "status", "source",
            "from_time", "to_time"}
 
@@ -168,6 +171,46 @@ async def about(user=USER):
     return PROJECT
 
 
+@router.get("/translation/settings")
+async def translation_settings(request: Request, user=USER):
+    async with request.app.state.db.session() as s:
+        row = await s.get(SystemSetting, "translation_config")
+    try:
+        return normalize_translation_config(row.value if row else {})
+    except ValueError:
+        return normalize_translation_config({})
+
+
+async def _update_status_response(request, user, *, force=False):
+    enabled = await get_setting(request.app.state.db, "update_auto_check", True)
+    if force or enabled:
+        result = await update_status(request.app.state.db, user.id, force=force)
+    else:
+        result = await cached_update_status(request.app.state.db, user.id)
+    return result | {"auto_check_enabled": enabled}
+
+
+@router.get("/update-status")
+async def get_update_status(request: Request, user=USER):
+    return await _update_status_response(request, user)
+
+
+@router.post("/update-status/check")
+async def check_update_status(request: Request, user=USER):
+    return await _update_status_response(request, user, force=True)
+
+
+@router.post("/update-status/ignore")
+async def ignore_update_status(request: Request, user=USER):
+    result = await ignore_update(request.app.state.db, user.id)
+    enabled = await get_setting(request.app.state.db, "update_auto_check", True)
+    result["auto_check_enabled"] = enabled
+    await request.app.state.logs.audit("update.ignore", user.id, {
+        "ignored_version": result["ignored_version"],
+    })
+    return result
+
+
 @router.get("/settings")
 async def settings(request: Request, user=ADMIN):
     async with request.app.state.db.session() as s:
@@ -179,8 +222,17 @@ async def settings(request: Request, user=ADMIN):
 async def update_settings(data: dict, request: Request, user=ADMIN):
     if set(data) - set(DEFAULTS):
         raise HTTPException(422, "Unknown system setting")
+    if "translation_config" in data:
+        try:
+            data["translation_config"] = normalize_translation_config(data["translation_config"])
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     result = await settings(request, user) | data
-    for key in ("registration_enabled", "token_auth_enabled", "refresh_enabled"):
+    try:
+        result["translation_config"] = normalize_translation_config(result["translation_config"])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    for key in ("registration_enabled", "token_auth_enabled", "refresh_enabled", "update_auto_check"):
         if not isinstance(result[key], bool):
             raise HTTPException(422, key + " must be a boolean")
     for key in ("jwt_days", "idle_seconds", "log_retention_days"):

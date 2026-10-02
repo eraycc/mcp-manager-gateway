@@ -119,7 +119,8 @@ async def test_frontend_workflows_and_mobile(running_gateway, monkeypatch):  # n
             for _ in range(11):
                 assert (await user_web.post("/api/v1/auth/login", json={"username": "browser-user", "password": "browser-password123"})).status_code == 200
 
-        await page.get_by_role("button", name="退出", exact=True).click()
+        await page.locator('summary[aria-label="账户菜单"]').click()
+        await page.locator(".account-menu").get_by_role("button", name="退出登录", exact=True).click()
         await page.get_by_label("用户名", exact=True).fill("browser-user")
         await page.get_by_label("密码", exact=True).fill("browser-password123")
         await page.get_by_role("button", name="登录", exact=True).click()

@@ -162,7 +162,11 @@ async def test_navigation_protocol_and_import_wizard(running_gateway, monkeypatc
         await page.get_by_role("dialog", name="导入结果", exact=True).get_by_role("button", name="关闭").click()
         assert (await web.get("/api/v1/mcps")).json()["total"] == 6
 
-        await page.get_by_role("button", name="切换主题", exact=True).click()
+        await page.locator('summary[aria-label="显示模式"]').click()
+        await page.locator(".action-menu-panel").filter(has_text="显示模式").get_by_role(
+            "button", name="深色", exact=True
+        ).click()
+        await expect(page.locator("body")).to_have_class(__import__("re").compile("dark"))
         await page.set_viewport_size({"width": 390, "height": 844})
         await page.get_by_role("button", name="打开导航", exact=True).click()
         await page.locator(".collapse-toggle").click()
