@@ -51,8 +51,8 @@ git status --short
 
 用户可见行为变化时同时更新：
 
-1. 根 `README.md` 的简明说明；
-2. `wiki/` 中对应详细文档；
+1. 根 `README.md` 与 `README.zh-CN.md` 的简明说明；
+2. `wiki/` 中对应详细文档，并保持 README、Wiki 首页和专题文档之间可导航；
 3. `AGENTS.md` 中影响 Agent 行为的硬规则；
 4. CLI `--help` 或控制台提示。
 

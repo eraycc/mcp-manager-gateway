@@ -222,7 +222,7 @@ uv build
 - 数据库迁移：`src/mcp_manager/migrations/`
 - 测试：`tests/`
 - 公开文档：`wiki/`
-- 用户入口文档：`README.md`
+- 用户入口文档：英文 `README.md`、中文 `README.zh-CN.md`
 
 ### 公开文档规则
 
@@ -230,7 +230,7 @@ uv build
 - 不链接未公开的开发过程目录；
 - 不包含个人用户名、真实本机路径、真实 Token、密钥或内部环境描述；
 - 路径、域名和凭据统一使用明显占位符；
-- 用户可见行为变化时同步更新 `README.md` 与 `wiki/`。
+- 用户可见行为变化时同步更新 `README.md`、`README.zh-CN.md` 与 `wiki/`，并保持三者互链。
 
 ### 实现原则
 

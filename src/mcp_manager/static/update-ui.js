@@ -101,7 +101,7 @@ export function updateAboutPanel({about,state,onCheck,onIgnore,autoCheckNode}){
   current=next||current;
   latest.textContent=current.latest_version||'—';
   status.replaceChildren(statusNode(current));
-  actions.replaceChildren(button('检查更新',onCheck),current.update_available?button('跳过本次更新',onIgnore):null);
+  actions.replaceChildren(button('检查更新',onCheck),...(current.update_available?[button('跳过本次更新',onIgnore)]:[]));
  };
  panel.syncUpdateState(current);
  return panel;

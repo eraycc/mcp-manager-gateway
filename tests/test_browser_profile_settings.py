@@ -162,7 +162,9 @@ async def test_settings_about_helpers_and_responsive_title(running_gateway):
             await expect(page.locator(f'summary[aria-label="{label}"]')).to_be_visible()
         approval_path = await page.locator('a[aria-label="MCP 审批"] svg path').get_attribute("d")
         logs_path = await page.locator('a[aria-label="调用日志"] svg path').get_attribute("d")
+        settings_path = await page.locator('a[aria-label="系统设置"] svg path').get_attribute("d")
         assert approval_path != logs_path
+        assert settings_path == "M4 21v-7 M4 10V3 M12 21v-9 M12 8V3 M20 21v-5 M20 12V3 M1 14h6 M9 8h6 M17 16h6"
         await page.locator('summary[aria-label="显示模式"]').click()
         theme_menu = page.locator(".action-menu-panel").filter(has_text="显示模式")
         for label in ("浅色", "深色", "系统"):
@@ -240,6 +242,7 @@ async def test_settings_about_helpers_and_responsive_title(running_gateway):
             await expect(link).to_have_attribute("href", href)
             await expect(link).to_have_attribute("rel", "noopener noreferrer")
         await about.get_by_role("button", name="跳过本次更新", exact=True).click()
+        await expect(about.get_by_text("null", exact=True)).to_have_count(0)
         await expect(page.locator('a[aria-label="系统设置"] .notification-dot')).to_have_count(0)
         await about.get_by_label("自动检测更新", exact=True).uncheck()
         async with page.expect_response(

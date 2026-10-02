@@ -1,119 +1,121 @@
 # MCP Manager Gateway
 
-> 让 MCP 像 Skills 一样按需发现、按需启动：Agent 只看见一个稳定入口，需要时再找到并调用真正的工具。
+> Make MCP work like Skills: discover capabilities progressively, start servers only when needed, and give every agent one stable gateway.
 
 [![PyPI](https://img.shields.io/pypi/v/mcp-manager-gateway)](https://pypi.org/project/mcp-manager-gateway/)
 [![Python](https://img.shields.io/pypi/pyversions/mcp-manager-gateway)](https://pypi.org/project/mcp-manager-gateway/)
 [![License](https://img.shields.io/github/license/eraycc/mcp-manager-gateway)](LICENSE)
 
-📚 [完整公开文档与运维指南](wiki/README.md)
+English | [简体中文](README.zh-CN.md) | [Documentation Wiki](wiki/README.md)
 
-MCP 很有用，但 MCP 越配越多以后，问题也会一起放大：
+MCP servers are useful, but a large MCP configuration creates a new set of problems:
 
-- 每个 Agent 启动时都要连接大量 MCP，启动越来越慢；
-- 全量工具定义被提前塞进上下文，真正开始工作前就消耗大量 token；
-- 很多 MCP 平时根本用不到，却仍然常驻、占用进程和连接；
-- 每换一个 Agent 都要重新复制、修改和维护配置；
-- Agent 能读懂现有配置，却无法一次性提交给人审核，只能由人逐项手工录入。
+- every agent connects to many servers at startup, making startup slower;
+- complete tool schemas consume context before the agent has done any work;
+- rarely used servers stay alive and consume processes and connections;
+- each client needs another copy of the same configuration;
+- agents can understand existing configuration, but users still have to recreate services one by one.
 
-MCP Manager Gateway（简称 **MMG**）把这些 MCP 收到一个网关后面。Agent 默认只需要几个发现与调用工具；搜索目录不会启动下游服务，只有真正调用时才会懒启动对应 MCP。管理员可以在 Web 控制台统一配置、授权、测试、审计和管理生命周期。
+MCP Manager Gateway, or **MMG**, puts those servers behind one gateway. An agent sees a small discovery surface, searches for the capability it needs, reads the exact schema, and calls the selected tool. Catalog operations do not start downstream services; a `lazy` server starts on its first real call.
 
-~~~
+~~~text
 Agent / IDE
-    │ 只配置一次 MMG
+    │ configure MMG once
     ▼
 MCP Manager Gateway
-    ├── 搜索 MCP 与工具（不启动下游）
-    ├── 精确调用（需要时才启动）
-    ├── Token / 用户 / 权限 / OAuth
-    └── 提议 → 人工审核 → 测试 → 批准
+    ├── discover MCPs and tools without starting them
+    ├── call an exact tool and start it only when required
+    ├── manage users, tokens, permissions, OAuth, and lifecycle
+    └── agent proposal → human review → real test → approval
             │
             ├── Filesystem MCP
             ├── Database MCP
             ├── Browser MCP
-            └── 其他 stdio / HTTP / SSE / REST 服务
+            └── other stdio / HTTP / SSE / REST services
 ~~~
 
-## 核心价值
+## Why MMG
 
-### 更快、更轻的 Agent 启动
+### Faster, smaller agent startup
 
-按需发现模式默认只向 Agent 暴露 3 个核心网关工具，而不是一次注入所有下游 MCP 的全部 Schema。Agent 先搜索，再读取目标工具的完整参数定义，最后精确调用。
+On-demand discovery exposes three core gateway tools instead of injecting every downstream tool schema into the initial context. The agent first finds an MCP, then retrieves the full schema for a relevant tool, and finally invokes its exact gateway name.
 
-这是一种和 Skills 相似的渐进式披露：先知道“有哪些能力”，需要时再展开细节。
+This is progressive disclosure for MCP: reveal what exists first, then load detail only when it is useful. See [Progressive discovery](wiki/concepts/progressive-discovery.md).
 
-### 真正的懒加载与懒启动
+### Real lazy loading and lazy startup
 
-查询 MCP、搜索工具和翻页都不会启动下游服务。`lazy` 服务只在第一次业务调用时启动，并在安全的空闲周期后回收；常用服务也可以设为 `eager` 预热，不需要的服务可以设为 `disabled`。
+Listing MCPs, searching tools, and paging through the catalog never starts a downstream service. A `lazy` service starts on its first business call and can be reclaimed after an idle period. Frequently used services can be `eager`; unavailable services can be `disabled`.
 
-### 一次接入，多 Agent 长期复用
+### Configure once, reuse across agents
 
-每个 Agent 只连接 MMG，不再分别维护几十份 MCP 配置。服务、凭据、权限和运行状态由网关集中管理；同一套 MCP 可以安全地分配给不同用户和 Token。
+Each agent connects to MMG instead of carrying dozens of independent MCP definitions. The gateway centrally manages services, credentials, permissions, health, and runtime state. The same catalog can be safely assigned to different users and tokens.
 
-### Agent 提议，人类审批
+### Agent proposals with human approval
 
-迁移 MCP 时，不建议在管理台里逐条重建。给受信任的管理员 Token 开启“MCP 提议”权限后，Agent 可以：
+The recommended migration path is not to rebuild every MCP by hand. Give a trusted administrator token permission to submit MCP proposals, then ask an agent to:
 
-1. 读取 Codex、Claude、通用 JSON 或 DSH/Cordis 等现有配置；
-2. 将多个 MCP 标准化后批量提交到 MMG（单批最多 100 条）；
-3. 查询每条提议的审核状态；
-4. 由用户在 Web 控制台检查配置、补充隔离策略、真实测试并批准；
-5. 批准后立即进入网关目录，已连接的 Agent 无需重启；
-6. 全部验证通过并得到用户明确同意后，再删除旧配置中的 MCP 条目，只保留 MMG。
+1. Read existing Codex, Claude, generic JSON, or DSH/Cordis MCP configuration.
+2. Normalize and submit multiple MCPs to MMG in one batch, up to 100 proposals.
+3. Track proposal status.
+4. Let a human inspect configuration, choose isolation and lifecycle policy, run a real test, and approve.
+5. Use approved MCPs immediately through the gateway, without restarting connected agents.
+6. Remove old client-side MCP entries only after successful validation and explicit user approval.
 
-这让迁移从“人工复制配置”变为“Agent 整理并提议，人类掌握最终决定”。Agent 不能在提议阶段自行指定启动策略或隔离级别，也不能绕过审批直接创建服务。
+The agent prepares the migration; the human keeps the final decision. A proposal cannot choose privileged lifecycle or isolation fields and cannot bypass review. Read the full [MCP migration guide](wiki/guides/migrate-mcps.md) and the agent contract in [AGENTS.md](AGENTS.md).
 
-## 5 分钟开始使用
+## Install and start
 
-要求 Python 3.12 或更高版本。项目已发布到 [PyPI](https://pypi.org/project/mcp-manager-gateway/)，无需下载本地 wheel。
+MMG requires Python 3.12 or newer and is published on [PyPI](https://pypi.org/project/mcp-manager-gateway/).
 
-### 使用 uv 安装（推荐）
+### uv tool, recommended
 
 ~~~console
 uv tool install mcp-manager-gateway
 mmg
 ~~~
 
-升级：
+Upgrade a uv tool installation with:
 
 ~~~console
 uv tool upgrade mcp-manager-gateway
 ~~~
 
-### 使用 pip 安装
+### pip
 
-建议安装在独立虚拟环境中：
+Install into a dedicated virtual environment:
 
 ~~~console
 pip install --upgrade mcp-manager-gateway
 mmg
 ~~~
 
-安装后 `mmg`、`mcp-manager` 和 `mcp-manager-gateway` 是等价命令。默认启动地址为 <http://127.0.0.1:8765>。首次注册的账户是管理员，密码至少 10 个字符。
+`mmg`, `mcp-manager`, and `mcp-manager-gateway` are equivalent commands. The default address is <http://127.0.0.1:8765>. The first registered account becomes the administrator; passwords must contain at least 10 characters.
 
-首次启动会自动创建用户目录、`.env`、SQLite 数据库和密钥：
+On first start, MMG creates its configuration, SQLite database, and runtime data under:
 
-- Windows：`%USERPROFILE%\.mcp-manager`
-- Linux / macOS：`~/.mcp-manager`
+- Windows: `%USERPROFILE%\.mcp-manager`
+- Linux and macOS: `~/.mcp-manager`
 
-需要修改端口时：
+To use another port:
 
 ~~~console
 mmg serve --port 8766
 ~~~
 
-## 把 Agent 接到 MMG
+For source and container options, see [Installation](wiki/getting-started/installation.md) and [Quick start](wiki/getting-started/quick-start.md).
 
-先在 Web 控制台中创建访问 Token。个人中心会根据当前地址生成可直接复制的 HTTP、stdio、Codex 和通用客户端配置。
+## Connect an agent
 
-统一的 Streamable HTTP 端点是：
+Create an access token in the Web console. The profile page generates copy-ready HTTP, stdio, Codex, and generic client configuration for the current gateway address.
+
+The Streamable HTTP endpoint is:
 
 ~~~text
 http://127.0.0.1:8765/mcp
-Authorization: Bearer mcpm_你的Token
+Authorization: Bearer mcpm_YOUR_TOKEN
 ~~~
 
-不支持远程 HTTP MCP 的客户端可使用 stdio 桥接：
+For clients that cannot connect to a remote HTTP MCP, use the stdio bridge:
 
 ~~~json
 {
@@ -122,114 +124,76 @@ Authorization: Bearer mcpm_你的Token
       "command": "mmg",
       "args": ["stdio", "--url", "http://127.0.0.1:8765"],
       "env": {
-        "MCP_MANAGER_TOKEN": "mcpm_你的Token"
+        "MCP_MANAGER_TOKEN": "mcpm_YOUR_TOKEN"
       }
     }
   }
 }
 ~~~
 
-桥接进程只负责连接网关；所有下游 MCP 仍由 MMG 统一运行和回收。
+The bridge only connects the client to MMG. Downstream MCP processes still belong to the gateway and follow its lifecycle rules. See [Connect clients](wiki/guides/connect-clients.md).
 
-## 推荐迁移方式：让 Agent 批量提议
+## Recommended migration workflow
 
-### 1. 开启受控的提议入口
+1. Create an administrator token and enable the MCP proposal permission only for the migration.
+2. Ask the agent to read the current client configuration and batch-submit proposals without changing the source file.
+3. Review each proposal under **MCP Approvals**. Check commands, URLs, environment variables, directory access, and credentials.
+4. Choose `lazy`, `eager`, or `disabled`, select the required isolation, and run a real test.
+5. Approve the service, then verify discovery and one representative call through MMG.
+6. After every target is approved and working, explicitly authorize the agent to remove only the migrated entries from the old configuration.
 
-在 Web 控制台创建管理员 Token，并仅为迁移用途开启“MCP 提议”权限。普通用户 Token 看不到提议工具。
+A useful instruction for an agent is:
 
-### 2. 给 Agent 明确任务
+> Read the MCP configuration in my current client, normalize it, and batch-submit it as MMG proposals. Do not edit the original configuration. Wait for my review, testing, and approval. Remove migrated entries only after I explicitly approve cleanup.
 
-可以直接告诉 Agent：
+Keep a backup, preserve unrelated settings, and never remove the MMG connection itself.
 
-> 读取我当前客户端中的 MCP 配置，转换为 MMG 提议并批量提交。不要修改原配置；等待我在控制台审核、测试和批准后，再检查迁移状态。只有在我明确同意后，才能删除旧 MCP 配置，只保留 MMG。
+## Progressive tool use
 
-更完整的 Agent 操作约束见 [AGENTS.md](AGENTS.md)。
-
-### 3. Agent 提交标准提议
-
-Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量参数：
-
-~~~json
-{
-  "proposals": [
-    {
-      "name": "Example Filesystem",
-      "slug": "example-filesystem",
-      "description": "访问指定项目目录",
-      "tags": ["filesystem", "development"],
-      "transport": "stdio",
-      "config": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
-      },
-      "source": "codex-config",
-      "purpose": "迁移现有开发工具",
-      "declared_capabilities": ["读取和管理项目文件"],
-      "requested_permissions": ["访问 /workspace"]
-    }
-  ]
-}
-~~~
-
-提议不会直接创建或启动 MCP。`mode`、`isolation` 和 `config_isolation` 是审批阶段由人决定的字段，Agent 不应把它们塞进提议。
-
-### 4. 人类审核与真实测试
-
-打开“MCP 审批”页面，逐项检查命令、地址、环境变量、目录权限和凭据；根据风险设置：
-
-- 运行策略：`lazy` / `eager` / `disabled`；
-- 实例隔离：服务、用户或会话级；
-- OAuth 配置隔离；
-- 测试参数与预期结果。
-
-测试通过后批准。批准时 MMG 会再次校验相同配置，再将服务加入可用目录。
-
-### 5. 验证后再精简旧配置
-
-让 Agent 查询提议状态，并通过 MMG 搜索、调用已批准工具。只有当所有目标 MCP 均已批准且验证成功，并且用户明确授权清理时，Agent 才能删除旧客户端配置中的对应 MCP 条目。
-
-保留备份，不删除无关配置，不删除 MMG 自身。完成后，每个 Agent 只需保留一个网关入口。
-
-详细导入规则见 [迁移已有 MCP](wiki/guides/migrate-mcps.md)。
-
-## Agent 如何渐进式使用工具
-
-按需发现模式的标准顺序是：
-
-| 工具 | 用途 |
+| Tool | Purpose |
 | --- | --- |
-| `gateway_search_mcps` | 搜索或列出当前 Token 有权访问的 MCP |
-| `gateway_search_tools` | 获取目标工具的完整 `inputSchema` 和精确 `gateway_name` |
-| `gateway_call` | 使用精确名称和符合 Schema 的参数执行工具 |
-| `gateway_list_resources` | 可选：列出资源、提示词和模板 |
-| `gateway_read_resource` | 可选：读取精确资源 URI |
-| `gateway_mcp_proposals` | 可选：管理员 Token 批量提交或查询 MCP 提议 |
+| `gateway_search_mcps` | Find MCPs visible to the current token |
+| `gateway_search_tools` | Return the full `inputSchema` and exact `gateway_name` |
+| `gateway_call` | Invoke a tool with its exact name and schema-valid arguments |
+| `gateway_list_resources` | Optionally list resources, prompts, and templates |
+| `gateway_read_resource` | Optionally read an exact resource URI |
+| `gateway_mcp_proposals` | Optionally submit or inspect proposals with an authorized administrator token |
 
-一个可靠的 Agent 不应猜测工具名或参数：先搜索 MCP，再搜索工具，最后使用返回的精确名称调用。搜索和目录分页不会唤醒 `lazy` 服务。
+Reliable agents do not guess tool names or arguments: search for the MCP, retrieve the tool schema, and call the exact returned name. Discovery and pagination do not wake lazy services. See the [Gateway tool reference](wiki/reference/gateway-tools.md).
 
-[渐进式发现](wiki/concepts/progressive-discovery.md)解释了搜索、分页、完整 Schema 与精确路由的契约。
+## Web console languages
 
-## 管理能力概览
+MMG supports optional browser-side interface translation:
 
-- **多种接入方式**：stdio、Streamable HTTP、旧 SSE、REST 转 MCP；
-- **统一导入**：通用 JSON、Codex TOML、Claude、DSH Cordis/registry；
-- **授权边界**：用户、Token、匿名范围和 MCP 分配相互独立；
-- **OAuth 隔离**：个人凭据、能力目录和运行实例按用户隔离；
-- **生命周期**：`lazy`、`eager`、`disabled`，支持失败状态与恢复；
-- **运行隔离**：共享、用户和会话实例；
-- **可观察性**：调用日志、审计日志、后台任务、缓存与失败原因；
-- **控制台体验**：浅色、深色或跟随系统，统一的账户菜单和清晰的功能图标；
-- **可选网页翻译**：多语言切换、通道选择、私有服务、忽略规则、术语与导入导出；
-- **版本提醒**：从 PyPI 检测新版本，可关闭自动检测并保留手动检查，按用户保存提醒与忽略状态，不自动修改安装；
-- **工具检索**：关键词、拼写模糊匹配，以及可选的 OpenAI 兼容 embedding；
-- **安全审批**：Agent 提议、配置编辑、真实测试、批准或拒绝；
-- **数据后端**：默认 SQLite，也支持 MySQL。
+1. An administrator opens **System Settings → Translation Settings**.
+2. Enable **Global Web Translation**, choose the source language and translation service, then save.
+3. A language control appears in the top-right corner.
+4. Choose the target language there; the current page is translated immediately.
 
-## 配置与数据
+The selected target language is saved in the current browser profile. On later visits and sign-ins, MMG automatically applies that language while translation remains enabled. The global enable switch is stored as a gateway setting; the target language is browser-specific, so different browsers can choose independently.
 
-环境变量优先于用户目录中的 `.env`。源码目录和当前工作目录下的 `.env` 不会被自动读取。完整示例见 [.env.example](.env.example)。
+Browser translation can send visible page text to the configured translation provider. Use a reviewed private provider for sensitive deployments, or keep translation disabled. Configuration, cache controls, and provider details are covered in [Interface translation and update checks](wiki/guides/interface-translation-and-updates.md).
 
-常用配置：
+## Administration overview
+
+- stdio, Streamable HTTP, legacy SSE, and REST-to-MCP transports;
+- generic JSON, Codex TOML, Claude, and DSH Cordis/registry import;
+- independent user, token, anonymous-scope, and MCP assignment controls;
+- `lazy`, `eager`, and `disabled` lifecycle modes;
+- shared, per-user, and per-session runtime isolation;
+- OAuth isolation for personal credentials and runtime instances;
+- call logs, audit logs, background jobs, caches, and failure diagnostics;
+- light, dark, and system themes;
+- optional translation with provider and ignore-rule controls;
+- optional PyPI update detection, with automatic checks enabled by default and manual checks always available;
+- keyword and fuzzy tool search, with optional OpenAI-compatible embeddings;
+- SQLite by default and optional MySQL.
+
+See [Manage services](wiki/guides/manage-services.md), [Runtime and lifecycle](wiki/concepts/runtime-and-lifecycle.md), and [Security model](wiki/security/security-model.md).
+
+## Configuration and deployment
+
+Environment variables override the user-home `.env`. MMG does not automatically load `.env` from the source tree or current working directory. Start from [.env.example](.env.example).
 
 ~~~dotenv
 HOST=127.0.0.1
@@ -239,47 +203,35 @@ COOKIE_SECURE=false
 DATABASE_URL=
 ~~~
 
-可通过 `MCP_MANAGER_HOME` 或 `mmg --home /path serve` 指定另一套配置和数据。默认数据包括数据库、`secret.key`、能力缓存、任务状态、调用日志和审计日志。
+Use `MCP_MANAGER_HOME` or `mmg --home /path serve` to select another configuration and data directory. Back up the complete data directory before upgrades or migration.
 
-备份时必须同时保留数据目录、`.env` 和 `secret.key`；密钥丢失后，已有密文凭据无法解密。
-
-## Docker 部署
+Start the included container deployment with:
 
 ~~~console
 docker compose up --build -d
 ~~~
 
-默认仅绑定 `127.0.0.1:8765`，数据保存到命名卷 `mcp-manager-data`。远程或生产环境建议使用 HTTPS 反向代理，并设置正确的 `PUBLIC_URL` 与 `COOKIE_SECURE=true`。
+The default bind address is local-only. For remote or production use, place MMG behind an HTTPS reverse proxy and set `PUBLIC_URL` and `COOKIE_SECURE=true` correctly. MMG is currently designed as a single gateway runtime; do not share one downstream process scheduler across multiple workers or replicas.
 
-MMG 当前按单节点、单网关运行时设计。不要用多个 worker 或多个副本共享同一套下游进程调度。
+Read [Configuration](wiki/operations/configuration.md), [Deployment and upgrades](wiki/operations/deployment-and-upgrades.md), and [Backup and migration](wiki/operations/backup-and-migration.md).
 
-## 升级与维护
+## Upgrades
 
-软件包升级由安装方式决定：
+Upgrade with the mechanism that installed MMG:
 
 ~~~console
-# uv tool 安装
+# uv tool
 uv tool upgrade mcp-manager-gateway
 
-# pip 虚拟环境安装
+# pip virtual environment
 pip install --upgrade mcp-manager-gateway
 ~~~
 
-源码和 Docker 用户应分别使用 Git + uv 或重新构建/拉取镜像。`mmg upgrade` 只执行数据库 Schema 迁移，不会更新软件包；服务启动通常会自动完成数据库初始化。
+Source and container installations should be updated through Git plus uv or by rebuilding/pulling the relevant image. `mmg upgrade` performs database schema migration; it does not update the installed Python package.
 
-完整升级矩阵见 [部署与升级](wiki/operations/deployment-and-upgrades.md)。
+Update detection in **System Settings → About** only reports availability. It never modifies the installation. Automatic checks can be disabled while the manual **Check for Updates** action remains available.
 
-常用维护命令：
-
-~~~console
-mmg --version
-mmg --help
-mmg rebuild-logs
-mmg migrate-db --help
-mmg migrate-home --help
-~~~
-
-## 本地开发
+## Development
 
 ~~~console
 uv sync --frozen --group dev
@@ -288,26 +240,24 @@ node --test tests/frontend/core.test.mjs
 uv build
 ~~~
 
-- 后端：`src/mcp_manager/`
-- 前端静态资源：`src/mcp_manager/static/`
-- 数据库迁移：`src/mcp_manager/migrations/`
-- 测试：`tests/`
-- 传输插件说明：[传输插件](wiki/development/transport-plugins.md)
-- 运行时设计：[运行时与生命周期](wiki/concepts/runtime-and-lifecycle.md)
-- 开发与验证：[参与开发](wiki/development/contributing.md)
-- CLI 参考：[命令行参考](wiki/reference/cli.md)
+Contributor guidance is in [Contributing](wiki/development/contributing.md); transport extension details are in [Transport plugins](wiki/development/transport-plugins.md).
 
-完整公开文档见 [Wiki 首页](wiki/README.md)。运行实例的 OpenAPI 页面位于 `http://<MMG_HOST>:<PORT>/docs`。
+## Documentation map
 
-## 安全边界
+- [Documentation Wiki](wiki/README.md): the public documentation index
+- [Installation](wiki/getting-started/installation.md) and [Quick start](wiki/getting-started/quick-start.md)
+- [Client connections](wiki/guides/connect-clients.md) and [MCP migration](wiki/guides/migrate-mcps.md)
+- [Progressive discovery](wiki/concepts/progressive-discovery.md) and [Runtime lifecycle](wiki/concepts/runtime-and-lifecycle.md)
+- [Configuration](wiki/operations/configuration.md), [Deployment](wiki/operations/deployment-and-upgrades.md), and [Troubleshooting](wiki/troubleshooting/common-issues.md)
+- [CLI reference](wiki/reference/cli.md) and [Gateway tool reference](wiki/reference/gateway-tools.md)
+- [Agent instructions](AGENTS.md)
+- [简体中文 README](README.zh-CN.md)
 
-MCP 配置可以启动本地进程、访问网络和读取数据，应当视为管理员权限。MMG 提供审核、授权、隔离、脱敏和加密存储，但不能把不受信任的 MCP 自动变成安全程序。
+## Security
 
-- 使用最小权限的运行账户和 Token；
-- 提议中不要明文提交真实密钥；
-- 对不同信任域使用不同账户或容器；
-- 调用有副作用的工具前先核对参数；
-- `outcome_unknown` 表示请求可能已经送达，Agent 不应自动重放。
+MCP configuration can start local processes, access networks, and read data. Treat service administration as privileged. Review proposed commands and permissions, use least-privilege accounts and tokens, isolate different trust domains, and verify arguments before invoking tools with side effects.
+
+An `outcome_unknown` result means a request may already have reached its destination. Agents must not automatically replay it.
 
 ## License
 

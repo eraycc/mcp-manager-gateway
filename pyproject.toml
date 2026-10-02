@@ -33,7 +33,7 @@ dev = ["pytest>=8.3", "pytest-asyncio>=0.25", "ruff>=0.9", "playwright>=1.50"]
 packages = ["src/mcp_manager"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/tests", "/README.md", "/pyproject.toml", "/uv.lock", "/.env.example", "/Dockerfile", "/compose.yaml", "/alembic.ini", "/deploy"]
+include = ["/src", "/tests", "/README.md", "/README.zh-CN.md", "/pyproject.toml", "/uv.lock", "/.env.example", "/Dockerfile", "/compose.yaml", "/alembic.ini", "/deploy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

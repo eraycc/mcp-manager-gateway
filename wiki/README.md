@@ -1,6 +1,6 @@
 # MCP Manager Gateway Wiki
 
-这里是 MCP Manager Gateway（MMG）的公开文档中心。项目根目录的 [README](../README.md) 用于快速理解价值和完成首次运行；本 Wiki 提供部署、迁移、运行机制和扩展开发的详细说明。
+这里是 MCP Manager Gateway（MMG）的公开文档中心。先阅读 [English README](../README.md) 或[简体中文 README](../README.zh-CN.md)了解项目价值并完成首次运行；本 Wiki 提供部署、迁移、运行机制和扩展开发的详细说明。两份 README 都会链接回本页，下面的索引继续连接各专题文档。
 
 ## 推荐阅读路径
 
