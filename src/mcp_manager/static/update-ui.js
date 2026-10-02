@@ -1,10 +1,38 @@
-import{el,button,check}from './core.js';
+import{el,button,check,dialog}from './core.js';
+
+const UPDATE_CACHE_KEY='mcp-update-state';
+const UPDATE_NOTICE_KEY='mcp-update-notice';
+
+function cachedShape(state={}){
+ return{
+  current_version:String(state.current_version||''),
+  latest_version:String(state.latest_version||''),
+  ignored_version:String(state.ignored_version||''),
+  checked_at:state.checked_at||null,
+  update_available:!!state.update_available,
+  notification_count:state.update_available?1:0,
+  check_error:'',
+ };
+}
+
+export function readCachedUpdateState(){
+ try{
+  const value=JSON.parse(localStorage.getItem(UPDATE_CACHE_KEY)||'null');
+  return value&&typeof value==='object'?cachedShape(value):undefined;
+ }catch{return undefined}
+}
+
+export function cacheUpdateState(state){
+ const value=cachedShape(state);
+ try{localStorage.setItem(UPDATE_CACHE_KEY,JSON.stringify(value))}catch{}
+ return value;
+}
 
 export function notificationDot(count=1){
  return el('span',{class:'notification-dot','aria-hidden':'true'},String(count));
 }
 
-export function syncUpdateNotifications(count=0){
+export function syncUpdateNotifications(count=0,state){
  const targets=[
   document.querySelector('.nav-link[href="#/settings"]'),
   document.querySelector('#settings_tab-tab-about .tab-label'),
@@ -13,6 +41,21 @@ export function syncUpdateNotifications(count=0){
   target.querySelector(':scope > .notification-dot')?.remove();
   if(count)target.append(notificationDot(count));
  }
+ if(state)document.querySelectorAll('.about-card').forEach(panel=>panel.syncUpdateState?.(state));
+}
+
+export function maybeNotifyUpdate(state){
+ if(!state?.update_available||!state.latest_version)return false;
+ const marker=String(state.current_version||'')+'->'+String(state.latest_version);
+ try{
+  if(localStorage.getItem(UPDATE_NOTICE_KEY)===marker)return false;
+  localStorage.setItem(UPDATE_NOTICE_KEY,marker);
+ }catch{}
+ dialog('发现新版本',el('div',{class:'stack update-dialog'},
+  el('p',{},'MCP Manager Gateway '+state.latest_version+' 已发布。'),
+  el('p',{class:'muted'},'当前版本：'+(state.current_version||'未知')+'。可前往“系统设置 → 关于”查看升级入口。')
+ ));
+ return true;
 }
 
 export function updateCheckSetting(enabled=true){
@@ -23,31 +66,43 @@ export function updateCheckSetting(enabled=true){
  };
 }
 
+function statusNode(current){
+ if(current.check_error)return el('p',{class:'update-status update-status-error',role:'alert'},'更新检测失败：'+current.check_error);
+ if(current.update_available)return el('p',{class:'update-status update-status-outdated'},'发现新版本 '+current.latest_version+'，请根据当前安装方式完成升级。');
+ if(current.latest_version&&current.ignored_version===current.latest_version)return el('p',{class:'update-status muted'},'已忽略版本 '+current.latest_version+'，仍可随时手动检查更新。');
+ if(current.latest_version)return el('p',{class:'update-status update-status-current'},'当前已经是最新版本。');
+ return el('p',{class:'update-status muted'},'尚未检查最新版本。');
+}
+
 export function updateAboutPanel({about,state,onCheck,onIgnore,autoCheckNode}){
- const current=state||{current_version:about.version,latest_version:'',update_available:false,notification_count:0,pypi_url:about.pypi_url,releases_url:about.releases_url};
+ let current=state||{current_version:about.version,latest_version:'',update_available:false,notification_count:0};
  const link=(label,url)=>el('a',{href:url,target:'_blank',rel:'noopener noreferrer',class:'about-link'},label);
- const status=current.check_error
-  ?el('p',{class:'error',role:'alert'},'更新检测失败：'+current.check_error)
-  :current.update_available
-   ?el('p',{class:'notice update-notice'},'发现新版本 '+current.latest_version+'，请根据当前安装方式完成升级。')
-   :el('p',{class:'muted'},current.latest_version?'当前已经是最新版本。':'尚未检查最新版本。');
- return el('section',{class:'card about-card'},
+ const latest=el('strong',{},current.latest_version||'—'),status=el('div'),actions=el('div',{class:'actions'});
+ const panel=el('section',{class:'card about-card'},
   el('div',{class:'about-heading'},
    el('div',{},el('h2',{},'MCP Manager Gateway'),el('p',{class:'muted'},'集中管理 MCP 服务与客户端连接。')),
    el('div',{class:'about-versions'},
     el('div',{class:'about-version'},el('span',{class:'muted'},'当前版本'),el('strong',{},about.version)),
-    el('div',{class:'about-version'},el('span',{class:'muted'},'最新版本'),el('strong',{},current.latest_version||'—'))
+    el('div',{class:'about-version'},el('span',{class:'muted'},'最新版本'),latest)
    )
   ),
   autoCheckNode,
   status,
-  el('div',{class:'actions'},button('检查更新',onCheck),current.update_available?button('跳过本次更新',onIgnore):null),
+  actions,
   el('div',{class:'about-links'},
    link('项目主页',about.project_url),
-   link('GitHub Releases',current.releases_url||about.releases_url),
-   link('PyPI 发布页',current.pypi_url||about.pypi_url),
+   link('GitHub Releases',about.releases_url),
+   link('PyPI 发布页',about.pypi_url),
    link('作者 '+about.author,about.author_url),
    link('问题反馈',about.issues_url)
   )
  );
+ panel.syncUpdateState=next=>{
+  current=next||current;
+  latest.textContent=current.latest_version||'—';
+  status.replaceChildren(statusNode(current));
+  actions.replaceChildren(button('检查更新',onCheck),current.update_available?button('跳过本次更新',onIgnore):null);
+ };
+ panel.syncUpdateState(current);
+ return panel;
 }

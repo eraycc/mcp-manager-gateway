@@ -347,6 +347,32 @@ async def sessions(request: Request, user=CURRENT_USER):
                      and row.auth_version == user.auth_version) for row in rows]
 
 
+@router.post("/me/sessions/revoke-others")
+async def revoke_other_sessions(request: Request, user=CURRENT_USER):
+    async with request.app.state.db.locked() as s:
+        user = await revalidate_user(request, s)
+        rows = (await s.scalars(select(AuthSession).where(
+            AuthSession.user_id == user.id,
+            AuthSession.id != request.state.session_id,
+        ))).all()
+        for item in rows:
+            item.revoked = True
+    return {"ok": True, "count": len(rows)}
+
+
+@router.post("/me/sessions/delete-others")
+async def delete_other_sessions(request: Request, user=CURRENT_USER):
+    async with request.app.state.db.locked() as s:
+        user = await revalidate_user(request, s)
+        rows = (await s.scalars(select(AuthSession).where(
+            AuthSession.user_id == user.id,
+            AuthSession.id != request.state.session_id,
+        ))).all()
+        for item in rows:
+            await s.delete(item)
+    return {"ok": True, "count": len(rows)}
+
+
 @router.delete("/me/sessions/{session_id}")
 async def revoke_session(session_id: str, request: Request, user=CURRENT_USER):
     async with request.app.state.db.locked() as s:

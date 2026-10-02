@@ -99,7 +99,11 @@ html,body,#app{min-height:100vh}html:has(body.dark){background:#101726}.shell{mi
 .tab-label{display:inline-flex;align-items:center;gap:6px}
 .about-versions{display:flex;gap:12px;flex-wrap:wrap}
 .update-notice{color:var(--ink)}
-.update-setting{padding:14px 16px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.update-setting{margin:20px 0 14px;padding:14px 16px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.update-status{margin:14px 0;padding:12px 14px;border-radius:8px;font-weight:650}
+.update-status-current{color:#166534;background:#dcfce7;border:1px solid #86efac}
+.update-status-outdated{color:#991b1b;background:#fee2e2;border:1px solid #fca5a5}
+.update-status-error{color:#991b1b;background:#fef2f2;border:1px solid #fecaca}
 .translation-settings textarea{min-height:100px}
 .translation-custom{padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
 @media(max-width:720px){

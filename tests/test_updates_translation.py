@@ -1,5 +1,5 @@
 """Update detection and translation settings contracts."""
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -7,13 +7,14 @@ import pytest
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
 from mcp_manager.translation import DEFAULT_TRANSLATION_CONFIG, normalize_translation_config
-from mcp_manager.updates import is_newer
+from mcp_manager.updates import AUTO_CHECK_INTERVAL, is_newer, read_update_state, write_update_state
 
 
 def test_version_comparison_and_translation_normalization():
     assert is_newer("1.0.11", "1.0.10")
     assert not is_newer("1.0.10", "1.0.10")
     assert not is_newer("1.0.9", "1.0.10")
+    assert AUTO_CHECK_INTERVAL == timedelta(days=7)
     config = normalize_translation_config({
         "enabled": True,
         "local_language": "chinese_simplified",
@@ -43,7 +44,7 @@ async def test_update_state_is_cached_ignored_and_force_refreshed(tmp_path, monk
     app = create_app(Settings(data_dir=tmp_path, database_url="", secret_key="update-test"))
     del app.state.protocol
     calls = []
-    versions = iter(["9.9.9", "10.0.0"])
+    versions = iter(["9.9.9", "10.0.0", "10.1.0", "10.2.0"])
 
     async def fake_fetch():
         calls.append(datetime.now(UTC))
@@ -72,6 +73,9 @@ async def test_update_state_is_cached_ignored_and_force_refreshed(tmp_path, monk
         assert first["latest_version"] == "9.9.9"
         assert first["update_available"] is True
         assert first["notification_count"] == 1
+        assert (await read_update_state(app.state.db, credentials["username"])) == {}
+        stored = await read_update_state(app.state.db, (await web.get("/api/v1/me")).json()["id"])
+        assert stored["current_version"] == first["current_version"]
         assert len(calls) == 1
 
         cached = (await web.get("/api/v1/update-status")).json()
@@ -97,6 +101,20 @@ async def test_update_state_is_cached_ignored_and_force_refreshed(tmp_path, monk
         assert refreshed["update_available"] is True
         assert refreshed["auto_check_enabled"] is False
         assert len(calls) == 2
+
+        assert (await web.patch("/api/v1/settings", json={"update_auto_check": True})).status_code == 200
+        user_id = (await web.get("/api/v1/me")).json()["id"]
+        expired_state = await read_update_state(app.state.db, user_id)
+        expired_state["checked_at"] = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+        await write_update_state(app.state.db, user_id, expired_state)
+        expired = (await web.get("/api/v1/update-status")).json()
+        assert expired["latest_version"] == "10.1.0"
+        assert len(calls) == 3
+
+        monkeypatch.setattr("mcp_manager.updates.VERSION", "10.1.0")
+        after_local_upgrade = (await web.get("/api/v1/update-status")).json()
+        assert after_local_upgrade["latest_version"] == "10.2.0"
+        assert len(calls) == 4
 
 
 @pytest.mark.asyncio

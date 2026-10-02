@@ -10,7 +10,7 @@ from .database import SystemSetting
 PYPI_JSON_URL = "https://pypi.org/pypi/mcp-manager-gateway/json"
 PYPI_PROJECT_URL = "https://pypi.org/project/mcp-manager-gateway/"
 RELEASES_URL = "https://github.com/eraycc/mcp-manager-gateway/releases"
-AUTO_CHECK_INTERVAL = timedelta(hours=6)
+AUTO_CHECK_INTERVAL = timedelta(days=7)
 
 
 def _version_key(value):
@@ -95,13 +95,15 @@ async def update_status(db, user_id, *, force=False):
     state = await read_update_state(db, user_id)
     current = public_update_state(state)
     now = datetime.now(UTC)
-    if not force and (current["update_available"] or _checked_recently(state, now)):
+    local_version_changed = state.get("current_version") != VERSION
+    if not force and not local_version_changed and _checked_recently(state, now):
         return current
     try:
         release = await fetch_latest_release()
     except (httpx.HTTPError, RuntimeError, ValueError) as exc:
         return public_update_state(state, error=str(exc))
     state.update({
+        "current_version": VERSION,
         "latest_version": release["version"],
         "pypi_url": release["pypi_url"],
         "releases_url": release["releases_url"],

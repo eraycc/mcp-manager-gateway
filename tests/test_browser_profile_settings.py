@@ -49,12 +49,16 @@ async def running_gateway(tmp_path, monkeypatch):
         sock.close()
 
 
-async def login(page, url):
+async def login(page, url, *, keep_update_dialog=False):
     await page.goto(url)
     await page.get_by_label("用户名", exact=True).fill("admin")
     await page.get_by_label("密码", exact=True).fill("password12345")
     await page.get_by_role("button", name="登录", exact=True).click()
     await expect(page.get_by_role("heading", name="仪表盘", exact=True)).to_be_visible()
+    update_dialog = page.get_by_role("dialog", name="发现新版本", exact=True)
+    await expect(update_dialog).to_be_visible(timeout=5000)
+    if not keep_update_dialog:
+        await update_dialog.get_by_role("button", name="关闭", exact=True).click()
 
 
 @pytest.mark.asyncio
@@ -114,12 +118,12 @@ async def test_profile_noncurrent_session_revoke_and_permanent_delete(running_ga
             device = page.locator(".session-row").filter(has_text="Session QA device")
             await expect(device).to_contain_text("登录 IP：127.0.0.1")
             await expect(device).to_contain_text("User-Agent：Session QA device")
-            await device.get_by_role("button", name="撤销会话", exact=True).click()
+            await page.get_by_role("button", name="撤销全部", exact=True).click()
             await page.get_by_role("button", name="确认执行", exact=True).click()
             await expect(device).to_contain_text("已撤销")
             await expect(device.get_by_role("button", name="撤销会话", exact=True)).to_have_count(0)
             assert (await other.get("/api/v1/me")).status_code == 401
-            await device.get_by_role("button", name="永久删除", exact=True).click()
+            await page.get_by_role("button", name="删除全部", exact=True).click()
             await page.get_by_role("button", name="确认执行", exact=True).click()
             await expect(device).to_have_count(0)
             # Permanent deletion also invalidates a still-active login.
@@ -147,8 +151,14 @@ async def test_settings_about_helpers_and_responsive_title(running_gateway):
         page = await browser.new_page(viewport={"width": 1280, "height": 900})
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
-        await login(page, url)
-        for label in ("切换语言", "显示模式", "账户菜单"):
+        await login(page, url, keep_update_dialog=True)
+        update_dialog = page.get_by_role("dialog", name="发现新版本", exact=True)
+        await expect(update_dialog).to_contain_text("99.0.0")
+        cached_update = await page.evaluate("JSON.parse(localStorage.getItem('mcp-update-state'))")
+        assert cached_update["latest_version"] == "99.0.0"
+        await update_dialog.get_by_role("button", name="关闭", exact=True).click()
+        await expect(page.locator('summary[aria-label="切换语言"]')).to_have_count(0)
+        for label in ("显示模式", "账户菜单"):
             await expect(page.locator(f'summary[aria-label="{label}"]')).to_be_visible()
         approval_path = await page.locator('a[aria-label="MCP 审批"] svg path').get_attribute("d")
         logs_path = await page.locator('a[aria-label="调用日志"] svg path').get_attribute("d")
@@ -173,7 +183,40 @@ async def test_settings_about_helpers_and_responsive_title(running_gateway):
         assert (await title.bounding_box())["width"] <= 440
         await page.get_by_role("tab", name="翻译设置", exact=True).click()
         await expect(page.get_by_role("heading", name="翻译设置", exact=True)).to_be_visible()
-        await expect(page.get_by_label("启用全局网页翻译", exact=True)).to_be_visible()
+        translation_toggle = page.get_by_label("启用全局网页翻译", exact=True)
+        await expect(translation_toggle).to_be_visible()
+        await expect(page.get_by_label("默认目标语言", exact=True)).to_have_count(0)
+        await page.evaluate("""() => {
+          localStorage.setItem('hash_english_1','one');
+          localStorage.setItem('hash_japanese_2','two');
+          localStorage.setItem('mcp-translation-target','japanese');
+          window.translationCalls=[];
+          window.translate={
+            ignore:{class:[],id:[],tag:[],text:[]},
+            language:{setLocal:v=>translationCalls.push('local:'+v),clearCacheLanguage:()=>translationCalls.push('clear')},
+            service:{use:()=>{}},listener:{start:()=>{},stop:()=>translationCalls.push('stop')},
+            whole:{enableAll:()=>{}},execute:()=>translationCalls.push('execute'),
+            changeLanguage:v=>translationCalls.push('change:'+v)
+          };
+        }""")
+        await page.get_by_role("button", name="清除翻译缓存", exact=True).click()
+        await expect(page.locator("#toast")).to_have_text("已清理 2 个翻译缓存")
+        await translation_toggle.check()
+        async with page.expect_response(
+            lambda response: response.url.endswith("/api/v1/settings")
+            and response.request.method == "PATCH"
+        ):
+            await page.get_by_role("button", name="保存设置", exact=True).click()
+        await expect(page.locator('summary[aria-label="切换语言"]')).to_be_visible()
+        await page.wait_for_function("translationCalls.includes('change:japanese')")
+        await page.get_by_label("启用全局网页翻译", exact=True).uncheck()
+        async with page.expect_response(
+            lambda response: response.url.endswith("/api/v1/settings")
+            and response.request.method == "PATCH"
+        ):
+            await page.get_by_role("button", name="保存设置", exact=True).click()
+        await expect(page.locator('summary[aria-label="切换语言"]')).to_have_count(0)
+        await page.wait_for_function("translationCalls.includes('stop') && translationCalls.includes('change:chinese_simplified')")
         await page.get_by_role("tab", name="运行与日志", exact=True).click()
         await expect(page.get_by_text("设为 0 时不因空闲超时回收服务。", exact=True)).to_be_visible()
         await expect(page.get_by_text("设为 0 时无限保留；设为 7 时自动清理超过 7 天的日志。", exact=True)).to_be_visible()
@@ -183,6 +226,7 @@ async def test_settings_about_helpers_and_responsive_title(running_gateway):
         metadata = (await web.get("/api/v1/about")).json()
         await expect(about.get_by_text(metadata["version"], exact=True)).to_be_visible()
         await expect(about.get_by_text("99.0.0", exact=True)).to_be_visible()
+        await expect(about.locator(".update-status-outdated")).to_contain_text("发现新版本 99.0.0")
         await expect(about.get_by_label("自动检测更新", exact=True)).to_be_checked()
         await expect(page.get_by_role("button", name="保存设置", exact=True)).to_be_visible()
         for label, href in [

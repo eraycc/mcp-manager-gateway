@@ -64,6 +64,30 @@ async def test_cookie_csrf_last_admin_and_session_revocation(clients):
     assert (await a.get("/api/v1/me")).status_code == 401
 
 
+async def test_bulk_session_actions_preserve_current_session(clients):
+    a, b, _db = clients
+    await signup(a, "admin")
+    await login(a, "admin")
+    await login(b, "admin")
+    await login(b, "admin")
+
+    revoked = await a.post("/api/v1/me/sessions/revoke-others")
+    assert revoked.status_code == 200
+    assert revoked.json()["count"] == 2
+    assert (await b.get("/api/v1/me")).status_code == 401
+    sessions = (await a.get("/api/v1/me/sessions")).json()
+    assert sum(item["current"] for item in sessions) == 1
+    assert all(item["revoked"] for item in sessions if not item["current"])
+
+    await login(b, "admin")
+    deleted = await a.post("/api/v1/me/sessions/delete-others")
+    assert deleted.status_code == 200
+    assert deleted.json()["count"] == 3
+    assert (await b.get("/api/v1/me")).status_code == 401
+    sessions = (await a.get("/api/v1/me/sessions")).json()
+    assert len(sessions) == 1 and sessions[0]["current"]
+
+
 async def test_user_delete_removes_only_personal_credential_settings(clients):
     a, b, db = clients
     await signup(a, "admin")

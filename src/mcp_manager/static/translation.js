@@ -61,6 +61,8 @@ export function normalizeTranslationConfig(value={}){
 }
 
 let enginePromise;
+const configuredIgnores=new WeakMap();
+
 export function loadTranslationEngine(){
  if(globalThis.translate)return Promise.resolve(globalThis.translate);
  if(enginePromise)return enginePromise;
@@ -78,23 +80,29 @@ export function loadTranslationEngine(){
  return enginePromise;
 }
 
-function resetArray(target){
- if(Array.isArray(target))target.splice(0,target.length);
+function configureIgnore(engine,key,values){
+ const target=engine.ignore?.[key];
+ if(!target||typeof target.push!=='function'||!values.length)return;
+ let state=configuredIgnores.get(engine);
+ if(!state){state=new Map();configuredIgnores.set(engine,state)}
+ const applied=state.get(key)||new Set();
+ for(const value of values){
+  if(applied.has(value))continue;
+  if(Array.isArray(target)&&target.includes(value)){applied.add(value);continue}
+  target.push(value);applied.add(value);
+ }
+ state.set(key,applied);
 }
 
 export async function applyTranslation(config,targetLanguage){
  const value=normalizeTranslationConfig(config);
  if(!value.enabled)return{enabled:false,warnings:[]};
- const engine=await loadTranslationEngine(),target=targetLanguage||value.target_language,warnings=[];
+ const engine=await loadTranslationEngine(),target=targetLanguage||'english',warnings=[];
  if(engine.selectLanguageTag)engine.selectLanguageTag.show=false;
  engine.language?.setLocal?.(value.local_language);
- engine.language?.setDefaultTo?.(target);
  engine.service?.use?.(value.service==='custom'?'translate.service':value.service);
  if(value.service==='custom'&&engine.request?.api)value.custom_host&&(engine.request.api.host=value.custom_host+'/');
- for(const key of ['class','id','tag','text']){
-  if(!engine.ignore?.[key])continue;
-  resetArray(engine.ignore[key]);engine.ignore[key].push(...value.ignore[key]);
- }
+ for(const key of ['class','id','tag','text'])configureIgnore(engine,key,value.ignore[key]);
  if(engine.nomenclature?.append&&value.terminology.length){
   engine.nomenclature.append(value.local_language,target,value.terminology.map(item=>item.source+'='+item.target).join('\n'));
  }
@@ -108,23 +116,35 @@ export async function applyTranslation(config,targetLanguage){
   else warnings.push('当前 translate.js 版本不支持 SSE，已自动使用普通请求。');
  }
  engine.execute?.();
+ engine.changeLanguage?.(target);
  return{enabled:true,target,warnings};
 }
 
 export async function changeTranslationLanguage(config,target){
  const value=normalizeTranslationConfig(config);
  if(!value.enabled)throw new Error('全局翻译当前已关闭，请由管理员在“翻译设置”中开启。');
- const engine=await loadTranslationEngine();
- engine.changeLanguage?.(target);
- return target;
+ return applyTranslation(value,target);
+}
+
+export async function disableTranslation(config){
+ const engine=globalThis.translate;
+ if(!engine)return false;
+ const value=normalizeTranslationConfig(config);
+ engine.listener?.stop?.();
+ engine.changeLanguage?.(value.local_language);
+ return true;
 }
 
 export async function clearTranslationCache(){
- globalThis.translate?.language?.clearCacheLanguage?.();
+ let count=0;
  try{
-  for(let index=localStorage.length-1;index>=0;index--){
+  const keys=[];
+  for(let index=0;index<localStorage.length;index++){
    const key=localStorage.key(index);
-   if(key&&/translate/i.test(key)&&!key.startsWith('mcp-translation'))localStorage.removeItem(key);
+   if(key&&key.startsWith('hash_'))keys.push(key);
   }
+  for(const key of keys){localStorage.removeItem(key);count++}
  }catch{}
+ globalThis.translate?.language?.clearCacheLanguage?.();
+ return count;
 }

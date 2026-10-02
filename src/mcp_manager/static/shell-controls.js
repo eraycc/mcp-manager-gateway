@@ -41,8 +41,8 @@ function themeMenu(onRefresh){
 
 function languageMenu(config){
  const box=el('details',{class:'action-menu'},summary('globe','切换语言'));
- const selected=localStorage.getItem('mcp-translation-target')||config.target_language;
- const input=el('select',{'aria-label':'目标语言',disabled:!config.enabled},...TRANSLATION_LANGUAGES.map(([value,label])=>el('option',{value},label)));
+ const selected=localStorage.getItem('mcp-translation-target')||'english';
+ const input=el('select',{'aria-label':'目标语言'},...TRANSLATION_LANGUAGES.map(([value,label])=>el('option',{value},label)));
  input.value=selected;
  input.onchange=()=>run(async()=>{
   localStorage.setItem('mcp-translation-target',input.value);
@@ -50,7 +50,7 @@ function languageMenu(config){
   result.warnings.forEach(message=>toast(message,'warning'));
   box.open=false;
  });
- box.append(el('div',{class:'action-menu-panel language-menu'},el('strong',{},'翻译为'),input,!config.enabled?el('small',{class:'muted'},'管理员尚未启用全局翻译。'):null));
+ box.append(el('div',{class:'action-menu-panel language-menu'},el('strong',{},'翻译为'),input));
  return box;
 }
 
@@ -63,5 +63,5 @@ function accountMenu(me,isAdmin,onLogout){
 }
 
 export function topActions({me,isAdmin,translationConfig,onLogout,onRefresh}){
- return el('div',{class:'top-actions'},languageMenu(translationConfig),themeMenu(onRefresh),accountMenu(me,isAdmin,onLogout));
+ return el('div',{class:'top-actions'},translationConfig.enabled?languageMenu(translationConfig):null,themeMenu(onRefresh),accountMenu(me,isAdmin,onLogout));
 }
