@@ -172,9 +172,11 @@ async def test_proposal_uses_shared_full_editor_and_global_secret_toggle(running
         await expect(dialog.get_by_label("OAuth 配置隔离", exact=True)).to_have_value("")
         secret = dialog.get_by_label("Client Secret", exact=True)
         await expect(secret).to_have_value("[REDACTED]")
+        await expect(secret).to_have_attribute("type", "password")
 
         await dialog.get_by_role("button", name="显示敏感字段", exact=True).click()
         await expect(secret).to_have_value("browser-secret")
+        await expect(secret).to_have_attribute("type", "text")
         await dialog.get_by_role("button", name="JSON 配置", exact=True).click()
         editor = dialog.get_by_label("完整配置 JSON", exact=False)
         assert "browser-secret" in await editor.input_value()
@@ -183,6 +185,7 @@ async def test_proposal_uses_shared_full_editor_and_global_secret_toggle(running
         assert "browser-secret" not in await editor.input_value()
 
         await dialog.get_by_role("button", name="表单配置", exact=True).click()
+        await expect(secret).to_have_attribute("type", "password")
         await dialog.get_by_label("描述（建议填写）", exact=False).fill("approved draft")
         await dialog.get_by_role("button", name="保存审批配置", exact=True).click()
         await expect(dialog).to_be_hidden()

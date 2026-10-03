@@ -11,6 +11,7 @@ export function translationSettings(config){
  let current=normalizeTranslationConfig(config);
  const enabled=check('启用全局网页翻译',current.enabled);
  const local=selectField('网页原始语言',current.local_language,TRANSLATION_LANGUAGES);
+ const target=selectField('默认目标语言',current.target_language,TRANSLATION_LANGUAGES);
  const service=selectField('翻译服务通道',current.service,[
   ['client.edge','client.edge（推荐，无需服务端）'],
   ['translate.service','translate.service 公共服务'],
@@ -38,7 +39,7 @@ export function translationSettings(config){
  const value=()=>normalizeTranslationConfig({
   enabled:enabled.input.checked,
   local_language:local.input.value,
-  target_language:current.target_language,
+  target_language:target.input.value,
   service:service.input.value,
   custom_host:host.input.value,
   sse_enabled:sse.input.checked,
@@ -54,7 +55,7 @@ export function translationSettings(config){
 
  const setValue=input=>{
   current=normalizeTranslationConfig(input);
-  enabled.input.checked=current.enabled;local.input.value=current.local_language;
+  enabled.input.checked=current.enabled;local.input.value=current.local_language;target.input.value=current.target_language;
   service.input.value=current.service;host.input.value=current.custom_host;sse.input.checked=current.sse_enabled;
   ignoreClass.input.value=lines(current.ignore.class);ignoreId.input.value=lines(current.ignore.id);
   ignoreTag.input.value=lines(current.ignore.tag);ignoreText.input.value=lines(current.ignore.text);
@@ -81,7 +82,7 @@ export function translationSettings(config){
  const node=el('section',{class:'card stack translation-settings'},
   el('div',{},el('h2',{},'翻译设置'),el('p',{class:'notice'},'页面翻译由 translate.js 提供。启用后，页面文字会按所选通道发送给对应翻译服务。')),
   enabled.node,
-  el('div',{class:'form-grid settings-grid'},local.node,service.node),
+  el('div',{class:'form-grid settings-grid'},local.node,target.node,service.node),
   customBox,
   el('section',{class:'stack'},el('h3',{},'忽略规则'),el('div',{class:'form-grid settings-grid'},ignoreClass.node,ignoreId.node,ignoreTag.node,ignoreText.node)),
   el('section',{class:'stack'},el('h3',{},'自定义术语'),terms.node),

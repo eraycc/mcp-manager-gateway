@@ -187,11 +187,12 @@ async def test_settings_about_helpers_and_responsive_title(running_gateway):
         await expect(page.get_by_role("heading", name="翻译设置", exact=True)).to_be_visible()
         translation_toggle = page.get_by_label("启用全局网页翻译", exact=True)
         await expect(translation_toggle).to_be_visible()
-        await expect(page.get_by_label("默认目标语言", exact=True)).to_have_count(0)
+        default_target = page.get_by_label("默认目标语言", exact=True)
+        await expect(default_target).to_have_value("english")
         await page.evaluate("""() => {
           localStorage.setItem('hash_english_1','one');
           localStorage.setItem('hash_japanese_2','two');
-          localStorage.setItem('mcp-translation-target','japanese');
+          localStorage.removeItem('mcp-translation-target');
           window.translationCalls=[];
           window.translate={
             ignore:{class:[],id:[],tag:[],text:[]},
@@ -203,6 +204,7 @@ async def test_settings_about_helpers_and_responsive_title(running_gateway):
         }""")
         await page.get_by_role("button", name="清除翻译缓存", exact=True).click()
         await expect(page.locator("#toast")).to_have_text("已清理 2 个翻译缓存")
+        await default_target.select_option("french")
         await translation_toggle.check()
         async with page.expect_response(
             lambda response: response.url.endswith("/api/v1/settings")
@@ -210,7 +212,20 @@ async def test_settings_about_helpers_and_responsive_title(running_gateway):
         ):
             await page.get_by_role("button", name="保存设置", exact=True).click()
         await expect(page.locator('summary[aria-label="切换语言"]')).to_be_visible()
+        language_target = page.get_by_label("目标语言", exact=True)
+        await expect(language_target).to_have_value("french")
+        await page.wait_for_function("translationCalls.includes('change:french')")
+        await page.locator('summary[aria-label="切换语言"]').click()
+        await language_target.select_option("japanese")
         await page.wait_for_function("translationCalls.includes('change:japanese')")
+        assert await page.evaluate("localStorage.getItem('mcp-translation-target')") == "japanese"
+        await page.get_by_label("默认目标语言", exact=True).select_option("german")
+        async with page.expect_response(
+            lambda response: response.url.endswith("/api/v1/settings")
+            and response.request.method == "PATCH"
+        ):
+            await page.get_by_role("button", name="保存设置", exact=True).click()
+        await expect(page.get_by_label("目标语言", exact=True)).to_have_value("japanese")
         await page.get_by_label("启用全局网页翻译", exact=True).uncheck()
         async with page.expect_response(
             lambda response: response.url.endswith("/api/v1/settings")

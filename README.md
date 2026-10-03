@@ -166,11 +166,11 @@ Reliable agents do not guess tool names or arguments: search for the MCP, retrie
 MMG supports optional browser-side interface translation:
 
 1. An administrator opens **System Settings → Translation Settings**.
-2. Enable **Global Web Translation**, choose the source language and translation service, then save.
-3. A language control appears in the top-right corner.
-4. Choose the target language there; the current page is translated immediately.
+2. Enable **Global Web Translation**, choose the source language, default target language, and translation service, then save.
+3. A language control appears in the top-right corner, initially selecting the configured default when this browser has no saved choice.
+4. Choose the actual target language there; the current page is translated immediately.
 
-The selected target language is saved in the current browser profile. On later visits and sign-ins, MMG automatically applies that language while translation remains enabled. The global enable switch is stored as a gateway setting; the target language is browser-specific, so different browsers can choose independently.
+The language selected from the top-right control is saved in the current browser profile and takes priority over the system default. On later visits and sign-ins, MMG automatically applies that saved selection while translation remains enabled. The default target language only initializes browsers that have no local choice, so different browsers can choose independently.
 
 Browser translation can send visible page text to the configured translation provider. Use a reviewed private provider for sensitive deployments, or keep translation disabled. Configuration, cache controls, and provider details are covered in [Interface translation and update checks](wiki/guides/interface-translation-and-updates.md).
 

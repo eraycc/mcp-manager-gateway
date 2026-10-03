@@ -1,5 +1,5 @@
 import{el,icon,button,toast,run,navigate}from './core.js';
-import{TRANSLATION_LANGUAGES,applyTranslation}from './translation.js';
+import{TRANSLATION_LANGUAGES,applyTranslation,preferredTranslationTarget}from './translation.js';
 
 const themePreference=()=>localStorage.getItem('mcp-theme')||'system';
 
@@ -41,7 +41,7 @@ function themeMenu(onRefresh){
 
 function languageMenu(config){
  const box=el('details',{class:'action-menu'},summary('globe','切换语言'));
- const selected=localStorage.getItem('mcp-translation-target')||'english';
+ const selected=preferredTranslationTarget(config);
  const input=el('select',{'aria-label':'目标语言'},...TRANSLATION_LANGUAGES.map(([value,label])=>el('option',{value},label)));
  input.value=selected;
  input.onchange=()=>run(async()=>{

@@ -78,6 +78,44 @@ async def test_editor_limits_session_isolation_to_stdio(running_gateway):  # noq
         await expect(isolation).to_have_value("user")
         await browser.close()
 
+@pytest.mark.asyncio
+async def test_service_editor_secret_toggle_changes_input_type(running_gateway):  # noqa: F811
+    app, _web, url, _token, _row = running_gateway
+    service_id = await seed_service(
+        app,
+        slug="service-secret-toggle",
+        name="Service Secret Toggle",
+        isolation="service",
+        auth={"type": "bearer", "token": "service-bearer-secret"},
+        mode="disabled",
+    )
+    async with async_playwright() as pw:
+        executable = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+        browser = await pw.chromium.launch(
+            headless=True,
+            executable_path=executable if os.path.exists(executable) else None,
+        )
+        page = await browser.new_page(viewport={"width": 1280, "height": 900})
+        await login(page, url)
+        await page.goto(url + "/#/mcps")
+        row = page.locator(f'tr[data-row-id="{service_id}"]')
+        await row.get_by_role("button", name="编辑", exact=True).click()
+        dialog = page.get_by_role(
+            "dialog", name="编辑服务 · Service Secret Toggle", exact=True
+        )
+        token = dialog.get_by_label("Bearer Token", exact=True)
+        await expect(token).to_have_value("[REDACTED]")
+        await expect(token).to_have_attribute("type", "password")
+
+        await dialog.get_by_role("button", name="显示敏感字段", exact=True).click()
+        await expect(token).to_have_value("service-bearer-secret")
+        await expect(token).to_have_attribute("type", "text")
+
+        await dialog.get_by_role("button", name="隐藏敏感字段", exact=True).click()
+        await expect(token).to_have_value("[REDACTED]")
+        await expect(token).to_have_attribute("type", "password")
+        await browser.close()
+
 
 @pytest.mark.asyncio
 async def test_profile_credential_action_matrix_and_disabled_filter(running_gateway):  # noqa: F811

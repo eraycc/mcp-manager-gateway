@@ -94,6 +94,15 @@ function configureIgnore(engine,key,values){
  state.set(key,applied);
 }
 
+export function preferredTranslationTarget(config){
+ const fallback=normalizeTranslationConfig(config).target_language;
+ try{
+  const saved=localStorage.getItem('mcp-translation-target');
+  if(saved)return saved;
+ }catch{}
+ return fallback;
+}
+
 export async function applyTranslation(config,targetLanguage){
  const value=normalizeTranslationConfig(config);
  if(!value.enabled)return{enabled:false,warnings:[]};
