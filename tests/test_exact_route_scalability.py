@@ -297,3 +297,27 @@ async def test_schema_validation_never_fetches_network_references(monkeypatch):
     assert fetched == []
     local = {"$defs": {"payload": {"type": "object"}}, "$ref": "#/$defs/payload"}
     await catalog.validate_tool_arguments({"inputSchema": local}, {})
+
+
+async def test_warm_exact_callbacks_do_not_reload_full_configuration_blobs(db_app, monkeypatch):
+    import re
+
+    from sqlalchemy import event
+
+    row, tools = await indexed_catalog(db_app, 1)
+    context, _identity = await gateway_context(db_app)
+    downstream(monkeypatch, db_app, tools)
+    arguments = {"name": alias(row.slug, tools[0]["name"]), "arguments": {}}
+    assert not (await invoke(db_app, context, "gateway_call", arguments)).is_error
+    statements = []
+    def trace(connection, cursor, statement, parameters, context, many):
+        if re.search(r"mcp_servers\.config(?:\s|,)", statement):
+            statements.append(statement)
+    event.listen(db_app.db.engine.sync_engine, "before_cursor_execute", trace)
+    try:
+        result = await invoke(db_app, context, "gateway_call", arguments)
+        assert not result.is_error, result
+        # One current target configuration for spec/materialization, not every ACL callback.
+        assert len(statements) <= 1
+    finally:
+        event.remove(db_app.db.engine.sync_engine, "before_cursor_execute", trace)

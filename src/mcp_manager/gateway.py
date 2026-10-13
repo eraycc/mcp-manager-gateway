@@ -522,7 +522,7 @@ class Gateway:
                 fresh_user, fresh_token, allowed = await self.principal(request, target_id=row.id)
             except HTTPException:
                 raise GatewayError("permission_revoked", "Gateway authorization changed") from None
-            fresh = await catalog.get(row.id)
+            fresh = await catalog.get(row.id, metadata_only=True)
             if (owner(fresh_user, fresh_token, request) != identity or row.id not in allowed
                     or fresh.revision != row.revision):
                 raise GatewayError("permission_revoked", "MCP permission or configuration changed")

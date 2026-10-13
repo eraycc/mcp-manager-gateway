@@ -427,7 +427,9 @@ class CatalogStore:
             return None
         name_hash = digest(gateway_name)
         async with self.db.session() as session:
-            statement = select(CatalogEntry, CatalogGeneration, McpServer).join(
+            statement = select(CatalogEntry, CatalogGeneration, McpServer).options(load_only(
+                McpServer.id, McpServer.slug, McpServer.revision, McpServer.mode, McpServer.isolation
+            )).join(
                 CatalogGeneration, CatalogGeneration.id == CatalogEntry.generation_id
             ).join(CatalogHead, CatalogHead.generation_id == CatalogGeneration.id).join(
                 McpServer, McpServer.id == CatalogGeneration.server_id

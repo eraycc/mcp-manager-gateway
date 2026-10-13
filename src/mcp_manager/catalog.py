@@ -145,9 +145,11 @@ class Catalog:
     def unseal(self, value):
         return json.loads(self.fernet.decrypt(value["sealed"])) if "sealed" in value else copy.deepcopy(value)
 
-    async def get(self, server_id):
+    async def get(self, server_id, *, metadata_only=False):
+        from sqlalchemy.orm import defer
+
         async with self.db.session() as s:
-            row = await s.get(McpServer, server_id)
+            row = await s.get(McpServer, server_id, options=[defer(McpServer.config)] if metadata_only else [])
         if not row:
             raise HTTPException(404, "MCP not found")
         return row
