@@ -3,7 +3,8 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from .catalog import SECRET_KEYS, restore, sanitize_diagnostic_error, web_authorizer
+from .catalog import restore, web_authorizer
+from .diagnostics import diagnostic_secrets, sanitize_diagnostic_error
 from .database import McpServer, SystemSetting, get_setting, invalidate_setting_cache
 from .identity import admin_user, current_user, effective_mcp_ids
 from .imports import deduplicate, normalize_import, scan_sources
@@ -154,22 +155,6 @@ async def export_mcps(data: dict, request: Request, user=ADMIN):
     return {"mcpServers": result}
 
 
-def diagnostic_secrets(value, parent=""):
-    values = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            lowered = key.lower()
-            if (
-                lowered in SECRET_KEYS or parent in {"env", "headers"}
-            ) and isinstance(item, (str, int, float)) and item:
-                values.append(str(item))
-            values.extend(diagnostic_secrets(item, lowered))
-    elif isinstance(value, list):
-        for item in value:
-            values.extend(diagnostic_secrets(item, parent))
-    return values
-
-
 def has_redacted(value):
     if value == "[REDACTED]":
         return True
@@ -218,8 +203,8 @@ async def diagnose(data: dict, request: Request, user=ADMIN):
         )
         try:
             return await runtime.discover(spec, lease.id)
-        except GatewayError as exc:
-            raise sanitize_diagnostic_error(exc, secrets) from exc
+        except Exception as exc:
+            raise sanitize_diagnostic_error(exc, secrets) from None
     finally:
         await runtime.release(lease.id)
 

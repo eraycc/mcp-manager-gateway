@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from .catalog import masked, restore, validate_slug, web_authorizer
 from .database import McpProposal, McpServer, now
+from .diagnostics import safe_gateway_error
 from .identity import admin_user
 from .runtime import GatewayError, ServerSpec
 from .transports import validate_service_config
@@ -431,11 +432,12 @@ async def run_proposal_test(request, proposal_id, user):
         ))
         raise
     except Exception as exc:
+        exc = safe_gateway_error(exc, config=payload["config"])
         error = str(getattr(exc, "detail", exc)) or type(exc).__name__
         await _persist_test_result(
             request, proposal_id, "failed", error=error, run_id=run_id, tested_revision=tested_revision
         )
-        raise
+        raise exc from None
     finally:
         if lease:
             await runtime.release(lease.id)

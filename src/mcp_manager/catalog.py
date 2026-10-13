@@ -18,6 +18,9 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from .credentials import catalog_owner, credential_owner
+from .diagnostics import SECRET_KEYS, safe_gateway_error
+from .diagnostics import diagnostic_cause as diagnostic_cause
+from .diagnostics import sanitize_diagnostic_error as sanitize_diagnostic_error
 from .database import ApiToken, McpServer, SystemSetting, User, invalidate_setting_cache, now
 from .identity import public as public_model
 from .identity import revalidate_user
@@ -25,11 +28,6 @@ from .jsonl_store import JsonlStore
 from .runtime import GatewayError, ServerSpec
 from .transports import validate_service_config
 
-SECRET_KEYS = {
-    "password", "current_password", "secret", "secret_key", "database_url",
-    "token", "access_token", "refresh_token", "client_secret",
-    "authorization", "cookie", "api_key", "value",
-}
 CAPABILITY_KEYS = ("tools", "resources", "prompts", "templates")
 FAILURE_DEFAULTS = {
     "runtime_status": "stopped",
@@ -75,60 +73,6 @@ def slug_base(name):
 def validate_slug(slug):
     if not isinstance(slug, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", slug) or "__" in slug:
         raise ValueError("Slug must contain 1–64 ASCII letters, digits, hyphens or single underscores")
-
-
-def diagnostic_cause(exc):
-    """Return the most specific downstream cause from wrapped failures."""
-    current = exc
-    while getattr(current, "__cause__", None) is not None:
-        current = current.__cause__
-    if isinstance(current, BaseExceptionGroup):
-        leaves = []
-
-        def collect(group):
-            for child in group.exceptions:
-                if isinstance(child, BaseExceptionGroup):
-                    collect(child)
-                else:
-                    leaves.append(diagnostic_cause(child))
-
-        collect(current)
-        return next(
-            (
-                item
-                for item in leaves
-                if getattr(getattr(item, "response", None), "status_code", None)
-            ),
-            leaves[-1] if leaves else current,
-        )
-    return current
-
-
-def sanitize_diagnostic_error(exc, secrets):
-    """Expose useful downstream type/status while redacting sensitive values."""
-    cause = diagnostic_cause(exc)
-    message = str(cause) or type(cause).__name__
-    for secret in sorted(
-        {str(value) for value in secrets if value}, key=len, reverse=True
-    ):
-        message = message.replace(secret, "[REDACTED]")
-    message = re.sub(
-        r"(?i)\b(?:authorization|cookie|set-cookie)\b[^;\r\n]*",
-        "[REDACTED]",
-        message,
-    )
-    message = re.sub(
-        r"(?i)([?&](?:code|access_token|refresh_token)=)[^&\s]+",
-        r"\1[REDACTED]",
-        message,
-    )
-    details = {
-        "error_type": type(cause).__name__,
-        "downstream_status": getattr(
-            getattr(cause, "response", None), "status_code", None
-        ),
-    }
-    return GatewayError("diagnosis_failed", message[:500], details)
 
 
 def alias(slug, name):
@@ -338,6 +282,7 @@ class Catalog:
         self._cache_failures.pop(key, None)
 
     def cache_failure(self, row, exc, user_id=None):
+        exc = safe_gateway_error(exc, config=self.unseal(row.config))
         if (
             self.runtime.versions.get(row.id, row.revision) != row.revision
             or getattr(exc, "code", "") in {"credential_changed", "revision_changed"}
@@ -386,6 +331,8 @@ class Catalog:
         return value
 
     async def record_start_failure(self, row, exc, user_id=None):
+        config = await self.credentials.materialize(row, user_id, require=False)
+        exc = safe_gateway_error(exc, config=config)
         code = getattr(exc, "code", "startup_failed")
         if code in {
             "credential_changed",
@@ -444,6 +391,8 @@ class Catalog:
         return exc
 
     async def record_refresh_failure(self, row, exc, user_id=None, *, had_ready):
+        config = await self.credentials.materialize(row, user_id, require=False)
+        exc = safe_gateway_error(exc, config=config)
         code = getattr(exc, "code", "discovery_failed")
         if (
             self.runtime.versions.get(row.id, row.revision) != row.revision
@@ -492,6 +441,7 @@ class Catalog:
             raise
         if row.revision == spec.revision:
             user_id = spec.credential_owner if spec.credential_owner not in {"", "service"} else None
+            exc = safe_gateway_error(exc, config=spec.config)
             failure = await self.record_start_failure(row, exc, user_id)
             if failure is not exc and isinstance(failure, GatewayError):
                 exc.code = failure.code
@@ -840,6 +790,7 @@ class Catalog:
             result = await self.runtime.perform(spec, lease.id, "discover", authorize=authorize, business=False)
             return await self.store_discovery(row, result, user_id, spec=spec)
         except Exception as exc:
+            exc = safe_gateway_error(exc, config=spec.config if spec else self.unseal(row.config))
             failure = await self.record_refresh_failure(row, exc, user_id, had_ready=had_ready)
             raise failure
         finally:
@@ -864,6 +815,7 @@ class Catalog:
             await self.store_discovery(row, result, user_id, spec=spec)
             success = True
         except Exception as exc:
+            exc = safe_gateway_error(exc, config=spec.config if spec else self.unseal(row.config) if row else {})
             if row:
                 exc = await self.record_refresh_failure(row, exc, user_id, had_ready=had_ready)
             await self.logs.audit("mcp.start.failed", user_id, {"server_id": server_id, "error": str(exc)})
