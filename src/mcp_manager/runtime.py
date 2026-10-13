@@ -141,6 +141,9 @@ class Runtime:
                 if isinstance(exc, GatewayError)
                 else GatewayError(code, startup_failure_reason(exc))
             )
+            from .diagnostics import safe_gateway_error
+
+            failure = safe_gateway_error(failure, config=instance.spec.config)
             instance.error = str(failure)
             instance.failure = failure
             instance.phase = "failed"
@@ -148,7 +151,8 @@ class Runtime:
                 try:
                     await self.on_start_failure(instance.spec, failure)
                 except Exception as callback_error:
-                    instance.error = startup_failure_reason(callback_error)
+                    callback_error = safe_gateway_error(callback_error, config=instance.spec.config)
+                    instance.error = str(callback_error)
                     instance.failure = callback_error
         finally:
             instance.connection = None

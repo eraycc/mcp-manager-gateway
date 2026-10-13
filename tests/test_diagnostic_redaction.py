@@ -90,3 +90,32 @@ def test_failure_status_details_survive_redaction():
     assert result.details.get("startup_failure_count") == 2
     assert result.details.get("status") == "stopped"
     assert MARKER not in json.dumps(result.details)
+
+
+async def test_runtime_status_never_exposes_unredacted_startup_error():
+    import asyncio
+    import json
+    from contextlib import asynccontextmanager
+
+    from mcp_manager.runtime import Runtime, ServerSpec
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    @asynccontextmanager
+    async def connector(spec):
+        raise GatewayError("connection_error", "Synthetic " + MARKER)
+        yield None
+    async def record(spec, exc):
+        entered.set()
+        await release.wait()
+    runtime = Runtime(connector)
+    runtime.on_start_failure = record
+    lease = runtime.create_lease("synthetic-user", "synthetic-token")
+    spec = ServerSpec("synthetic", "stdio", {"command": "unused", "env": {"PRIVATE_KEY": MARKER}})
+    task = asyncio.create_task(runtime.discover(spec, lease.id))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert MARKER not in json.dumps(runtime.status())
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await runtime.close()
