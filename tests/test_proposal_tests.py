@@ -168,7 +168,8 @@ async def test_batch_test_reports_incremental_results_and_can_be_cancelled(
     saved_job = (await client.get("/api/v1/jobs/" + job["id"])).json()
     assert saved_job["status"] == "completed_with_errors"
     assert saved_job["completed"] == saved_job["total"] == 2
-    assert {item["item"] for item in saved_job["results"]} == {good_id, bad_id}
+    results = [await app.state.jobs.store.get_result(job["id"], ordinal) for ordinal in range(2)]
+    assert {item["item"] for item in results} == {good_id, bad_id}
 
     rows = (await client.get("/api/v1/mcp-proposals")).json()["items"]
     statuses = {item["id"]: item["test_status"] for item in rows}
@@ -235,9 +236,10 @@ async def test_batch_test_revalidates_admin_before_queued_execution(proposal_web
         user.auth_version += 1
     app.state.jobs.limit.release()
     await asyncio.wait_for(task, 5)
-    saved = app.state.jobs.items[job["id"]]
+    saved = await app.state.jobs.store.get_status(job["id"])
     assert saved["status"] == "completed_with_errors"
-    assert "Session revoked" in saved["results"][0]["error"]
+    result = await app.state.jobs.store.get_result(job["id"], 0)
+    assert "Session revoked" in result["error"]
     async with app.state.db.session() as session:
         proposal = await session.get(McpProposal, proposal_id)
         assert proposal.test_status == "pending"

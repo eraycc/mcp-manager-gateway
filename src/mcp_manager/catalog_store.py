@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+from collections import OrderedDict
 
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -69,6 +70,9 @@ class CatalogStore:
         self.artifacts = artifacts
         self.signing_key = signing_key.encode() if isinstance(signing_key, str) else signing_key
         self.scope_resolver = scope_resolver
+        self._search_cache = OrderedDict()
+        self._search_cache_lock = asyncio.Lock()
+        self._search_cache_entries = 64
 
     @staticmethod
     def _check_kind(kind):
@@ -281,9 +285,22 @@ class CatalogStore:
         if query and exact_names is None and kind == "tools":
             from .catalog_retrieval import MAX_CANDIDATES, search_candidates
 
-            candidates = await search_candidates(self.db, list(generations), query, limit=MAX_CANDIDATES)
+            cache_key = (tuple(sorted(generations)), query.casefold().strip())
+            async with self._search_cache_lock:
+                candidates = self._search_cache.get(cache_key)
+                if candidates is not None:
+                    self._search_cache.move_to_end(cache_key)
+            if candidates is None:
+                candidates = tuple(await search_candidates(
+                    self.db, list(generations), query, limit=MAX_CANDIDATES
+                ))
+                async with self._search_cache_lock:
+                    self._search_cache[cache_key] = candidates
+                    self._search_cache.move_to_end(cache_key)
+                    while len(self._search_cache) > self._search_cache_entries:
+                        self._search_cache.popitem(last=False)
             total = len(candidates)
-            return total, candidates[offset:offset + limit] if limit else []
+            return total, list(candidates[offset:offset + limit]) if limit else []
         filters = [CatalogEntry.generation_id.in_(generations), CatalogEntry.kind == kind]
         if exact_names is not None:
             hashes = [digest(name) for name in exact_names]

@@ -63,6 +63,7 @@ async def test_secret_is_masked_sealed_and_redacted_patch_preserves_it(api):
         "model": "local-model",
         "api_key": "top-secret-key",
         "timeout_seconds": 7,
+        "build_timeout_seconds": 30.0,
         "min_similarity": 0.25,
     }
 
@@ -201,7 +202,8 @@ async def test_defaults_have_no_paid_endpoint_and_test_uses_saved_settings(api):
         "base_url": "",
         "model": "",
         "api_key": "",
-        "timeout_seconds": 10.0,
+        "timeout_seconds": 2.0,
+        "build_timeout_seconds": 30.0,
         "min_similarity": 0.5,
     }
 

@@ -197,15 +197,15 @@ async def _log_retention(app):
     # Reserve before yielding so a concurrent settings update can request another pass.
     state.retention_next = loop.time() + 3600
     try:
-        from .retention import run_storage_retention
-
-        await run_storage_retention(state, at=now(), batch_limit=250)
         days = await get_setting(state.db, "log_retention_days", 0)
         if days:
             from datetime import timedelta
 
             cutoff = now() - timedelta(days=days, microseconds=1)
             await state.logs.delete(to_time=cutoff.isoformat())
+        from .retention import run_storage_retention
+
+        await run_storage_retention(state, at=now(), batch_limit=250)
     except Exception:
         state.retention_next = 0
         raise

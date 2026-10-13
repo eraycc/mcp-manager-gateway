@@ -361,10 +361,34 @@ class Runtime:
         if self.versions.get(spec.id, spec.revision) != spec.revision:
             raise GatewayError("revision_changed", "MCP configuration changed; refresh the directory")
 
+    async def _make_instance_room(self, user_id: str):
+        """Evict one idle LRU connection when bounded instance slots are full."""
+        victim = None
+        async with self._instance_lock:
+            active = [item for item in self.instances.values() if not item.closed.is_set()]
+            owned = [item for item in active if item.admitted_user == user_id]
+            if (
+                len(active) < self.capacity.global_instances
+                and len(owned) < self.capacity.user_instances
+            ):
+                return
+            pool = owned if len(owned) >= self.capacity.user_instances else active
+            idle = [item for item in pool if item.phase == "ready" and item.in_flight == 0]
+            if idle:
+                victim = min(idle, key=lambda item: item.last_activity)
+                victim.refs.clear()
+                victim.phase = "draining"
+        if victim is None:
+            raise GatewayError("busy", "Runtime instance capacity is full; retry later")
+        await self._stop_instance(victim)
+
     async def _acquire(self, spec: ServerSpec, lease_id: str) -> Instance:
         self._available(spec)
         lease = self.check_lease(lease_id)
         key = self._key(spec, lease)
+        current = self.instances.get(key)
+        if current is None or current.closed.is_set():
+            await self._make_instance_room(lease.user_id)
         lock = self._locks.setdefault(key, asyncio.Lock())
         while True:
             wait_closed = None

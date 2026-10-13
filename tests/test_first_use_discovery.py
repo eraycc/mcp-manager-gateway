@@ -19,6 +19,15 @@ class Connection:
             "templates": [],
         }
 
+    async def ingest_catalog(self, store, scope, authorize=None):
+        generation = await store.begin_refresh(scope)
+        await store.stage_page(generation.id, "tools", [
+            {"name": "whoami", "inputSchema": {"type": "object"}}
+        ])
+        await store.set_metadata(generation.id, {})
+        await store.publish(generation.id, expected_scope=scope)
+        return await store.get_summary(scope)
+
     async def call(self, name, arguments):
         return {"content": [{"type": "text", "text": "ok"}]}
 
@@ -76,10 +85,11 @@ async def test_tools_endpoint_is_read_only_and_explicit_refresh_discovers(tmp_pa
         assert calls["count"] == 0
         assert all(response.json()["cache_status"] == "empty" for response in responses)
         refreshed = await web.post(f"/api/v1/mcps/{row.id}/refresh")
-        assert refreshed.status_code == 200 and refreshed.json()["cache_status"] == "ready"
+        assert refreshed.status_code == 200 and refreshed.json()["status"] == "ready"
+        assert refreshed.json()["tool_count"] == 1
         assert calls["count"] == 1
-        cached = await web.get(f"/api/v1/mcps/{row.id}/tools")
-        assert cached.status_code == 200 and cached.json()["tools"][0]["name"] == "whoami"
+        cached = await web.get(f"/api/v1/mcps/{row.id}/capabilities?kind=tools")
+        assert cached.status_code == 200 and cached.json()["items"][0]["name"] == "whoami"
         assert calls["count"] == 1
 
 

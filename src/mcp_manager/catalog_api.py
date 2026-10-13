@@ -460,7 +460,7 @@ async def refresh(server_id: str, request: Request, user=ADMIN):
     if await cat.retry_disabled(server_id, user.id, authorize=web_authorizer(request)):
         result = cat.cached(await cat.get(server_id), user.id)
     else:
-        result = await cat.refresh(server_id, user.id, authorize=web_authorizer(request))
+        result = await cat.refresh_index(server_id, user.id, authorize=web_authorizer(request))
     from .http_budget import ensure_json_budget
 
     await ensure_json_budget(result, max_bytes=1048576)

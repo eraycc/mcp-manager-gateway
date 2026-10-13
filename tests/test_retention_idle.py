@@ -8,9 +8,11 @@ from types import SimpleNamespace
 import pytest
 from test_runtime_lifecycle import Connection
 
+from mcp_manager.artifact_store import ArtifactStore
 from mcp_manager.config import Settings
 from mcp_manager.database import Database, set_setting
 from mcp_manager.gateway import Gateway
+from mcp_manager.job_store import JobStore
 from mcp_manager.logs import LogStore
 from mcp_manager.runtime import GatewayError, Runtime, ServerSpec
 
@@ -29,7 +31,16 @@ async def retention_app(tmp_path, monkeypatch):
     db = Database(Settings(data_dir=tmp_path, database_url=f"sqlite:///{tmp_path}/db.sqlite"))
     await db.initialize()
     logs = LogStore(tmp_path)
-    state = SimpleNamespace(db=db, logs=logs, runtime=Runtime(None), retention_next=0, refresh_next=None)
+    artifacts = ArtifactStore(tmp_path)
+    state = SimpleNamespace(
+        db=db,
+        logs=logs,
+        runtime=Runtime(None),
+        jobs=SimpleNamespace(store=JobStore(db, artifacts)),
+        catalog=SimpleNamespace(artifacts=artifacts),
+        retention_next=0,
+        refresh_next=None,
+    )
     monkeypatch.setattr(app_module, "now", lambda: CURRENT)
     try:
         yield SimpleNamespace(state=state)
@@ -72,7 +83,7 @@ async def test_retention_removes_only_older_events_from_jsonl_and_rebuilt_index(
     assert persisted == expected
     await state.logs.rebuild()
     assert {row["id"] for row in (await state.logs.query())["items"]} == expected
-    assert not list((state.logs.root / "audit").glob("*.jsonl"))
+    assert list((state.logs.root / "audit").glob("*.jsonl"))
 
 
 async def test_retention_change_during_cleanup_is_applied_on_next_pass(retention_app, monkeypatch):

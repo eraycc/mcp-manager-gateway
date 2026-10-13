@@ -22,14 +22,15 @@ async def test_failed_saved_service_shows_warning(bug1_browser):
 
 async def test_refresh_failure_replaces_open_cached_tool_list(bug1_browser):
     page, _url = bug1_browser
-    stale = {"tools": [{"name": "old_tool", "inputSchema": {"type": "object"}}],
-             "cache_status": "ready", "cache_at": "2026-09-12T00:00:00Z"}
-    failure = {**stale, "last_refresh_error": "upstream offline",
-               "last_refresh_error_code": "connection_error",
-               "last_refresh_failure_at": "2026-09-15T00:00:00Z"}
     state = {"failed": False}
-    await page.route("**/api/v1/mcps/broken/tools",
-                     lambda r: r.fulfill(json=failure if state["failed"] else stale))
+    await page.route(
+        "**/api/v1/mcps/broken/capabilities?*",
+        lambda r: r.fulfill(json={
+            "items": [{"name": "old_tool", "description": "cached"}],
+            "total": 1,
+            "next_cursor": None,
+        }),
+    )
     async def fail(route):
         state["failed"] = True
         await route.fulfill(status=502, json={"detail": "upstream offline", "code": "connection_error"})
@@ -39,9 +40,8 @@ async def test_refresh_failure_replaces_open_cached_tool_list(bug1_browser):
     await expect(dialog).to_contain_text("old_tool")
     await dialog.get_by_role("button", name="刷新发现缓存").click()
     await expect(dialog).to_contain_text("old_tool")
-    await expect(dialog).to_contain_text("最近刷新警告")
-    await expect(dialog).to_contain_text("upstream offline")
     await expect(page.locator("#toast")).to_have_attribute("data-status", "fail")
+    await expect(page.locator("#toast")).to_contain_text("upstream offline")
 
 
 async def test_personal_oauth_recheck_and_explicit_recovery(bug1_browser):

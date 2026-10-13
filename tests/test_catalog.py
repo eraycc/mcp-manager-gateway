@@ -20,8 +20,10 @@ async def test_mcp_crud_rest_cache_and_user_grants(tmp_path):
             assert created.status_code < 300, created.text
             id = created.json()["id"]
             assert app.state.runtime.status() == []
-            tools = (await client.post(f"/api/v1/mcps/{id}/refresh")).json()
-            assert tools["tools"][0]["name"] == "echo"
+            summary = (await client.post(f"/api/v1/mcps/{id}/refresh")).json()
+            assert summary["status"] == "ready" and summary["tool_count"] == 1
+            tools = (await client.get(f"/api/v1/mcps/{id}/capabilities?kind=tools")).json()
+            assert tools["items"][0]["name"] == "echo"
             exported = (await client.post("/api/v1/mcps/export", json={"ids":[id]})).json()
             assert "rest_echo" in exported["mcpServers"]
             conflict = await client.patch(f"/api/v1/mcps/{id}", json={"revision":99,"name":"bad"})

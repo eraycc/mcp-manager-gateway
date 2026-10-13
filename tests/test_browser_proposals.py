@@ -34,7 +34,25 @@ async def test_proposal_test_feedback_and_batch_job_dialog(running_gateway, monk
     entered = {"single": asyncio.Event(), "batch": asyncio.Event()}
     release = {"single": asyncio.Event(), "batch": asyncio.Event()}
 
-    async def discover(spec, lease_id):
+    async def perform(spec, _lease_id, operation, snapshots, scope, *_args, **_kwargs):
+        assert operation == "ingest_catalog"
+        command = spec.config["command"]
+        entered[command].set()
+        await release[command].wait()
+        generation = await snapshots.begin_refresh(scope)
+        await snapshots.stage_page(generation.id, "tools", [
+            {"name": "one", "inputSchema": {"type": "object"}},
+            {"name": "two", "inputSchema": {"type": "object"}},
+        ])
+        await snapshots.set_metadata(generation.id, {
+            "capability_errors": [
+                {"capability": "resources", "error": "Method not found"}
+            ]
+        })
+        await snapshots.publish(generation.id, expected_scope=scope)
+        return await snapshots.get_summary(scope)
+
+    async def discover(spec, _lease_id):
         command = spec.config["command"]
         entered[command].set()
         await release[command].wait()
@@ -46,6 +64,7 @@ async def test_proposal_test_feedback_and_batch_job_dialog(running_gateway, monk
             ],
         }
 
+    monkeypatch.setattr(app.state.runtime, "perform", perform)
     monkeypatch.setattr(app.state.runtime, "discover", discover)
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -68,11 +87,13 @@ async def test_proposal_test_feedback_and_batch_job_dialog(running_gateway, monk
         await expect(page.locator("#toast")).to_have_text("正在测试 MCP 连接…")
         await asyncio.wait_for(entered["single"].wait(), 5)
         release["single"].set()
-        await expect(page.get_by_role("dialog", name="测试结果", exact=True)).to_be_visible()
-        await expect(page.locator("#toast")).to_have_text("测试成功")
-        await page.get_by_role("dialog", name="测试结果", exact=True).get_by_role(
-            "button", name="关闭", exact=True
-        ).click()
+        await expect(page.get_by_role(
+            "dialog", name="Single proposal · 测试能力", exact=True
+        )).to_be_visible()
+        await expect(page.locator("#toast")).to_contain_text("测试成功：发现 2 个工具")
+        await page.get_by_role(
+            "dialog", name="Single proposal · 测试能力", exact=True
+        ).get_by_role("button", name="关闭", exact=True).click()
         await expect(single).to_contain_text("部分可用")
         await expect(single).to_contain_text("资源不可用（Method not found）")
 

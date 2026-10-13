@@ -120,8 +120,11 @@ async def test_navigation_protocol_and_import_wizard(running_gateway, monkeypatc
         await expect(raw).to_have_value(samples["generic"])
         await page.get_by_role("button", name="解析配置", exact=True).click()
         await expect(page.locator(".import-entry")).to_have_count(6)
-        await page.get_by_text("统一 JSON 编辑", exact=True).click()
+        editor = page.locator("details").filter(has_text="统一 JSON 编辑")
+        await editor.locator("summary").click()
+        await expect(editor).to_have_attribute("open", "")
         unified=page.get_by_label("待导入服务 JSON", exact=False)
+        await expect(unified).not_to_have_value("[]")
         pending=json.loads(await unified.input_value())
         pending[0]["description"]="pending change"
         await unified.fill(json.dumps(pending))
@@ -146,8 +149,8 @@ async def test_navigation_protocol_and_import_wizard(running_gateway, monkeypatc
         await page.get_by_role("button", name="诊断全部服务", exact=True).click()
         await expect(page.locator(".import-entry").filter(has_text="诊断成功")).to_have_count(5)
         assert 1 < peak <= 3
-        await page.locator(".import-entry").first.get_by_role("button", name="预览工具与能力").click()
-        await expect(page.get_by_role("dialog").last.locator("pre")).to_contain_text("read")
+        await page.locator(".import-entry").first.get_by_role("button", name="查看能力摘要").click()
+        await expect(page.get_by_role("dialog").last.locator("pre")).to_contain_text('"tool_count": 1')
         await page.get_by_role("dialog").last.get_by_role("button", name="关闭").click()
         await page.locator(".import-entry").first.get_by_role("button", name="编辑配置").click()
         item = dict(batch[0], description="edited invalidates diagnosis")

@@ -58,16 +58,20 @@ async def test_oauth_profile_only_oauth_and_disconnect(bug1_browser):
     ]
     await page.route("**/api/v1/mcps?*", lambda r: r.fulfill(json={"items": rows, "total": 2}))
     async def credential_status(route):
-        oauth = "/mcps/oauth/" in route.request.url
-        await route.fulfill(json={
-            "required": oauth,
-            "auth_type": "oauth" if oauth else "none",
-            "isolation": "user" if oauth else "service",
-            "config_isolation": "shared" if oauth else None,
-            "state": "pending_authorization" if oauth else "not_required",
-            "action": "authorize" if oauth else None,
-        })
-    await page.route("**/api/v1/mcps/*/credentials/status", credential_status)
+        requested = route.request.post_data_json["ids"]
+        await route.fulfill(json={"items": [
+            {
+                "id": identity,
+                "required": identity == "oauth",
+                "auth_type": "oauth" if identity == "oauth" else "none",
+                "isolation": "user" if identity == "oauth" else "service",
+                "config_isolation": "shared" if identity == "oauth" else None,
+                "state": "pending_authorization" if identity == "oauth" else "not_required",
+                "action": "authorize" if identity == "oauth" else None,
+            }
+            for identity in requested
+        ]})
+    await page.route("**/api/v1/mcps/credentials/status-batch", credential_status)
     await page.route("**/api/v1/mcps/oauth/oauth/status", lambda r: r.fulfill(json={"authorized": True, "scope": "user"}))
     await page.route("**/api/v1/mcps/oauth/oauth/start", lambda r: r.fulfill(json={"authorization_url": "https://example.com/authorize"}))
     disconnected = []
@@ -113,16 +117,27 @@ async def test_cache_states_refresh_and_structured_error(bug1_browser):
     await expect(page.get_by_role("row").filter(has_text="never")).to_contain_text("从未刷新")
     await expect(page.get_by_role("row").filter(has_text="oauth")).to_contain_text("待授权")
     await expect(page.get_by_role("row").filter(has_text="failed")).to_contain_text("startup_timeout")
-    await page.route("**/api/v1/mcps/never/tools", lambda r: r.fulfill(json={"tools": [], "cache_status": "empty"}))
-    await page.route("**/api/v1/mcps/never/refresh", lambda r: r.fulfill(json={
-        "tools": [{"name": "echo", "inputSchema": {"type": "object"}}],
-        "cache_status": "ready", "cache_at": "2026-09-12T03:00:00Z"}))
+    state = {"ready": False}
+    async def capabilities(route):
+        items = [{"name": "echo", "description": "ready tool"}] if state["ready"] else []
+        await route.fulfill(json={"items": items, "total": len(items), "next_cursor": None})
+    async def refresh(route):
+        state["ready"] = True
+        await route.fulfill(json={"cache_status": "ready", "cache_at": "2026-09-12T03:00:00Z"})
+    await page.route("**/api/v1/mcps/never/capabilities?*", capabilities)
+    await page.route("**/api/v1/mcps/never/capabilities/tools/echo", lambda r: r.fulfill(
+        json={"name": "echo", "inputSchema": {"type": "object"}}
+    ))
+    await page.route("**/api/v1/mcps/never/refresh", refresh)
     await page.get_by_role("row").filter(has_text="never").get_by_role("button", name="工具 / 测试").click()
     dialog = page.get_by_role("dialog")
-    await expect(dialog).to_contain_text("从未刷新")
+    await expect(dialog).to_contain_text("当前没有可展示的能力")
     await dialog.get_by_role("button", name="刷新发现缓存").click()
-    await expect(dialog).not_to_contain_text("从未刷新")
-    await expect(dialog).to_contain_text("2026")
+    await expect(page.locator("#toast")).to_have_text("缓存已刷新，请重新打开目录查看最新代次")
+    await dialog.get_by_role("button", name="关闭", exact=True).click()
+    await page.get_by_role("row").filter(has_text="never").get_by_role("button", name="工具 / 测试").click()
+    dialog = page.get_by_role("dialog")
+    await expect(dialog).to_contain_text("echo")
     await page.route("**/api/v1/mcps/never/test", lambda r: r.fulfill(status=502, json={
         "detail": "Complete OAuth authorization in the Web console", "code": "auth_required"}))
     await dialog.get_by_role("button", name="调用测试").click()

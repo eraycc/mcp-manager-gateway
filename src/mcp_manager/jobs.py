@@ -34,6 +34,7 @@ class Jobs:
         self.queued_items = 0
         self.queued_bytes = 0
         self.workers = []
+        self.limit = asyncio.Semaphore(4)
         self.wakeup = asyncio.Event()
         self.closing = False
 
@@ -140,7 +141,10 @@ class Jobs:
                 await self.wakeup.wait()
                 continue
             context, ordinal, item = selected
+            admitted = False
             try:
+                await self.limit.acquire()
+                admitted = True
                 result = {"item": item, "ok": False, "cancelled": True, "error": "Operation cancelled"}
                 if not context.cancelled:
                     await self.store.set_status(context.identity, "running")
@@ -181,6 +185,8 @@ class Jobs:
                     if future is not None and not future.done():
                         future.set_exception(GatewayError("job_persistence_failed", "Could not persist job progress"))
             finally:
+                if admitted:
+                    self.limit.release()
                 self.active_users[context.user_id] -= 1
                 if self.active_users[context.user_id] == 0:
                     self.active_users.pop(context.user_id, None)
@@ -195,6 +201,8 @@ class Jobs:
         pending = list(self.tasks.values())
         for identity in list(self.contexts):
             self._cancel_now(identity)
+        for _worker in self.workers:
+            self.limit.release()
         await asyncio.gather(*pending, return_exceptions=True)
         for worker in self.workers:
             worker.cancel()

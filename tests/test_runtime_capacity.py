@@ -182,10 +182,10 @@ async def test_instance_and_waiter_caps_are_hard_limits():
     )
     lease = runtime.create_lease("u1", "t1")
     await runtime.call(spec("resident"), lease.id, "read", {"server": "resident"})
-    with pytest.raises(GatewayError) as instances:
-        await runtime.call(spec("other"), lease.id, "read", {"server": "other"})
-    assert instances.value.code == "busy"
-    assert fixture.starts == ["resident"]
+    result = await runtime.call(spec("other"), lease.id, "read", {"server": "other"})
+    assert result["content"][0]["text"] == "other"
+    assert fixture.starts == ["resident", "other"]
+    assert runtime.capacity_status()["instances"] == 1
     await runtime.close()
 
     fixture = CapacityFixture()

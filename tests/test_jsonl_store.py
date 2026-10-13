@@ -5,7 +5,6 @@ from pathlib import Path
 from test_bug1_catalog import console
 from test_discovery_failure_policy import Upstream
 
-from mcp_manager.jobs import Jobs
 from mcp_manager.jsonl_store import JsonlStore
 
 
@@ -69,17 +68,28 @@ async def test_legacy_caches_consolidate_latest_revision_and_remove_json(tmp_pat
         assert [p.name for p in cache.iterdir()] == ["catalog.jsonl"]
 
 
-def test_jobs_migrate_redact_and_mark_interrupted_without_replay(tmp_path):
+async def test_jobs_migrate_redact_and_mark_interrupted_without_replay(tmp_path):
+    from mcp_manager.config import Settings
+    from mcp_manager.database import Database
+    from mcp_manager.home_migration import reconcile_data
+    from mcp_manager.job_models import JobRecord
+
     directory = tmp_path / "jobs"
     directory.mkdir()
     (directory / "one.json").write_text(json.dumps({
         "id": "one", "status": "running", "token": "secret-value", "completed": 1}), encoding="utf-8")
-    jobs = Jobs(tmp_path)
-    assert jobs.items["one"]["status"] == "interrupted"
-    assert jobs.tasks == {}
+    settings = Settings(data_dir=tmp_path, secret_key="legacy-job-test")
+    assert (await reconcile_data(settings))["jobs"] == 1
+    db = Database(settings)
+    try:
+        await db.initialize()
+        async with db.session() as session:
+            assert (await session.get(JobRecord, "one")).status == "interrupted"
+    finally:
+        await db.close()
     assert not list(directory.glob("*.json"))
     assert "secret-value" not in (directory / "jobs.jsonl").read_text(encoding="utf-8")
-    assert Jobs(tmp_path).items["one"]["status"] == "interrupted"
+    assert (await reconcile_data(settings))["jobs"] == 0
 
 
 def test_unreadable_legacy_snapshot_is_preserved(tmp_path):
