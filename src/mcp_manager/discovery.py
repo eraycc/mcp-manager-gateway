@@ -82,6 +82,11 @@ def validate_meta(name, args):
     return candidate
 
 
+def resource_search_document(item):
+    """Only descriptive catalog fields may leave the gateway for semantic retrieval."""
+    return {key: item[key] for key in ("name", "title", "description") if isinstance(item.get(key), str)}
+
+
 def result_json(value, *, error=False):
     return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(value, ensure_ascii=False))],
                                 structuredContent=value, isError=error)

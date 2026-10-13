@@ -247,6 +247,28 @@ class Gateway:
     async def principal(self, request):
         return await authenticate_token(request)
 
+    def search_scope(self, request, user, token, rows):
+        catalog = self.app.state.catalog
+        user_id = user.id if user else None
+        scopes = []
+        for row in rows:
+            cache = catalog.cached(row, user_id)
+            scopes.append((row.id, row.revision, row.mode, cache.get("cache_status"), cache.get("cache_at")))
+        return (
+            owner(user, token, request), getattr(user, "auth_version", None), getattr(user, "role", None),
+            getattr(token, "enable_resource_tools", None), getattr(token, "discovery_mode", None),
+            tuple(sorted(scopes)),
+        )
+
+    async def revalidate_search_scope(self, request, expected_scope):
+        try:
+            user, token, allowed = await self.principal(request)
+        except HTTPException:
+            raise GatewayError("permission_revoked", "Gateway authorization changed during search") from None
+        rows = await self.app.state.catalog.rows(ids=allowed)
+        if self.search_scope(request, user, token, rows) != expected_scope:
+            raise GatewayError("permission_revoked", "MCP permission or catalog changed during search")
+
     async def directory(self, request):
         user, token, allowed = await self.principal(request)
         cat = self.app.state.catalog
@@ -348,6 +370,9 @@ class Gateway:
         if discovery and token.enable_resource_tools and name == "gateway_list_resources":
             if not isinstance(arguments, dict) or set(arguments) - {"mcp", "keyword"}:
                 raise ValueError("gateway_list_resources accepts only mcp and keyword")
+            expected_scope = self.search_scope(request, user, token, rows)
+            authorize_search = lambda: self.revalidate_search_scope(request, expected_scope)
+            await authorize_search()
             mcp_query = str(arguments.get("mcp", ""))
             keyword = str(arguments.get("keyword", "")).strip()
             cached = lambda row: self.app.state.catalog.cached(row, user.id if user else None)
@@ -368,13 +393,17 @@ class Gateway:
                                    ensure_ascii=False).encode()
                     ).hexdigest()
                     keyed[document_id] = item
-                    documents.append({"id": document_id, "text": json.dumps(item, ensure_ascii=False, default=str)})
+                    from .discovery import resource_search_document
+                    documents.append({"id": document_id, "text": json.dumps(resource_search_document(item), ensure_ascii=False)})
                 from .embedding_api import load_embedding_config
                 config = await load_embedding_config(self.app.state)
                 scope = hashlib.sha256(
                     json.dumps([user.id if user else "anonymous", token.id if token else "", "resources"]).encode()
                 ).hexdigest()
-                scores, search = await self.app.state.embeddings.scores(scope, documents, keyword, config)
+                await authorize_search()
+                scores, search = await self.app.state.embeddings.scores(
+                    scope, documents, keyword, config, authorize=authorize_search
+                )
                 items = [
                     item for document_id, item in keyed.items()
                     if document_id in scores
@@ -383,6 +412,7 @@ class Gateway:
                 for document_id, item in keyed.items():
                     if document_id in scores and item in items:
                         item["semantic_score"] = scores[document_id]
+            await authorize_search()
             return result_json({"items": items, "count": len(items), "search": search})
         if discovery and token.enable_resource_tools and name == "gateway_read_resource":
             if not isinstance(arguments, dict) or set(arguments) != {"uri"}:
