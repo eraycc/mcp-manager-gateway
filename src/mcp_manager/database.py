@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, event, select, text
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text, event, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -215,4 +215,4 @@ async def set_setting(db: Database, key: str, value: Any) -> None:
 
 
 # Register auxiliary models after Base and the identity models exist (shared Alembic metadata).
-from . import catalog_models as catalog_models  # noqa: E402
+from . import catalog_models, job_models  # noqa: F401

@@ -145,7 +145,7 @@ async def delete_logs(data: dict, request: Request, user=ADMIN):
         result = await request.app.state.logs.delete(ids, **filters)
         await request.app.state.logs.audit("logs.delete", user.id, {"count": result})
         return result
-    return request.app.state.jobs.submit("logs.delete", ["logs"], operation, user.id)
+    return await request.app.state.jobs.submit("logs.delete", ["logs"], operation, user.id)
 
 
 @router.post("/logs/rebuild")
@@ -154,7 +154,7 @@ async def rebuild_logs(request: Request, user=ADMIN):
     async def operation(_):
         await web_authorizer(request)()
         return await request.app.state.logs.rebuild()
-    return request.app.state.jobs.submit("logs.rebuild", ["index"], operation, user.id)
+    return await request.app.state.jobs.submit("logs.rebuild", ["index"], operation, user.id)
 
 
 @router.get("/logs/{log_id}")
@@ -289,26 +289,83 @@ async def cron_preview(data: dict, user=ADMIN):
 
 
 @router.get("/jobs")
-async def jobs(request: Request, user=USER):
-    return [j for j in request.app.state.jobs.items.values() if user.role == "admin" or j["user_id"] == user.id]
+async def jobs(request: Request, page: int = 1, page_size: int = 50, user=USER):
+    result = await request.app.state.jobs.store.list_jobs(
+        user_id=None if user.role == "admin" else user.id, page=page, limit=page_size)
+    fresh = await current_user(request)
+    if fresh.id != user.id or fresh.role != user.role:
+        raise HTTPException(403, "Job access changed")
+    return result
 
 
 @router.get("/jobs/{job_id}")
 async def job(job_id: str, request: Request, user=USER):
-    item = request.app.state.jobs.items.get(job_id)
-    if not item or (user.role != "admin" and item["user_id"] != user.id):
+    item = await request.app.state.jobs.store.get_status(job_id)
+    fresh = await current_user(request)
+    if not item or (fresh.role != "admin" and item["user_id"] != fresh.id):
         raise HTTPException(404, "Job not found")
-    return item
+    from starlette.responses import Response
+    etag = '"job-' + item["id"] + '-' + str(item["version"]) + '"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, no-cache"})
+    from fastapi.responses import JSONResponse
+    return JSONResponse(item, headers={"ETag": etag, "Cache-Control": "private, no-cache"})
+
+
+async def authorized_job(job_id, request):
+    fresh = await current_user(request)
+    status = await request.app.state.jobs.store.get_status(job_id)
+    if not status or (fresh.role != "admin" and status["user_id"] != fresh.id):
+        raise HTTPException(404, "Job not found")
+    return status
+
+
+@router.get("/jobs/{job_id}/results")
+async def job_results(job_id: str, request: Request, cursor: str | None = None, limit: int = 50, user=USER):
+    await authorized_job(job_id, request)
+    result = await request.app.state.jobs.store.list_results(job_id, cursor=cursor, limit=limit)
+    await authorized_job(job_id, request)
+    return result
+
+
+@router.get("/jobs/{job_id}/results/{ordinal}")
+async def job_result(job_id: str, ordinal: int, request: Request, user=USER):
+    await authorized_job(job_id, request)
+    store = request.app.state.jobs.store
+    ref = await store.get_result_ref(job_id, ordinal)
+    if not ref:
+        raise HTTPException(404, "Job result not found")
+    if ref.size_bytes > 65536:
+        raise HTTPException(413, "Result exceeds preview budget; use the result download endpoint")
+    result = await store.get_result(job_id, ordinal)
+    await authorized_job(job_id, request)
+    return result
+
+
+@router.get("/jobs/{job_id}/results/{ordinal}/download")
+async def job_result_download(job_id: str, ordinal: int, request: Request, user=USER):
+    await authorized_job(job_id, request)
+    store = request.app.state.jobs.store
+    ref = await store.get_result_ref(job_id, ordinal)
+    if not ref:
+        raise HTTPException(404, "Job result not found")
+    async def stream():
+        async with store.artifacts.open_download(ref) as chunks:
+            async for chunk in chunks:
+                await authorized_job(job_id, request)
+                yield chunk
+    return StreamingResponse(stream(), media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="job-result.json"',
+                 "Cache-Control": "private, no-store"})
 
 
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str, request: Request, user=USER):
-    async with request.app.state.db.locked() as s:
-        user = await web_authorizer(request, require_admin=False)(s)
-        await job(job_id, request, user)
-        task = request.app.state.jobs.tasks.get(job_id)
-        if task:
-            task.cancel()
+    await authorized_job(job_id, request)
+    async with request.app.state.db.locked() as session:
+        await web_authorizer(request, require_admin=False)(session)
+    # Do not hold the database mutex while workers persist cancellation outcomes.
+    await request.app.state.jobs.cancel(job_id)
     return {"ok": True}
 
 

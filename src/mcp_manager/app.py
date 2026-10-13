@@ -18,6 +18,7 @@ from .config import PACKAGE_ROOT, Settings
 from .credentials import CredentialStore
 from .database import ApiToken, Database, User, get_setting, now
 from .embeddings import EmbeddingIndex
+from .job_store import JobStore
 from .jobs import Jobs
 from .logs import LogStore
 from .oauth import OAuth
@@ -109,7 +110,7 @@ async def _scheduled_refresh(app):
         state.refresh_next = trigger.get_next_fire_time(None, current)
     elif current >= state.refresh_next:
         targets = await state.catalog.refresh_targets()
-        state.jobs.submit(
+        await state.jobs.submit(
             "mcp.scheduled_refresh", targets, state.catalog.refresh_target
         )
         state.refresh_next = trigger.get_next_fire_time(state.refresh_next, current)
@@ -123,6 +124,9 @@ async def _log_retention(app):
     # Reserve before yielding so a concurrent settings update can request another pass.
     state.retention_next = loop.time() + 3600
     try:
+        from .retention import run_storage_retention
+
+        await run_storage_retention(state, at=now(), batch_limit=250)
         days = await get_setting(state.db, "log_retention_days", 0)
         if days:
             from datetime import timedelta
@@ -181,8 +185,9 @@ def create_app(config=None):
         state.logs = LogStore(config.data_dir)
         load_transport_plugins()
         state.runtime = Runtime(connect)
-        state.jobs = Jobs(config.data_dir)
         state.catalog = Catalog(state.db, state.runtime, state.logs, config)
+        state.jobs = Jobs(store=JobStore(state.db, state.catalog.artifacts, signing_key=config.jwt_secret))
+        state.catalog.jobs = state.jobs
         state.credentials = CredentialStore(state.catalog)
         state.catalog.credentials = state.credentials
         state.embeddings = EmbeddingIndex(config.data_dir)
@@ -196,6 +201,7 @@ def create_app(config=None):
         task = None
         try:
             await state.db.initialize()
+            await state.jobs.start()
             state.cors_origins = await get_setting(state.db, "cors_origins", ["*"])
             state.allowed_hosts = await get_setting(state.db, "allowed_hosts", ["*"])
             from zoneinfo import ZoneInfo
@@ -217,7 +223,7 @@ def create_app(config=None):
                            if target["server_id"] in eager or state.catalog.cached(
                                rows[target["server_id"]], target["user_id"])["cache_status"] == "empty"]
                 if targets:
-                    state.jobs.submit("mcp.startup", targets, state.catalog.warm_target)
+                    await state.jobs.submit("mcp.startup", targets, state.catalog.warm_target)
                 task = asyncio.create_task(maintenance(app))
                 state.ready = True
                 yield

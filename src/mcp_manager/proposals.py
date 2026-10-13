@@ -510,7 +510,7 @@ async def batch_test(data: dict, request: Request, user=ADMIN):
             request, proposal_id, "cancelled", error="Operation cancelled"
         )
 
-    return request.app.state.jobs.submit(
+    return await request.app.state.jobs.submit(
         "mcp.proposal.test", ids, operation, user.id, cancel_operation=cancelled
     )
 

@@ -202,7 +202,7 @@ async def import_mcps(data: dict, request: Request, user=ADMIN):
         async def refresh_imported(server_id):
             actor = await web_authorizer(request)()
             return await cat.refresh(server_id, actor.id, authorize=web_authorizer(request))
-        result["refresh_job"] = request.app.state.jobs.submit(
+        result["refresh_job"] = await request.app.state.jobs.submit(
             "mcp.import.refresh", refresh_ids, refresh_imported, user.id)
     return result
 
@@ -319,7 +319,7 @@ async def batch(data: dict, request: Request, user=ADMIN):
             raise GatewayError(result["cache_error_code"] or "discovery_failed",
                                result["cache_error"] or "MCP discovery failed")
         return result
-    return request.app.state.jobs.submit("mcp." + action, ids, operation, user.id)
+    return await request.app.state.jobs.submit("mcp." + action, ids, operation, user.id)
 
 
 @router.get("/mcps/{server_id}")
@@ -518,4 +518,4 @@ async def test_all(server_id: str, request: Request, user=ADMIN):
     cases = [c for c in cases if c.get("enabled", True)]
     async def operation(case):
         return await test_tool(server_id, case, request, user)
-    return request.app.state.jobs.submit("mcp.test", cases, operation, user.id)
+    return await request.app.state.jobs.submit("mcp.test", cases, operation, user.id)

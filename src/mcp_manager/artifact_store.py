@@ -37,10 +37,12 @@ class ArtifactStore:
             raise ValueError("Invalid artifact reference")
 
     def _path(self, identity):
-        path = self.root / identity[:2] / (identity + ".json")
-        if not path.resolve().is_relative_to(self.root):
+        # Every caller supplies either a locally computed SHA-256 or a validated
+        # ArtifactRef. Lexical digest validation avoids a racy Windows resolve()
+        # through a bucket directory being concurrently created.
+        if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{64}", identity):
             raise ValueError("Artifact path leaves the object root")
-        return path
+        return self.root / identity[:2] / (identity + ".json")
 
     def _remember(self, ref, raw):
         with self._lock:
@@ -82,12 +84,18 @@ class ArtifactStore:
                 os.fsync(stream.fileno())
             identity = digest.hexdigest()
             target = self._path(identity)
-            target.parent.mkdir(exist_ok=True)
-            # Move the durable spool into a same-directory staging file before publishing.
-            bucket_staging = target.parent / ("." + uuid4().hex + ".tmp")
-            os.replace(staging, bucket_staging)
-            staging = bucket_staging
-            os.replace(staging, target)
+            with self._lock:
+                target.parent.mkdir(exist_ok=True)
+                if target.exists():
+                    # Reusing an old object refreshes its grace window until the
+                    # caller commits the new database reference.
+                    os.utime(target, None)
+                    return ArtifactRef(identity, size, identity)
+                # Move the durable spool into a same-directory staging file before publishing.
+                bucket_staging = target.parent / ("." + uuid4().hex + ".tmp")
+                os.replace(staging, bucket_staging)
+                staging = bucket_staging
+                os.replace(staging, target)
             if os.name != "nt":
                 directory = os.open(target.parent, os.O_RDONLY)
                 try:
@@ -193,6 +201,31 @@ class ArtifactStore:
                         for entry in entries:
                             if entry.is_file(follow_symlinks=False) and re.fullmatch(r"[0-9a-f]{64}\.json", entry.name):
                                 yield Path(entry.path)
+
+    async def discard(self, identities, *, limit=250):
+        if not isinstance(limit, int) or not 1 <= limit <= 250:
+            raise ValueError("GC batch must contain 1–250 items")
+        bounded = list(dict.fromkeys(identities))[:limit]
+        return await asyncio.to_thread(self._discard, bounded)
+
+    def _discard(self, identities):
+        removed = []
+        with self._lock:
+            for identity in identities:
+                path = self._path(identity)
+                if self._pins[identity]:
+                    continue
+                try:
+                    if time.time() - path.stat().st_mtime < self.gc_grace_seconds:
+                        continue
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                cached = self._cache.pop(identity, None)
+                if cached is not None:
+                    self._cache_size -= len(cached)
+                removed.append(identity)
+        return removed
 
     async def gc(self, live_ids, *, limit=250):
         if not isinstance(limit, int) or not 1 <= limit <= 250:

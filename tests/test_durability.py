@@ -1,9 +1,7 @@
-import asyncio
+from test_runtime import Fake
 
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
-from mcp_manager.jobs import Jobs
-from test_runtime import Fake
 
 
 async def test_final_log_failure_preserves_successful_downstream_result(tmp_path, monkeypatch):
@@ -26,15 +24,11 @@ async def test_final_log_failure_preserves_successful_downstream_result(tmp_path
         assert fake.calls == 1
 
 
-async def test_recovered_job_is_not_replayed(tmp_path):
-    jobs = Jobs(tmp_path)
-    entered = asyncio.Event()
-    async def operation(item):
-        entered.set()
-        await asyncio.Event().wait()
-    job = jobs.submit("write", [1], operation, "user")
-    await entered.wait()
-    recovered = Jobs(tmp_path)
-    assert recovered.items[job["id"]]["status"] == "interrupted"
-    assert recovered.tasks == {}
-    await jobs.close()
+async def test_recovered_job_is_not_replayed(db_app):
+    store = db_app.app.state.jobs.store
+    job = await store.create_job("write", 1, user_id=db_app.actor["id"])
+    await store.set_status(job["id"], "running")
+    await store.interrupt_unfinished()
+    recovered = await store.get_status(job["id"])
+    assert recovered["status"] == "interrupted"
+    assert recovered["completed"] == 0

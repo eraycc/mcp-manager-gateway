@@ -1,115 +1,202 @@
-"""Bounded background operations with durable, non-replayed progress snapshots."""
+"""Persistent jobs executed by a fixed, fair, bounded worker pool."""
 import asyncio
 import logging
-from pathlib import Path
-from uuid import uuid4
+from collections import OrderedDict, defaultdict, deque
+from dataclasses import dataclass, field
 
-from .jsonl_store import JsonlStore
-from .logs import redact
+from .diagnostics import safe_diagnostic_error
+from .paging import envelope_bytes
+from .runtime import GatewayError
+
+LOGGER = logging.getLogger(__name__)
+MAX_QUEUED_ITEMS = 1000
+MAX_QUEUE_BYTES = 16 * 1024 * 1024
+
+
+@dataclass
+class PendingJob:
+    identity: str
+    user_id: str | None
+    operation: object
+    cancel_operation: object
+    remaining: int
+    cancelled: bool = False
+    active: dict = field(default_factory=dict)
 
 
 class Jobs:
-    def __init__(self, data_dir=None):
-        self.items = {}
+    def __init__(self, data_dir=None, *, store):
+        self.store = store
         self.tasks = {}
-        self.limit = asyncio.Semaphore(4)
-        self.directory = Path(data_dir) / "jobs" if data_dir else None
-        if self.directory:
-            self.store = JsonlStore(self.directory / "jobs.jsonl")
-            self.store.migrate_json(lambda path, job: (job["id"], redact(job)))
-            for key in self.store.items:
-                job = self.store.get(key)
-                if not isinstance(job, dict) or not job.get("id") or not job.get("status"):
-                    continue
-                if job["status"] in {"queued", "running"}:
-                    job.update(status="interrupted", error="Runtime restarted; operations were not replayed")
-                    self.persist(job)
-                self.items[job["id"]] = job
+        self.contexts = {}
+        self.queues = OrderedDict()
+        self.active_users = defaultdict(int)
+        self.queued_items = 0
+        self.queued_bytes = 0
+        self.workers = []
+        self.wakeup = asyncio.Event()
+        self.closing = False
 
-    def persist(self, job):
-        if not self.directory:
-            return
+    async def start(self):
+        await self.store.interrupt_unfinished()
+        self.workers = [asyncio.create_task(self._worker(), name=f"mmg-job-worker-{i}") for i in range(4)]
+
+    async def submit(self, action, items, operation, user_id=None, cancel_operation=None):
+        if self.closing or not isinstance(items, list) or len(items) > MAX_QUEUED_ITEMS:
+            raise GatewayError("busy", "Background work queue is full or closing")
+        # Encode only bounded input, off the event loop; no Task per waiting item.
+        sizes = await asyncio.to_thread(
+            lambda: [envelope_bytes({"item": item}, max_bytes=MAX_QUEUE_BYTES) + 256 for item in items]
+        )
+        size = sum(sizes)
+        if self.queued_items + len(items) > MAX_QUEUED_ITEMS or self.queued_bytes + size > MAX_QUEUE_BYTES:
+            raise GatewayError("busy", "Background work queue exceeds its item or byte budget")
+        self.queued_items += len(items)
+        self.queued_bytes += size
         try:
-            self.store.set(job["id"], redact(job))
-        except OSError:
-            logging.getLogger(__name__).exception("Job snapshot write failed")
+            status = await self.store.create_job(action, len(items), user_id=user_id)
+        except BaseException:
+            self.queued_items -= len(items)
+            self.queued_bytes -= size
+            raise
+        identity = status["id"]
+        future = asyncio.get_running_loop().create_future()
+        # Consume unobserved exceptions without suppressing them for explicit awaiters.
+        future.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        self.tasks[identity] = future
+        self.contexts[identity] = PendingJob(identity, user_id, operation, cancel_operation, len(items))
+        queue = self.queues.setdefault(user_id, deque())
+        queue.extend((identity, ordinal, item, sizes[ordinal]) for ordinal, item in enumerate(items))
+        if not items:
+            await self._complete(identity)
+        self.wakeup.set()
+        return status
 
-    def submit(self, action, items, operation, user_id=None, cancel_operation=None):
-        job = {"id": str(uuid4()), "action": action, "status": "queued", "total": len(items),
-               "completed": 0, "results": [], "user_id": user_id}
-        self.items[job["id"]] = job
-        self.persist(job)
+    def _next(self):
+        for user_id in list(self.queues):
+            queue = self.queues[user_id]
+            if not queue:
+                self.queues.pop(user_id)
+                continue
+            if self.active_users[user_id] >= 2:
+                continue
+            self.queues.move_to_end(user_id)
+            identity, ordinal, item, size = queue.popleft()
+            self.queued_items -= 1
+            self.queued_bytes -= size
+            context = self.contexts.get(identity)
+            if context is None:
+                return self._next()
+            self.active_users[user_id] += 1
+            return context, ordinal, item
+        return None
 
-        recorded = set()
+    async def _record(self, context, ordinal, result):
+        try:
+            await self.store.append_result(context.identity, ordinal, result)
+        except GatewayError as exc:
+            if exc.code != "artifact_too_large":
+                raise
+            await self.store.append_result(context.identity, ordinal, {
+                "item": str(ordinal), "ok": False, "outcome_unknown": bool(result.get("ok")),
+                "error": "Result exceeds storage byte budget; operation was not replayed",
+            })
+        context.remaining -= 1
+        if context.remaining == 0:
+            await self._complete(context.identity)
 
-        def record(index, result):
-            if index in recorded:
-                return
-            recorded.add(index)
-            job["results"].append(result)
-            job["completed"] = len(job["results"])
-            self.persist(job)
+    async def _complete(self, identity):
+        context = self.contexts.get(identity)
+        if context is None:
+            return
+        status = await self.store.get_status(identity)
+        state = "cancelled" if context.cancelled else "completed_with_errors" if status["failed"] else "completed"
+        status = await self.store.set_status(identity, state)
+        self.contexts.pop(identity, None)
+        future = self.tasks.pop(identity, None)
+        if future is not None and not future.done():
+            future.set_result(status)
 
-        def cancelled(index, item):
-            record(index, {"item": item, "ok": False, "cancelled": True, "error": "Operation cancelled"})
+    def _cancel_now(self, identity):
+        context = self.contexts.get(identity)
+        if context:
+            context.cancelled = True
+            for task in list(context.active.values()):
+                if not task.done():
+                    task.cancel()
+            self.wakeup.set()
 
-        def finish_cancelled():
-            # Tasks cancelled before their coroutine starts cannot record an outcome.
-            for index, item in enumerate(items):
-                if index not in recorded:
-                    cancelled(index, item)
-            job["status"] = "cancelled"
-            self.persist(job)
+    async def cancel(self, identity):
+        self._cancel_now(identity)
+        future = self.tasks.get(identity)
+        if future is not None:
+            await asyncio.shield(future)
 
-        async def run():
-            job["status"] = "running"
-            self.persist(job)
-
-            async def one(index, item):
-                try:
-                    async with self.limit:
-                        result = await operation(item)
-                    record(index, {"item": item, "ok": True, "result": result})
-                except asyncio.CancelledError:
-                    if cancel_operation:
-                        try:
-                            await asyncio.shield(cancel_operation(item))
-                        except Exception:
-                            logging.getLogger(__name__).exception(
-                                "Job cancellation callback failed"
-                            )
-                    cancelled(index, item)
-                    raise
-                except Exception as exc:  # noqa: BLE001 - isolate failures per job item
-                    record(index, {"item": item, "ok": False, "error": str(exc)})
-
-            children = [asyncio.create_task(one(index, item)) for index, item in enumerate(items)]
+    async def _worker(self):
+        while True:
+            selected = self._next()
+            if selected is None:
+                self.wakeup.clear()
+                await self.wakeup.wait()
+                continue
+            context, ordinal, item = selected
             try:
-                await asyncio.gather(*children)
-                job["status"] = "completed" if all(x["ok"] for x in job["results"]) else "completed_with_errors"
+                result = {"item": item, "ok": False, "cancelled": True, "error": "Operation cancelled"}
+                if not context.cancelled:
+                    await self.store.set_status(context.identity, "running")
+                    # Cancellation can happen while the status transaction waits.
+                    # Recheck before creating the side-effecting operation task.
+                    if not context.cancelled:
+                        child = asyncio.create_task(context.operation(item))
+                        context.active[ordinal] = child
+                        try:
+                            value = await child
+                            result = {"item": item, "ok": True, "result": value}
+                        except asyncio.CancelledError:
+                            self._cancel_now(context.identity)
+                            result["outcome_unknown"] = True
+                            if context.cancel_operation:
+                                try:
+                                    await context.cancel_operation(item)
+                                except Exception as exc:  # noqa: BLE001 - cancellation callback is isolated
+                                    LOGGER.warning("Cancellation callback failed: %s", type(exc).__name__)
+                        except Exception as exc:  # noqa: BLE001 - one item must not fail its job
+                            config = item if isinstance(item, dict) else {}
+                            safe = safe_diagnostic_error(exc, config=config)
+                            result = {"item": item, "ok": False, "error": safe["message"], "code": safe["code"],
+                                      "outcome_unknown": safe["code"] == "outcome_unknown"}
+                        finally:
+                            context.active.pop(ordinal, None)
+                await self._record(context, ordinal, result)
             except asyncio.CancelledError:
-                # gather does not cancel siblings when just one child is cancelled.
-                for child in children:
-                    if not child.done() and not child.cancelling():
-                        child.cancel()
-                await asyncio.gather(*children, return_exceptions=True)
-                finish_cancelled()
+                raise
+            except Exception as exc:
+                LOGGER.exception("Job persistence failed: %s", type(exc).__name__)
+                self._cancel_now(context.identity)
+                try:
+                    await self.store.set_status(context.identity, "failed", error="Persistence failed; operations were not replayed")
+                finally:
+                    self.contexts.pop(context.identity, None)
+                    future = self.tasks.pop(context.identity, None)
+                    if future is not None and not future.done():
+                        future.set_exception(GatewayError("job_persistence_failed", "Could not persist job progress"))
             finally:
-                self.persist(job)
-
-        def done(task):
-            self.tasks.pop(job["id"], None)
-            if task.cancelled():
-                finish_cancelled()
-
-        task = asyncio.create_task(run())
-        self.tasks[job["id"]] = task
-        task.add_done_callback(done)
-        return job
+                self.active_users[context.user_id] -= 1
+                if self.active_users[context.user_id] == 0:
+                    self.active_users.pop(context.user_id, None)
+                self.wakeup.set()
 
     async def close(self):
-        tasks = list(self.tasks.values())
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        self.closing = True
+        # Tests and failed startup may queue before start(); cancellation still
+        # needs consumers to persist one terminal result for every item.
+        if self.contexts and not self.workers:
+            self.workers = [asyncio.create_task(self._worker(), name=f"mmg-job-close-{i}") for i in range(4)]
+        pending = list(self.tasks.values())
+        for identity in list(self.contexts):
+            self._cancel_now(identity)
+        await asyncio.gather(*pending, return_exceptions=True)
+        for worker in self.workers:
+            worker.cancel()
+        await asyncio.gather(*self.workers, return_exceptions=True)
+        self.workers.clear()
