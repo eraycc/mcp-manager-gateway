@@ -380,7 +380,7 @@ async def test_pagination_has_no_duplicates_and_rejects_changed_catalog(discover
     assert page["truncated"] is False
     assert "next_cursor" not in page and "hint" not in page
     assert len(names) == len(set(names)) == 4
-    assert {m["slug"] for m in first["mcps"]} == {"archive", "empty", "files"}
+    assert {m["slug"] for m in first["mcps"]} == {"archive"}  # only providers on this page
     cache = app.state.catalog.cached(rows["files"])
     app.state.catalog.save_cache(rows["files"], {**cache, "tools": cache["tools"][:1]})
     stale = await invoke("gateway_search_tools", {"limit": 1, "cursor": first["next_cursor"]})

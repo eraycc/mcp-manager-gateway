@@ -264,3 +264,5 @@ An `outcome_unknown` result means a request may already have reached its destina
 ## License
 
 Copyright 2026 eraycc. Licensed under the [Apache License 2.0](LICENSE).
+
+Large catalogs support progressive `gateway_search_tools` with `names_only: true` (no Schema reads). Query exact names again without that flag before calling. Follow `next_cursor` without changing query arguments. Native tool/resource/prompt/template listings and `gateway_list_resources` paginate; complete MCP JSON-RPC envelopes are budgeted at 1 MiB including text and structured duplication. An individually oversized complete contract returns `catalog_entry_too_large`, never a truncated Schema.

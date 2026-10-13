@@ -327,3 +327,5 @@ MCP 配置可以启动本地进程、访问网络和读取数据，应当视为�
 ## License
 
 Copyright 2026 eraycc. Licensed under the [Apache License 2.0](LICENSE).
+
+大目录可用 `gateway_search_tools` 的 `names_only: true` 渐进获取名称摘要，不读取 Schema；调用前应去掉该参数，按精确名称查询完整定义。跟随 `next_cursor` 时保持原查询不变。原生工具/资源/提示词/模板列表与 `gateway_list_resources` 均分页；整个 MCP JSON-RPC 响应按 1 MiB 预算计入文本与结构化内容的重复占用。单个完整契约超限明确返回 `catalog_entry_too_large`，不截断 Schema。

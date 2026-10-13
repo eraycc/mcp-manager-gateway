@@ -147,7 +147,7 @@ class CatalogStore:
                     summary[field] = entry[field][:limit]
             if kind in {"resources", "templates"}:
                 summary["uri" if kind == "resources" else "uriTemplate"] = name
-            gateway_name = alias(slug, name) if kind == "tools" else None
+            gateway_name = alias(slug, name) if kind in {"tools", "prompts"} else None
             if gateway_name:
                 summary["gateway_name"] = gateway_name
             schema_hash = await asyncio.to_thread(
@@ -260,9 +260,10 @@ class CatalogStore:
             return None
         return generation
 
-    async def query_tool_entries(self, generations, *, query="", exact_names=None, offset=0, limit=20):
+    async def query_tool_entries(self, generations, *, kind="tools", query="", exact_names=None, offset=0, limit=20):
         """Filter/count/page lightweight rows in SQL before any contract or artifact read."""
-        filters = [CatalogEntry.generation_id.in_(generations), CatalogEntry.kind == "tools"]
+        self._check_kind(kind)
+        filters = [CatalogEntry.generation_id.in_(generations), CatalogEntry.kind == kind]
         if exact_names is not None:
             hashes = [digest(name) for name in exact_names]
             filters.append(or_(
@@ -422,7 +423,8 @@ class CatalogStore:
                 raise GatewayError("revision_changed", "Catalog changed while reading the definition")
         return value
 
-    async def resolve_gateway_name(self, gateway_name, allowed_ids, *, owner="service"):
+    async def resolve_gateway_name(self, gateway_name, allowed_ids, *, owner="service", kind="tools"):
+        self._check_kind(kind)
         if not allowed_ids:
             return None
         name_hash = digest(gateway_name)
@@ -437,7 +439,7 @@ class CatalogStore:
                 McpServer.id.in_(allowed_ids), McpServer.mode != "disabled",
                 McpServer.revision == CatalogGeneration.revision,
                 CatalogGeneration.status == "ready", CatalogHead.status == "ready",
-                CatalogEntry.kind == "tools",
+                CatalogEntry.kind == kind,
                 or_(CatalogEntry.gateway_hash == name_hash, CatalogEntry.legacy_gateway_hash == name_hash),
             )
             matches = []

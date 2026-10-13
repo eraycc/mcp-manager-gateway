@@ -1,15 +1,11 @@
 """Deterministic field retrieval and fusion with real embedding rankings."""
-import base64
 import hashlib
-import hmac
 import json
 import math
 import re
 import unicodedata
 from collections import Counter
 from difflib import SequenceMatcher
-
-from .runtime import GatewayError
 
 MAX_PAGE_BYTES = 1024 * 1024
 
@@ -120,41 +116,13 @@ def fingerprint(value):
 
 
 def paginate(items, *, cursor, limit, version, key):
-    """Signed, query/scope/catalog-bound cursor; stale snapshots never mix pages."""
-    offset = 0
-    if cursor:
-        try:
-            if len(cursor) > 2048:
-                raise ValueError()
-            data, signature = cursor.split(".")
-            expected = hmac.new(key.encode(), data.encode(), hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(expected, signature):
-                raise ValueError()
-            saved = json.loads(base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)))
-            if saved["version"] != version:
-                raise GatewayError("catalog_changed", "Catalog, permissions or query changed; restart without cursor.")
-            offset = saved["offset"]
-            if type(offset) is not int or not 0 <= offset < len(items):
-                raise ValueError()
-        except GatewayError:
-            raise
-        except (ValueError, KeyError, TypeError):
-            raise GatewayError("invalid_cursor", "Invalid cursor; restart the search without cursor.") from None
-    page, size = [], 2
-    for item in items[offset:offset + limit]:
-        item_size = len(json.dumps(item, ensure_ascii=False).encode()) + 1
-        if item_size + size > MAX_PAGE_BYTES:
-            if page:
-                break
-            name = item.get("gateway_name") or item.get("id") or "entry"
-            raise GatewayError("catalog_entry_too_large",
-                               f"Discovery entry {name!r} exceeds the 1 MiB page budget; its schema was not truncated.")
-        page.append(item)
-        size += item_size
-    following = None
-    if offset + len(page) < len(items):
-        data = base64.urlsafe_b64encode(json.dumps(
-            {"version": version, "offset": offset + len(page)}, separators=(",", ":")).encode()).decode().rstrip("=")
-        following = data + "." + hmac.new(key.encode(), data.encode(), hashlib.sha256).hexdigest()
-    return {"items": page, "total": len(items), "returned": len(page), "next_cursor": following,
-            "catalog_version": version}
+    """Generic discovery page; concrete handlers supply their complete envelope elsewhere."""
+    from .paging import bounded_mcp_page
+
+    def envelope(page):
+        return {
+            "content": [{"type": "text", "text": json.dumps(page, ensure_ascii=False)}],
+            "structuredContent": page, "isError": False, "resultType": "complete",
+        }
+    return bounded_mcp_page(items, envelope=envelope, cursor=cursor, limit=limit,
+                            version=version, signing_key=key)

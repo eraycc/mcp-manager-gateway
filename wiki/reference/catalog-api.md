@@ -28,3 +28,7 @@
 旧 `GET /api/v1/mcps/{id}/tools` 只读取缓存，不自动连接。旧完整目录测试、诊断和刷新响应限制为 1 MiB；服务与提议列表页限制为 128 KiB。超限返回明确的 `catalog_payload_too_large`，不截断 inputSchema，也不返回大块 JSON 让浏览器处理。
 
 大目录集成应使用摘要分页和单条详情；服务/提议列表遇到超限时减小 `page_size`。旧测试响应默认仍兼容小目录；需要大目录诊断时显式使用 `summary=true`。现有目录缓存的显式升级导入另见[备份与迁移](../operations/backup-and-migration.md)。
+
+## MCP protocol pagination
+
+`gateway_search_tools` accepts optional `names_only: true` for complete name traversal without reading definition artifacts. Obtain the original full `inputSchema` through exact search before `gateway_call`. Providers in each response belong only to that page. Follow opaque `next_cursor` with unchanged query and page size; identity, permission, credentials, generation, feature or retrieval changes invalidate it. Native lists use `nextCursor`. `gateway_list_resources` accepts `limit` and `cursor`, returns summary items and a total. Whole JSON-RPC responses include all text and structured representations in the 1 MiB budget. Individual oversized contracts fail explicitly with `catalog_entry_too_large`.

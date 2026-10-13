@@ -7,9 +7,10 @@ from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from mcp import types
 from referencing.exceptions import Unresolvable
 
+from .paging import McpPageBuilder, decode_cursor
 from .runtime import GatewayError
 from .schema_validation import LOCAL_SCHEMA_REGISTRY
-from .tool_index import document, fingerprint, normalize, paginate, query_text, rank, schema_text
+from .tool_index import document, fingerprint, normalize, query_text, rank, schema_text
 
 PAGING = {
     "limit": {"type": "integer", "minimum": 1, "maximum": 100,
@@ -44,6 +45,8 @@ DISCOVERY = [
                    "items": {"type": "string", "minLength": 1, "maxLength": 128},
                    "minItems": 1, "maxItems": 50, "uniqueItems": True,
                    "description": "Exact original tool names or gateway_names to disclose together."},
+         "names_only": {"type": "boolean", "default": False,
+                        "description": "Return names and summaries without Schema; query exact names again before gateway_call."},
          **PAGING}, "not": {"required": ["tool", "tools"]}, "additionalProperties": False},
      "annotations": {"readOnlyHint": True, "destructiveHint": False}},
     {"name": "gateway_call",
@@ -343,14 +346,24 @@ class Discovery:
         by_id = {item["id"]: item for item in services}
         selected = [by_id[doc["id"]] | {"match": match} for doc, match in matched]
         await authorize()
-        query = {key: arguments.get(key) for key in ("query", "mcp", "tool", "tools", "limit") if key in arguments}
+        query = {key: arguments.get(key) for key in ("query", "mcp", "tool", "tools", "limit", "names_only") if key in arguments}
         version = fingerprint([expected, name, query, config_version])
         if name == "gateway_search_mcps":
-            page = paginate(selected, cursor=arguments.get("cursor"), limit=arguments.get("limit", 50),
-                            version=version, key=state.config.jwt_secret)
-            page.update(search={"services": service_search}, next_step="Call gateway_search_tools with a returned mcp id.")
+            offset = decode_cursor(arguments.get("cursor"), version, state.config.jwt_secret)
+            def envelope(page):
+                return result_json(page | {
+                    "search": {"services": service_search},
+                    "next_step": "Call gateway_search_tools with a returned mcp id.",
+                })
+            builder = await asyncio.to_thread(
+                McpPageBuilder, total=len(selected), offset=offset, limit=arguments.get("limit", 50),
+                version=version, signing_key=state.config.jwt_secret, envelope=envelope,
+            )
+            for item in selected[offset:offset + builder.limit]:
+                if not await asyncio.to_thread(builder.add, item):
+                    break
             await authorize()
-            return result_json(page)
+            return builder.finish()
         row_by_id = {row.id: row for row in rows}
         selected_rows = [row_by_id[item["id"]] for item in selected]
         legacy = [row for row in selected_rows if row.id not in indexed
@@ -363,27 +376,35 @@ class Discovery:
             selected_rows, scopes, indexed, arguments, version, embedding_scope, config, authorize
         )
 
-    def tool_response(self, selected, tools, total, following, *, missing=None):
+    def tool_envelope(self, page, *, missing=None, names_only=False):
+        # Provider metadata is charged and disclosed only for contracts in this page.
+        providers = {entry["provider"]["id"]: entry["provider"] for entry in page["items"]}
         response = {
-            "instructions": "Use gateway_call with gateway_name and arguments matching inputSchema.",
-            "mcps": [{"id": row.id, "name": row.name, "slug": row.slug} for row in selected],
-            "tools": tools, "truncated": bool(following), "returned": len(tools), "total": total,
+            "instructions": ("Query the exact tool name without names_only to obtain its complete inputSchema before gateway_call."
+                             if names_only else "Use gateway_call with gateway_name and arguments matching inputSchema."),
+            "names_only": names_only,
+            "mcps": sorted(providers.values(), key=lambda value: (value["slug"], value["id"])),
+            "tools": [entry["tool"] for entry in page["items"]],
+            "truncated": bool(page["next_cursor"]), "returned": page["returned"], "total": page["total"],
         }
-        if following:
-            response.update(next_cursor=following, hint="Use a narrower tool/tools query or continue with next_cursor.")
+        if page["next_cursor"]:
+            response.update(next_cursor=page["next_cursor"], hint="Use a narrower tool/tools query or continue with next_cursor.")
         if missing:
             response["missing_tools"] = missing
         return result_json(response)
 
+    @staticmethod
+    def name_summary(name, gateway_name, summary):
+        return {"name": name, "gateway_name": gateway_name,
+                **{key: summary[key] for key in ("title", "description") if key in summary}}
+
+    def page_entry(self, row, tool):
+        return {"tool": tool, "provider": {"id": row.id, "name": row.name, "slug": row.slug}}
+
     async def indexed_tool_search(self, selected, scopes, summaries, arguments, version, authorize):
         catalog, state = self.gateway.app.state.catalog, self.gateway.app.state
         generations = [summaries[row.id]["generation"] for row in selected if summaries[row.id].get("generation")]
-        offset = 0
-        if arguments.get("cursor"):
-            saved = catalog.index._decode_cursor(arguments["cursor"], version)
-            if type(saved[0]) is not int or saved[0] < 0:
-                raise DiscoveryError("invalid_cursor", "Invalid discovery cursor")
-            offset = saved[0]
+        offset = decode_cursor(arguments.get("cursor"), version, state.config.jwt_secret)
         requested = arguments.get("tools")
         query = query_text(arguments.get("tool", ""))
         exact_names = requested
@@ -396,26 +417,32 @@ class Discovery:
         )
         if arguments.get("cursor") and offset >= total:
             raise DiscoveryError("invalid_cursor", "Discovery cursor is outside the result")
-        by_id = {row.id: row for row in selected}
-        contracts = []
-        for entry in entries:
-            row = by_id[entry.server_id]
-            original = await catalog.index.get_definition(scopes[row.id], kind="tools", name=entry.original_name)
-            if original is None:
-                raise DiscoveryError("catalog_changed", "Catalog changed while reading a page")
-            contract = await asyncio.to_thread(tool_contract, row, original, dict(original, name=entry.gateway_name))
-            contracts.append(compact_tool(contract))
-        page = paginate(contracts, cursor=None, limit=len(contracts), version=version, key=state.config.jwt_secret)
-        returned = page["returned"]
-        following = catalog.index._cursor({"binding": version, "key": [offset + returned, ""]}) if offset + returned < total else None
         missing = []
         if requested:
             for value in requested:
                 found, _entries = await catalog.index.query_tool_entries(generations, exact_names=[value], limit=0)
                 if not found:
                     missing.append(value)
+        builder = await asyncio.to_thread(
+            McpPageBuilder, total=total, offset=offset, limit=arguments.get("limit", 20),
+            version=version, signing_key=state.config.jwt_secret,
+            envelope=lambda page: self.tool_envelope(page, missing=missing, names_only=arguments.get("names_only", False)),
+        )
+        by_id = {row.id: row for row in selected}
+        for entry in entries:
+            row = by_id[entry.server_id]
+            if arguments.get("names_only"):
+                contract = self.name_summary(entry.original_name, entry.gateway_name, entry.summary)
+            else:
+                original = await catalog.index.get_definition(scopes[row.id], kind="tools", name=entry.original_name)
+                if original is None:
+                    raise DiscoveryError("catalog_changed", "Catalog changed while reading a page")
+                full = await asyncio.to_thread(tool_contract, row, original, dict(original, name=entry.gateway_name))
+                contract = await asyncio.to_thread(compact_tool, full)
+            if not await asyncio.to_thread(builder.add, self.page_entry(row, contract)):
+                break
         await authorize()
-        return self.tool_response(selected, page["items"], total, following, missing=missing)
+        return builder.finish()
 
     async def compatibility_tool_search(self, selected, scopes, indexed, arguments, version,
                                         embedding_scope, config, authorize):
@@ -471,18 +498,27 @@ class Discovery:
             candidates = [{"gateway_name": doc["id"]} for doc, _match in matched]
         if requested or not query_text(arguments.get("tool", "")):
             candidates.sort(key=lambda value: (records[value["gateway_name"]][0].slug, value["gateway_name"]))
-        page = paginate(candidates, cursor=arguments.get("cursor"), limit=arguments.get("limit", 20),
-                        version=version, key=state.config.jwt_secret)
-        contracts = []
-        for item in page["items"]:
+        offset = decode_cursor(arguments.get("cursor"), version, state.config.jwt_secret)
+        builder = await asyncio.to_thread(
+            McpPageBuilder, total=len(candidates), offset=offset, limit=arguments.get("limit", 20),
+            version=version, signing_key=state.config.jwt_secret,
+            envelope=lambda page: self.tool_envelope(page, missing=missing, names_only=arguments.get("names_only", False)),
+        )
+        for item in candidates[offset:offset + builder.limit]:
             row, value = records[item["gateway_name"]]
-            original = value if isinstance(value, dict) else await catalog.index.get_definition(
-                scopes[row.id], kind="tools", name=value.original_name
-            )
-            contract = await asyncio.to_thread(tool_contract, row, original, dict(original, name=item["gateway_name"]))
-            contracts.append(compact_tool(contract))
-        bounded = paginate(contracts, cursor=None, limit=len(contracts), version=version, key=state.config.jwt_secret)
-        page = paginate(candidates, cursor=arguments.get("cursor"), limit=bounded["returned"],
-                        version=version, key=state.config.jwt_secret)
+            if arguments.get("names_only"):
+                original_name = value["name"] if isinstance(value, dict) else value.original_name
+                summary = value if isinstance(value, dict) else value.summary
+                contract = self.name_summary(original_name, item["gateway_name"], summary)
+            else:
+                original = value if isinstance(value, dict) else await catalog.index.get_definition(
+                    scopes[row.id], kind="tools", name=value.original_name
+                )
+                if original is None:
+                    raise DiscoveryError("catalog_changed", "Catalog changed while reading a page")
+                full = await asyncio.to_thread(tool_contract, row, original, dict(original, name=item["gateway_name"]))
+                contract = await asyncio.to_thread(compact_tool, full)
+            if not await asyncio.to_thread(builder.add, self.page_entry(row, contract)):
+                break
         await authorize()
-        return self.tool_response(selected, bounded["items"], page["total"], page["next_cursor"], missing=missing)
+        return builder.finish()

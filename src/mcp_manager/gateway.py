@@ -1,4 +1,5 @@
 """Authenticated MCP wire endpoint and lease extension shared by the stdio bridge."""
+import asyncio
 import hashlib
 import json
 import secrets
@@ -18,6 +19,7 @@ from .catalog import alias
 from .database import ApiToken, User
 from .discovery import DISCOVERY, Discovery, result_json, validate_meta, validation_error
 from .identity import authenticate_token, expired
+from .paging import McpPageBuilder, decode_cursor
 from .proposals import list_proposals, resource_index, submit_proposals
 from .runtime import GatewayError
 
@@ -36,6 +38,8 @@ RESOURCE_TOOLS = [
             "properties": {
                 "mcp": {"type": "string", "maxLength": 2000, "default": ""},
                 "keyword": {"type": "string", "maxLength": 2000, "default": ""},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                "cursor": {"type": "string", "maxLength": 2048},
             },
             "additionalProperties": False,
         },
@@ -136,7 +140,14 @@ def owner(user, token, request=None):
     if client:
         return "anonymous", hashlib.sha256(client.encode()).hexdigest()
     session = request.headers.get("Mcp-Session-Id", "") if request else ""
-    return "anonymous", "session:" + session if session else secrets.token_urlsafe(24)
+    if session:
+        return "anonymous", "session:" + session
+    if request is not None:
+        # One stateless request must keep its identity across asynchronous ACL checks.
+        # Separate requests remain separate principals unless a client/session id binds them.
+        identity = request.scope.setdefault("mmg_anonymous_identity", secrets.token_urlsafe(24))
+        return "anonymous", identity
+    return "anonymous", secrets.token_urlsafe(24)
 
 
 @router.post("/leases")
@@ -260,7 +271,8 @@ class Gateway:
                            indexed.get(row.id, {}).get("generation")))
         return (
             owner(user, token, request), getattr(user, "auth_version", None), getattr(user, "role", None),
-            getattr(token, "enable_resource_tools", None), getattr(token, "discovery_mode", None),
+            getattr(token, "enable_resource_tools", None), getattr(token, "enable_mcp_proposal", None),
+            getattr(token, "discovery_mode", None),
             tuple(sorted(scopes)),
         )
 
@@ -334,9 +346,7 @@ class Gateway:
         _, token, _ = await self.principal(ctx.request)
         if token and token.discovery_mode == "discovery":
             return types.ListToolsResult(tools=[types.Tool.model_validate(x) for x in discovery_tools(token)])
-        _user, _token, _rows, entries = await self.directory(ctx.request)
-        tools = [e[2] for e in entries]
-        return types.ListToolsResult(tools=[types.Tool.model_validate(x) for x in tools])
+        return await self.native_page(ctx, params, kind="tools")
 
     async def call_tool(self, ctx, params):
         try:
@@ -386,58 +396,15 @@ class Gateway:
                 arguments = validate_meta("gateway_call", arguments)
                 name, arguments = arguments["name"], arguments["arguments"]
             return await self.execute_exact(request, user, token, name, arguments, discovery=discovery)
-        user, token, rows, entries = await self.directory(request)
         if discovery and token.enable_resource_tools and name == "gateway_list_resources":
-            if not isinstance(arguments, dict) or set(arguments) - {"mcp", "keyword"}:
-                raise ValueError("gateway_list_resources accepts only mcp and keyword")
-            expected_scope = await self.search_scope(request, user, token, rows)
-            authorize_search = lambda: self.revalidate_search_scope(request, expected_scope)
-            await authorize_search()
-            mcp_query = str(arguments.get("mcp", ""))
-            keyword = str(arguments.get("keyword", "")).strip()
-            cached = lambda row: self.app.state.catalog.cached(row, user.id if user else None)
-            items = resource_index(rows, cached, mcp=mcp_query)
-            search = {"mode": "keyword", "semantic_status": "disabled"}
-            if keyword:
-                literal = resource_index(rows, cached, mcp=mcp_query, keyword=keyword)
-                literal_keys = {
-                    json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
-                    for item in literal
-                }
-                documents = []
-                keyed = {}
-                for index, item in enumerate(items):
-                    document_id = hashlib.sha256(
-                        json.dumps([item.get("mcp", {}).get("id"), item.get("kind"),
-                                    item.get("uri") or item.get("uriTemplate") or item.get("name"), index],
-                                   ensure_ascii=False).encode()
-                    ).hexdigest()
-                    keyed[document_id] = item
-                    from .discovery import resource_search_document
-                    documents.append({"id": document_id, "text": json.dumps(resource_search_document(item), ensure_ascii=False)})
-                from .embedding_api import load_embedding_config
-                config = await load_embedding_config(self.app.state)
-                scope = hashlib.sha256(
-                    json.dumps([user.id if user else "anonymous", token.id if token else "", "resources"]).encode()
-                ).hexdigest()
-                await authorize_search()
-                scores, search = await self.app.state.embeddings.scores(
-                    scope, documents, keyword, config, authorize=authorize_search
-                )
-                items = [
-                    item for document_id, item in keyed.items()
-                    if document_id in scores
-                    or json.dumps(item, sort_keys=True, ensure_ascii=False, default=str) in literal_keys
-                ]
-                for document_id, item in keyed.items():
-                    if document_id in scores and item in items:
-                        item["semantic_score"] = scores[document_id]
-            await authorize_search()
-            return result_json({"items": items, "count": len(items), "search": search})
+            from .resource_discovery import resource_page
+            return await resource_page(self, request, arguments)
         if discovery and token.enable_resource_tools and name == "gateway_read_resource":
             if not isinstance(arguments, dict) or set(arguments) != {"uri"}:
                 raise ValueError("gateway_read_resource requires only uri")
+            rows = await self.app.state.catalog.rows(ids=(await self.principal(request))[2], metadata_only=True)
             return await self.read_resource_tool(request, user, token, rows, str(arguments["uri"]))
+        user, token, rows, entries = await self.directory(request)
         if discovery and name in {"gateway_search_mcps", "gateway_search_tools"}:
             return await self.discovery.search(name, arguments, request)
         if discovery and name == "gateway_search":
@@ -478,6 +445,63 @@ class Gateway:
                 raise validation_error(exc, name=name) from None
             raise
         return types.CallToolResult.model_validate(result)
+
+    async def legacy_resource_page(self, request, user, token, rows, arguments):
+        expected_scope = await self.search_scope(request, user, token, rows)
+        authorize_search = lambda: self.revalidate_search_scope(request, expected_scope)
+        await authorize_search()
+        mcp_query = str(arguments.get("mcp", ""))
+        keyword = str(arguments.get("keyword", "")).strip()
+        cached = lambda row: self.app.state.catalog.cached_view(row, user.id if user else None)
+        items = resource_index(rows, cached, mcp=mcp_query)
+        search = {"mode": "keyword", "semantic_status": "disabled"}
+        if keyword:
+            literal = resource_index(rows, cached, mcp=mcp_query, keyword=keyword)
+            literal_keys = {
+                json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
+                for item in literal
+            }
+            documents = []
+            keyed = {}
+            for index, item in enumerate(items):
+                document_id = hashlib.sha256(
+                    json.dumps([item.get("mcp", {}).get("id"), item.get("kind"),
+                                item.get("uri") or item.get("uriTemplate") or item.get("name"), index],
+                               ensure_ascii=False).encode()
+                ).hexdigest()
+                keyed[document_id] = item
+                from .discovery import resource_search_document
+                documents.append({"id": document_id, "text": json.dumps(resource_search_document(item), ensure_ascii=False)})
+            from .embedding_api import load_embedding_config
+            config = await load_embedding_config(self.app.state)
+            scope = hashlib.sha256(
+                json.dumps([user.id if user else "anonymous", token.id if token else "", "resources"]).encode()
+            ).hexdigest()
+            await authorize_search()
+            scores, search = await self.app.state.embeddings.scores(
+                scope, documents, keyword, config, authorize=authorize_search
+            )
+            items = [
+                item for document_id, item in keyed.items()
+                if document_id in scores
+                or json.dumps(item, sort_keys=True, ensure_ascii=False, default=str) in literal_keys
+            ]
+            for document_id, item in keyed.items():
+                if document_id in scores and item in items:
+                    item["semantic_score"] = scores[document_id]
+        await authorize_search()
+        from .paging import bounded_mcp_page
+        from .tool_index import fingerprint
+        # Cursor is not itself part of the query binding.
+        version = fingerprint([expected_scope, {k: v for k, v in arguments.items() if k != "cursor"}, "legacy-resources"])
+        def envelope(page):
+            return result_json(page | {"count": page["returned"], "search": search})
+        page = await asyncio.to_thread(bounded_mcp_page, items, envelope=envelope,
+            cursor=arguments.get("cursor"), limit=arguments.get("limit", 20), version=version,
+            signing_key=self.app.state.config.jwt_secret)
+        await authorize_search()
+        return await asyncio.to_thread(envelope, page)
+
 
     async def resolve_authorized_tool(self, request, gateway_name):
         """Return the exact persisted reference; never build an unrelated tool contract."""
@@ -560,25 +584,81 @@ class Gateway:
             "contents": result.get("contents", []),
         })
 
+    async def native_page(self, ctx, params, *, kind):
+        from .tool_index import fingerprint
+
+        user, token, allowed = await self.principal(ctx.request)
+        catalog = self.app.state.catalog
+        rows = [row for row in await catalog.rows(ids=allowed, metadata_only=True) if row.mode != "disabled"]
+        expected = await self.search_scope(ctx.request, user, token, rows)
+        scopes = await catalog.index_scopes(rows, user.id if user else None)
+        indexed = await catalog.index.get_summaries(scopes.values())
+        version = fingerprint([expected, "native", kind])
+        cursor = getattr(params, "cursor", None)
+        offset = decode_cursor(cursor, version, catalog.config.jwt_secret)
+        legacy = [row for row in rows if row.id not in indexed
+                  and catalog.cached_view(row, user.id if user else None)[kind]]
+        by_id = {row.id: row for row in rows}
+        generations = [item["generation"] for item in indexed.values() if item.get("generation")]
+        if legacy:
+            total, entries = await catalog.index.query_tool_entries(generations, kind=kind, limit=1001)
+            records = [(by_id[entry.server_id], entry) for entry in entries]
+            for row in legacy:
+                records.extend((row, value) for value in catalog.cached_view(row, user.id if user else None)[kind])
+            if len(records) > 1000 or total > 1000:
+                raise GatewayError("catalog_migration_required", "Legacy catalogs need explicit upgrade before large native listings")
+            records.sort(key=lambda pair: (pair[0].slug, (
+                pair[1].get("uri", pair[1].get("uriTemplate", pair[1].get("name", "")))
+                if isinstance(pair[1], dict) else pair[1].original_name
+            )))
+            total, selected = len(records), records[offset:offset + 50]
+        else:
+            total, entries = await catalog.index.query_tool_entries(
+                generations, kind=kind, offset=offset, limit=50
+            )
+            selected = [(by_id[entry.server_id], entry) for entry in entries]
+        if cursor and offset >= total:
+            raise GatewayError("invalid_cursor", "Native cursor is outside the result")
+        factories = {
+            "tools": (types.ListToolsResult, "tools", types.Tool),
+            "resources": (types.ListResourcesResult, "resources", types.Resource),
+            "templates": (types.ListResourceTemplatesResult, "resourceTemplates", types.ResourceTemplate),
+            "prompts": (types.ListPromptsResult, "prompts", types.Prompt),
+        }
+        result_type, field, entry_type = factories[kind]
+        def envelope(page):
+            return result_type.model_validate({field: page["items"], "nextCursor": page["next_cursor"]})
+        builder = await asyncio.to_thread(
+            McpPageBuilder, total=total, offset=offset, limit=50, version=version,
+            signing_key=catalog.config.jwt_secret, envelope=envelope,
+        )
+        for row, entry in selected:
+            original = dict(entry) if isinstance(entry, dict) else await catalog.index.get_definition(
+                scopes[row.id], kind=kind, name=entry.original_name
+            )
+            if original is None:
+                raise GatewayError("catalog_changed", "Catalog changed during native paging")
+            if kind in {"tools", "prompts"}:
+                original = dict(original, name=alias(row.slug, original["name"]))
+            elif kind == "resources":
+                original = dict(original, uri="mcp-manager://" + row.id + "/" + original["uri"])
+            else:
+                original = dict(original, uriTemplate="mcp-manager://" + row.id + "/" + original["uriTemplate"])
+            value = await asyncio.to_thread(entry_type.model_validate, original)
+            if not await asyncio.to_thread(builder.add, value):
+                break
+        await self.revalidate_search_scope(ctx.request, expected)
+        return builder.finish()
+
     async def list_resources(self, ctx, params):
-        user, _token, rows, _ = await self.directory(ctx.request)
-        items = []
-        for row in rows:
-            for item in self.app.state.catalog.cached(row, user.id if user else None)["resources"]:
-                items.append(types.Resource.model_validate(dict(item, uri="mcp-manager://" + row.id + "/" + item["uri"])))
-        return types.ListResourcesResult(resources=items)
+        return await self.native_page(ctx, params, kind="resources")
 
     async def list_templates(self, ctx, params):
-        user, _token, rows, _ = await self.directory(ctx.request)
-        items = []
-        for row in rows:
-            for item in self.app.state.catalog.cached(row, user.id if user else None)["templates"]:
-                items.append(types.ResourceTemplate.model_validate(
-                    dict(item, uriTemplate="mcp-manager://" + row.id + "/" + item["uriTemplate"])))
-        return types.ListResourceTemplatesResult(resourceTemplates=items)
+        return await self.native_page(ctx, params, kind="templates")
 
     async def read_resource(self, ctx, params):
-        user, token, rows, _ = await self.directory(ctx.request)
+        user, token, allowed = await self.principal(ctx.request)
+        rows = await self.app.state.catalog.rows(ids=allowed, metadata_only=True)
         uri = str(params.uri)
         row = next((r for r in rows if uri.startswith("mcp-manager://" + r.id + "/")), None)
         if not row:
@@ -598,22 +678,51 @@ class Gateway:
             raise GatewayError("permission_revoked", "MCP access revoked")
 
     async def list_prompts(self, ctx, params):
-        user, _token, rows, _ = await self.directory(ctx.request)
-        prompts = [types.Prompt.model_validate(dict(p, name=alias(row.slug, p["name"])))
-                   for row in rows for p in self.app.state.catalog.cached(row, user.id if user else None)["prompts"]]
-        return types.ListPromptsResult(prompts=prompts)
+        return await self.native_page(ctx, params, kind="prompts")
 
     async def get_prompt(self, ctx, params):
-        user, token, rows, _ = await self.directory(ctx.request)
-        for row in rows:
-            for prompt in self.app.state.catalog.cached(row, user.id if user else None)["prompts"]:
-                if alias(row.slug, prompt["name"]) == params.name:
-                    result = await self.app.state.runtime.perform(
-                        await self.app.state.catalog.spec(row, user.id if user else None),
-                        self.lease(ctx.request, user, token).id, "get_prompt", prompt["name"], params.arguments or {},
-                        authorize=lambda current=row: self.ensure(ctx.request, current))
-                    return types.GetPromptResult.model_validate(result)
-        raise ValueError("Prompt not authorized")
+        request = ctx.request
+        user, token, allowed = await self.principal(request)
+        catalog = self.app.state.catalog
+        identity = owner(user, token, request)
+        ref = await catalog.index.resolve_gateway_name(
+            params.name, allowed, owner=user.id if user else "anonymous", kind="prompts"
+        )
+        expected_scope = None
+        if ref:
+            expected_scope = await catalog.index.get_generation_scope(ref.generation)
+            row = await catalog.get(expected_scope.server_id)
+            original_name = ref.original_name
+        else:
+            candidates = [row for row in await catalog.rows(ids=allowed, metadata_only=True)
+                          if params.name.startswith((row.id + "__", (row.slug + "__")[:47]))]
+            matches = []
+            for candidate in candidates:
+                scope = await catalog.index_scope(candidate, user.id if user else None)
+                if await catalog.index.has_scope(scope):
+                    continue
+                for prompt in catalog.cached_view(candidate, user.id if user else None)["prompts"]:
+                    if alias(candidate.slug, prompt["name"]) == params.name:
+                        matches.append((candidate, prompt["name"]))
+            if len(matches) != 1:
+                raise GatewayError("prompt_not_found", "Prompt not found in authorized catalog")
+            candidate, original_name = matches[0]
+            row = await catalog.get(candidate.id)
+        async def authorize():
+            fresh_user, fresh_token, current_allowed = await self.principal(request, target_id=row.id)
+            fresh = await catalog.get(row.id, metadata_only=True)
+            if (identity != owner(fresh_user, fresh_token, request) or row.id not in current_allowed
+                    or fresh.mode == "disabled" or fresh.revision != row.revision):
+                raise GatewayError("permission_revoked", "Prompt access changed")
+            if expected_scope and await catalog.index_scope(fresh, fresh_user.id if fresh_user else None) != expected_scope:
+                raise GatewayError("credential_changed", "Prompt credentials changed")
+        await authorize()
+        result = await self.app.state.runtime.perform(
+            await catalog.spec(row, user.id if user else None), self.lease(request, user, token).id,
+            "get_prompt", original_name, params.arguments or {}, authorize=authorize,
+        )
+        await authorize()
+        return types.GetPromptResult.model_validate(result)
 
 
 class MCPAuthMiddleware:
