@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from .config import PACKAGE_ROOT, Settings
+from .db_types import UTCDateTime, engine_options, exact_string
 
 
 def now():
@@ -30,7 +31,7 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    username: Mapped[str] = mapped_column(String(64), unique=True)
+    username: Mapped[str] = mapped_column(exact_string(64), unique=True)
     email: Mapped[str] = mapped_column(String(254), default="")
     password_hash: Mapped[str] = mapped_column(Text)
     role: Mapped[str] = mapped_column(String(16), default="user")
@@ -38,7 +39,7 @@ class User(Base):
     auth_version: Mapped[int] = mapped_column(Integer, default=1)
     scope_mode: Mapped[str] = mapped_column(String(16), default="selected")
     mcp_ids: Mapped[list] = mapped_column(JSON, default=list)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=now)
 
 
 class ApiToken(Base):
@@ -47,22 +48,22 @@ class ApiToken(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(128))
     prefix: Mapped[str] = mapped_column(String(24))
-    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    token_hash: Mapped[str] = mapped_column(exact_string(64), unique=True)
     token_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
     disabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     scope_mode: Mapped[str] = mapped_column(String(16), default="selected")
     mcp_ids: Mapped[list] = mapped_column(JSON, default=list)
     discovery_mode: Mapped[str] = mapped_column(String(16), default="discovery")
     enable_resource_tools: Mapped[bool] = mapped_column(Boolean, default=False)
     enable_mcp_proposal: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=now)
 
 
 class McpServer(Base):
     __tablename__ = "mcp_servers"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    slug: Mapped[str] = mapped_column(String(128), unique=True)
+    slug: Mapped[str] = mapped_column(exact_string(128), unique=True)
     name: Mapped[str] = mapped_column(String(128))
     description: Mapped[str] = mapped_column(Text, default="")
     tags: Mapped[list] = mapped_column(JSON, default=list)
@@ -71,7 +72,7 @@ class McpServer(Base):
     isolation: Mapped[str] = mapped_column(String(16), default="service")
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=now)
 
 
 class McpProposal(Base):
@@ -92,12 +93,16 @@ class McpProposal(Base):
     approved_mcp_id: Mapped[str | None] = mapped_column(
         ForeignKey("mcp_servers.id", ondelete="SET NULL"), nullable=True
     )
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    test_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    tested_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    public_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     test_status: Mapped[str] = mapped_column(String(32), default="pending")
     test_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     test_error: Mapped[str] = mapped_column(Text, default="")
-    tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    tested_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=now)
 
 
 class SystemSetting(Base):
@@ -111,23 +116,27 @@ class AuthSession(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     auth_version: Mapped[int] = mapped_column(Integer)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
     ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=now)
 
 
 class Database:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.engine = create_async_engine(settings.database_url)
+        self.engine = create_async_engine(settings.database_url, **engine_options(settings))
         if self.engine.dialect.name == "sqlite":
             @event.listens_for(self.engine.sync_engine, "connect")
             def configure_sqlite(connection, record):
                 cursor = connection.cursor()
                 cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.execute("PRAGMA busy_timeout=10000")
+                database = self.engine.url.database or ""
+                if database != ":memory:" and not database.startswith(("//", "\\\\")):
+                    cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=FULL")
                 cursor.close()
         self.session = async_sessionmaker(self.engine, expire_on_commit=False)
 

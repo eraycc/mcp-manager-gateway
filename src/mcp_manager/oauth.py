@@ -3,6 +3,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import secrets
 import time
 from urllib.parse import urlencode
@@ -18,6 +19,18 @@ from .runtime import GatewayError
 from .transports import check_url
 
 router = APIRouter(prefix="/api/v1")
+
+
+def token_expiry(value: dict) -> float:
+    """JSON null means no expiry; accept historical sealed positive Infinity."""
+    expiry = value.get("expires_at")
+    if expiry is None:
+        return float("inf")
+    try:
+        number = float(expiry)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if not math.isnan(number) else 0.0
 
 
 def token_from_auth(auth: dict) -> dict:
@@ -81,7 +94,7 @@ class OAuth:
                     "auth_required",
                     "Complete OAuth authorization in the Web console",
                 )
-            if value.get("expires_at", float("inf")) > time.time() + 60:
+            if token_expiry(value) > time.time() + 60:
                 return value
             if not value.get("refresh_token"):
                 raise GatewayError("auth_required", "OAuth authorization expired")
@@ -138,11 +151,13 @@ class OAuth:
             raise GatewayError(
                 "oauth_failed", "OAuth token response contains no access token"
             )
-        value["expires_at"] = (
-            time.time() + float(value["expires_in"])
-            if value.get("expires_in")
-            else float("inf")
-        )
+        try:
+            duration = float(value["expires_in"]) if value.get("expires_in") is not None else None
+            if duration is not None and (not math.isfinite(duration) or duration < 0):
+                raise ValueError
+        except (TypeError, ValueError):
+            raise GatewayError("oauth_failed", "OAuth token response has an invalid expiry") from None
+        value["expires_at"] = time.time() + duration if duration is not None else None
         return value
 
 
@@ -202,7 +217,7 @@ async def status(server_id: str, request: Request, user=USER):
             value.get("access_token")
             and (
                 value.get("refresh_token")
-                or value.get("expires_at", float("inf")) > time.time()
+                or token_expiry(value) > time.time()
             )
         )
         cache = app.catalog.cached(row, user.id)

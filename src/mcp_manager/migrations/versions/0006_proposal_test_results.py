@@ -17,7 +17,10 @@ def upgrade():
     op.add_column("mcp_proposals", sa.Column("test_result", sa.JSON(), nullable=True))
     op.add_column(
         "mcp_proposals",
-        sa.Column("test_error", sa.Text(), nullable=False, server_default=""),
+        sa.Column(
+            "test_error", sa.Text(), nullable=False,
+            server_default=sa.text("('')") if op.get_context().dialect.name == "mysql" else "",
+        ),
     )
     op.add_column(
         "mcp_proposals",
