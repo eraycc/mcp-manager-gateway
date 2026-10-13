@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import StatementError
 
-from mcp_manager.database import User, SystemSetting
+from mcp_manager.database import SystemSetting, User
 from mcp_manager.oauth import OAuth
 
 

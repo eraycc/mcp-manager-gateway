@@ -35,7 +35,7 @@ async def resource_fixture(harness):
 
 
 async def test_revocation_during_embedding_discloses_no_resource(db_app, monkeypatch):
-    row, token, ctx = await resource_fixture(db_app)
+    _row, token, ctx = await resource_fixture(db_app)
     entered, release = asyncio.Event(), asyncio.Event()
     async def scores(scope, documents, query, config, **kwargs):
         entered.set()
@@ -56,7 +56,7 @@ async def test_revocation_during_embedding_discloses_no_resource(db_app, monkeyp
 
 
 async def test_embedding_documents_exclude_uris_and_extension_fields(db_app, monkeypatch):
-    row, token, ctx = await resource_fixture(db_app)
+    _row, _token, ctx = await resource_fixture(db_app)
     texts = []
     async def scores(scope, documents, query, config, **kwargs):
         texts.extend(document["text"] for document in documents)
@@ -71,7 +71,7 @@ async def test_embedding_documents_exclude_uris_and_extension_fields(db_app, mon
 
 
 async def test_configuration_change_during_embedding_discloses_no_resource(db_app, monkeypatch):
-    row, token, ctx = await resource_fixture(db_app)
+    row, _token, ctx = await resource_fixture(db_app)
     entered, release = asyncio.Event(), asyncio.Event()
     async def scores(scope, documents, query, config, **kwargs):
         entered.set()

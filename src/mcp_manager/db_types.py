@@ -1,6 +1,7 @@
 """Portable UTC timestamps, exact identifiers and finite JSON serialization."""
 import json
 from datetime import UTC
+
 from sqlalchemy import DateTime, String
 from sqlalchemy.dialects.mysql import DATETIME
 from sqlalchemy.engine import make_url

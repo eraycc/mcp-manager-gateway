@@ -9,10 +9,9 @@ from uuid import uuid4
 import httpx
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from mcp_manager.app import create_app
-from mcp_manager.config import Settings
 from mcp_manager.database import Database
 
 
@@ -24,7 +23,7 @@ def validate_test_url(value):
 
 
 def docker(*args, timeout=120):
-    result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+    result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout, check=False)
     if result.returncode:
         # Do not include command/environment/URL credentials in errors.
         raise RuntimeError(f"Docker operation {args[0]} failed")
@@ -56,7 +55,7 @@ async def managed_mysql_database(version):
                     async with engine.connect() as connection:
                         await connection.execute(text("SELECT 1"))
                     break
-                except Exception:
+                except (SQLAlchemyError, OSError):
                     if asyncio.get_running_loop().time() >= deadline:
                         raise RuntimeError("Isolated MySQL container did not become ready") from None
                     await asyncio.sleep(0.5)
@@ -99,9 +98,8 @@ async def database_target(backend, managed=False):
         async with isolated_mysql_schema(admin) as url:
             yield url
     elif managed:
-        async with managed_mysql_database(backend) as admin:
-            async with isolated_mysql_schema(admin) as url:
-                yield url
+        async with managed_mysql_database(backend) as admin, isolated_mysql_schema(admin) as url:
+            yield url
     else:
         raise RuntimeError(f"{env_name} is missing; provide an isolated URL or --managed-mysql")
 

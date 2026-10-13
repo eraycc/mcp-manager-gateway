@@ -82,9 +82,10 @@ def diagnostic_secrets(value, parent="", sensitive=False):
                 url = urlsplit(value)
                 values.extend(unquote(item) for item in (url.username, url.password) if item)
                 for key, item in parse_qsl(url.query, keep_blank_values=True):
-                    if key.lower() in SECRET_KEYS or any(part in key.lower() for part in ("token", "secret", "key", "password")):
-                        if item:
-                            values.append(item)
+                    if item and (key.lower() in SECRET_KEYS or any(
+                        part in key.lower() for part in ("token", "secret", "key", "password")
+                    )):
+                        values.append(item)
             except ValueError:
                 pass
     return list({encoded for value in values for encoded in (value, quote(value, safe=""), quote_plus(value))})
@@ -104,7 +105,22 @@ def safe_gateway_error(exc, *, config):
     if isinstance(exc, GatewayError):
         # Keep runtime failure identity/recording markers; discard untrusted detail fields.
         exc.args = (safe["message"],)
-        exc.details = {key: value for key, value in safe.items() if key not in {"code", "message"}}
+        secrets = diagnostic_secrets(config)
+
+        def scrub(value, depth=0):
+            if depth >= 8:
+                return "[TRUNCATED]"
+            if isinstance(value, dict):
+                return {str(key): scrub(item, depth + 1) for key, item in list(value.items())[:50]}
+            if isinstance(value, list):
+                return [scrub(item, depth + 1) for item in value[:100]]
+            if isinstance(value, str):
+                return str(sanitize_diagnostic_error(ValueError(value), secrets))
+            return value if value is None or isinstance(value, (bool, int, float)) else str(value)[:500]
+
+        exc.details = scrub(exc.details) | {
+            key: value for key, value in safe.items() if key not in {"code", "message"}
+        }
         return exc
     from fastapi import HTTPException
     if isinstance(exc, HTTPException):

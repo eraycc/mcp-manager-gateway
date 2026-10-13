@@ -49,6 +49,7 @@ def pytest_generate_tests(metafunc):
 async def managed_mysql_targets(pytestconfig):
     import os
     from contextlib import AsyncExitStack
+
     from db_fixture import managed_mysql_database
 
     targets = {}
@@ -65,10 +66,9 @@ async def managed_mysql_targets(pytestconfig):
 
 @pytest.fixture
 async def db_settings(db_backend, tmp_path, pytestconfig, managed_mysql_targets):
-    from db_fixture import database_target
-    from mcp_manager.config import Settings
+    from db_fixture import database_target, isolated_mysql_schema
 
-    from db_fixture import isolated_mysql_schema
+    from mcp_manager.config import Settings
 
     if db_backend in managed_mysql_targets:
         async with isolated_mysql_schema(managed_mysql_targets[db_backend]) as url:
@@ -93,8 +93,10 @@ async def dual_db(db_settings):
 @pytest.fixture
 async def db_app(db_settings):
     import asyncio
+
     import httpx
     from db_fixture import DbHarness
+
     from mcp_manager.app import create_app
 
     app = create_app(db_settings)

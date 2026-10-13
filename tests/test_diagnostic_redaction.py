@@ -1,5 +1,6 @@
 """Downstream failures must not leak configured secrets in HTTP, jobs or cache."""
 from test_proposal_atomicity import propose
+
 from mcp_manager.runtime import GatewayError
 
 MARKER = "SYNTHETIC_SECRET_MARKER_NOT_A_REAL_CREDENTIAL"
@@ -36,6 +37,7 @@ async def test_batch_failure_is_redacted_in_job_result(db_app, monkeypatch):
 
 async def test_refresh_failure_is_redacted_in_cache_and_audit(db_app, monkeypatch):
     import json
+
     from mcp_manager.database import McpServer
     catalog = db_app.app.state.catalog
     row = await catalog.create({
@@ -74,3 +76,17 @@ async def test_url_query_and_nested_exception_are_redacted_in_diagnosis(db_app, 
     })
     assert response.status_code == 502
     assert MARKER not in response.text
+
+
+def test_failure_status_details_survive_redaction():
+    import json
+
+    from mcp_manager.diagnostics import safe_gateway_error
+
+    error = GatewayError("startup_failed", "Synthetic " + MARKER, {
+        "startup_failure_count": 2, "status": "stopped", "last_startup_error": MARKER
+    })
+    result = safe_gateway_error(error, config={"env": {"PRIVATE_KEY": MARKER}})
+    assert result.details.get("startup_failure_count") == 2
+    assert result.details.get("status") == "stopped"
+    assert MARKER not in json.dumps(result.details)

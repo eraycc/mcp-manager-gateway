@@ -1,7 +1,6 @@
 """Reproduce two approvals passing the old pre-commit creation boundary."""
 import asyncio
 
-import pytest
 from sqlalchemy import select
 
 from mcp_manager.database import ApiToken, McpProposal, McpServer, User
