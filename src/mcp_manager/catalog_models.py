@@ -27,6 +27,7 @@ class CatalogGeneration(Base):
     status: Mapped[str] = mapped_column(String(32), default="staging", index=True)
     digest: Mapped[str] = mapped_column(String(64), default="")
     counts: Mapped[dict] = mapped_column(JSON, default=dict)
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=now)
     published_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 

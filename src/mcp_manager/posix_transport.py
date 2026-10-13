@@ -9,6 +9,37 @@ import anyio
 from mcp.shared.message import SessionMessage
 from mcp_types import jsonrpc_message_adapter
 
+from .runtime import GatewayError
+
+
+class BoundedMessageBuffer:
+    def __init__(self, *, max_bytes=8 * 1024 * 1024, encoding="utf-8", errors="strict"):
+        import codecs
+
+        if type(max_bytes) is not int or max_bytes < 1:
+            raise ValueError("Message byte budget must be positive")
+        self.max_bytes = max_bytes
+        self.decoder = codecs.getincrementaldecoder(encoding)(errors=errors)
+        self.buffer = bytearray()
+
+    def feed(self, chunk):
+        lines = self.decoder.decode(chunk).split("\n")
+        result = []
+        for index, part in enumerate(lines):
+            raw = part.encode("utf-8")
+            if len(self.buffer) + len(raw) > self.max_bytes:
+                raise GatewayError("message_too_large", "Downstream stdio message exceeds its byte budget")
+            self.buffer.extend(raw)
+            if index != len(lines) - 1:
+                result.append(self.buffer.decode("utf-8"))
+                self.buffer.clear()
+        return result
+
+    def finish(self):
+        tail = self.decoder.decode(b"", final=True)
+        if tail or self.buffer:
+            raise GatewayError("incomplete_message", "Downstream closed an incomplete JSON message")
+
 
 def _build_env(user_env):
     env = dict(os.environ)
@@ -53,7 +84,7 @@ async def close_group(process):
 
 
 @asynccontextmanager
-async def posix_stdio(parameters):
+async def posix_stdio(parameters, *, max_message_bytes=8 * 1024 * 1024):
     process = await asyncio.create_subprocess_exec(
         parameters.command, *parameters.args, stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=sys.stderr, start_new_session=True,
@@ -62,19 +93,21 @@ async def posix_stdio(parameters):
     outgoing, from_client = anyio.create_memory_object_stream(0)
 
     async def reader():
-        buffer = ""
-        import codecs
-        decoder = codecs.getincrementaldecoder(parameters.encoding)(errors=parameters.encoding_error_handler)
+        buffer = BoundedMessageBuffer(
+            max_bytes=max_message_bytes, encoding=parameters.encoding, errors=parameters.encoding_error_handler
+        )
         try:
             while chunk := await process.stdout.read(65536):
-                buffer += decoder.decode(chunk)
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
+                for line in buffer.feed(chunk):
                     try:
-                        message = SessionMessage(jsonrpc_message_adapter.validate_json(line, by_name=False))
+                        value = await asyncio.to_thread(jsonrpc_message_adapter.validate_json, line, by_name=False)
+                        message = SessionMessage(value)
                     except ValueError as exc:
                         message = exc
                     await to_client.send(message)
+            buffer.finish()
+        except (GatewayError, UnicodeError) as exc:
+            await to_client.send(exc)
         except (anyio.BrokenResourceError, anyio.ClosedResourceError, ConnectionError):
             pass
         finally:

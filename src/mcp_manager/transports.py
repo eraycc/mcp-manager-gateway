@@ -1,12 +1,14 @@
 """Transport plugins normalize wire data without flattening MCP content."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import json
 import re
 import sys
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from importlib.metadata import entry_points
 from urllib.parse import quote, urlsplit
 
@@ -220,12 +222,112 @@ def tool_allowed(config, name):
     return enabled and name not in denied and (allowed is None or name in allowed)
 
 
-class RestConnection:
+@dataclass
+class DiscoveryBudget:
+    max_entries: int = 50000
+    max_pages: int = 2000
+    max_decoded_bytes: int = 128 * 1024 * 1024
+    max_message_bytes: int = 8 * 1024 * 1024
+    batch_size: int = 250
+    entries: int = 0
+    pages: int = 0
+    decoded_bytes: int = 0
+
+    def __post_init__(self):
+        if any(type(value) is not int or value < 1 for value in (
+            self.max_entries, self.max_pages, self.max_decoded_bytes, self.max_message_bytes, self.batch_size
+        )) or self.batch_size > 250:
+            raise ValueError("Discovery budgets must be positive integers; batch_size must not exceed 250")
+
+    @classmethod
+    def from_config(cls, config):
+        fields = ("max_entries", "max_pages", "max_decoded_bytes", "max_message_bytes")
+        return cls(**{name: config["discovery_" + name] for name in fields if "discovery_" + name in config})
+
+    def before_page(self):
+        if self.pages >= self.max_pages:
+            raise GatewayError("discovery_budget_exceeded", "Capability discovery exceeded its page budget")
+
+    async def consume(self, result, entries):
+        self.before_page()
+        self.pages += 1
+        self.entries += entries
+        if self.entries > self.max_entries:
+            raise GatewayError("discovery_budget_exceeded", "Capability discovery exceeded its entry budget")
+        def measure():
+            size = 0
+            for piece in json.JSONEncoder(ensure_ascii=False, allow_nan=False).iterencode(result):
+                size += len(piece.encode("utf-8"))
+                if size > self.max_message_bytes:
+                    raise GatewayError("discovery_budget_exceeded", "Capability page exceeded its message byte budget")
+            return size
+        self.decoded_bytes += await asyncio.to_thread(measure)
+        if self.decoded_bytes > self.max_decoded_bytes:
+            raise GatewayError("discovery_budget_exceeded", "Capability discovery exceeded its decoded byte budget")
+
+
+async def iter_capabilities(connection, *, budget):
+    iterator = getattr(connection, "iter_capabilities", None)
+    if iterator:
+        async for kind, entries in iterator(budget=budget):
+            yield kind, entries
+        return
+    # Legacy transport plugins remain compatible; streaming plugins should expose iter_capabilities.
+    result = await connection.discover()
+    await budget.consume(result, sum(len(result.get(kind, [])) for kind in ("tools", "resources", "prompts", "templates")))
+    for kind in ("tools", "resources", "prompts", "templates"):
+        entries = result.get(kind, [])
+        for offset in range(0, len(entries), budget.batch_size):
+            yield kind, entries[offset:offset + budget.batch_size]
+    yield "_metadata", [{key: result.get(key) for key in ("serverInfo", "protocolVersion", "capability_errors")}]
+
+
+async def ingest_capabilities(connection, store, scope, *, budget, authorize=None):
+    generation = await store.begin_refresh(scope)
+    metadata = {}
+    try:
+        async for kind, entries in iter_capabilities(connection, budget=budget):
+            if authorize:
+                await authorize()
+            if kind == "_error":
+                for error in entries:
+                    await store.discard_kind(generation.id, error["capability"])
+            elif kind == "_metadata":
+                metadata = entries[0] if entries else {}
+            else:
+                await store.stage_page(generation.id, kind, entries)
+        if authorize:
+            await authorize()
+        await store.set_metadata(generation.id, metadata)
+        await store.publish(generation.id, expected_scope=scope)
+        return await store.get_summary(scope)
+    except BaseException:
+        # Cancellation/failure must not leave a partially ingested generation ready.
+        await asyncio.shield(store.fail_refresh(generation.id))
+        raise
+
+
+class CapabilityConnection:
+    async def ingest_catalog(self, store, scope, authorize=None):
+        return await ingest_capabilities(
+            self, store, scope, budget=DiscoveryBudget.from_config(self.config), authorize=authorize
+        )
+
+
+class PluginConnection(CapabilityConnection):
+    def __init__(self, connection, config):
+        self.connection, self.config = connection, config
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+
+class RestConnection(CapabilityConnection):
     def __init__(self, config, client):
         self.config = config
         self.client = client
 
-    async def discover(self):
+    async def _probe(self):
         headers = auth_headers(self.config)
         health = self.config.get("healthcheck_url")
         targets = [(health, headers)] if health else [
@@ -233,30 +335,62 @@ class RestConnection:
                 key: str(value) for key, value in tool["request"].get("headers", {}).items()
                 if "{" not in str(value)})
             for tool in self.config.get("tools", []) if tool_allowed(self.config, tool["name"])]
-        seen = set()
+        seen, unique = set(), []
         for url, request_headers in targets:
             if "{" in url:
-                raise GatewayError("healthcheck_required",
-                                   "REST routes with URL parameters require a fixed healthcheck_url")
+                raise GatewayError("healthcheck_required", "REST routes with URL parameters require a fixed healthcheck_url")
             key = (url, tuple(sorted(request_headers.items())))
-            if key in seen:
-                continue
-            seen.add(key)
-            # Never invoke POST/PUT/DELETE business operations during discovery.
-            method = "GET" if health else "HEAD"
+            if key not in seen:
+                seen.add(key)
+                unique.append((url, request_headers))
+        if not health and len(unique) > 64:
+            raise GatewayError("healthcheck_required", "More than 64 REST routes require a fixed healthcheck_url")
+        method = "GET" if health else "HEAD"
+        async def probe(target):
+            url, request_headers = target
             try:
                 async with self.client.stream(method, url, headers=request_headers) as response:
                     status = response.status_code
             except httpx.RequestError as exc:
                 raise GatewayError("connection_error",
-                                   f"REST {method} connection failed ({type(exc).__name__}): {exc}") from exc
+                    f"REST {method} connection failed ({type(exc).__name__}): {exc}") from exc
             if not (200 <= status < 300 or (not health and status == 405)):
                 raise GatewayError("healthcheck_failed", f"REST {method} probe returned HTTP {status}")
-        return {"tools": [{k: v for k, v in tool.items() if k in (
-            "name", "description", "inputSchema", "outputSchema", "annotations", "title")}
-            | {"inputSchema": tool.get("inputSchema", {"type": "object"})}
-            for tool in self.config.get("tools", []) if tool_allowed(self.config, tool["name"])],
-            "resources": [], "prompts": [], "templates": []}
+        for offset in range(0, len(unique), 4):
+            tasks = [asyncio.create_task(probe(target)) for target in unique[offset:offset + 4]]
+            try:
+                await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+
+    async def iter_capabilities(self, *, budget):
+        await self._probe()
+        page = []
+        for tool in self.config.get("tools", []):
+            if not tool_allowed(self.config, tool["name"]):
+                continue
+            page.append({key: value for key, value in tool.items() if key in (
+                "name", "description", "inputSchema", "outputSchema", "annotations", "title")}
+                | {"inputSchema": tool.get("inputSchema", {"type": "object"})})
+            if len(page) == budget.batch_size:
+                await budget.consume({"tools": page}, len(page))
+                yield "tools", page
+                page = []
+        if page:
+            await budget.consume({"tools": page}, len(page))
+            yield "tools", page
+        yield "_metadata", [{"capability_errors": []}]
+
+    async def discover(self):
+        result = {"tools": [], "resources": [], "prompts": [], "templates": []}
+        async for kind, entries in self.iter_capabilities(budget=DiscoveryBudget.from_config(self.config)):
+            if kind == "_metadata":
+                continue
+            result[kind].extend(entries)
+        return result
 
     async def call(self, name, arguments):
         if not tool_allowed(self.config, name):
@@ -301,7 +435,7 @@ class RestConnection:
         return result
 
 
-class SdkConnection:
+class SdkConnection(CapabilityConnection):
     def __init__(self, client, config=None):
         self.client = client
         self.config = config or {}
@@ -309,60 +443,81 @@ class SdkConnection:
     def tool_allowed(self, name):
         return tool_allowed(self.config, name)
 
-    async def _list(self, method, key):
-        cursor = None
-        found = []
-        seen = set()
+    async def _pages(self, method, key, budget):
+        cursor, seen = None, set()
         while True:
+            budget.before_page()
             result = wire(await getattr(self.client, method)(cursor=cursor, cache_mode="bypass"))
-            found.extend(result.get(key, []))
+            entries = result.get(key, [])
+            if not isinstance(entries, list):
+                raise GatewayError("invalid_pagination", "Capability page is not a list")
+            await budget.consume(result, len(entries))
+            yield entries
             cursor = result.get("nextCursor")
             if not cursor:
-                return found
-            if cursor in seen:
-                raise GatewayError("invalid_pagination", "Downstream repeated a capability cursor")
+                return
+            if not isinstance(cursor, str) or len(cursor) > 2048 or cursor in seen:
+                raise GatewayError("invalid_pagination", "Downstream returned an invalid or repeated capability cursor")
             seen.add(cursor)
 
-    async def discover(self):
+    async def _list(self, method, key):
+        found = []
+        async for entries in self._pages(method, key, DiscoveryBudget.from_config(self.config)):
+            found.extend(entries)
+        return found
+
+    async def iter_capabilities(self, *, budget):
         caps = wire(self.client.server_capabilities) or {}
-        result = {"tools": [], "resources": [], "prompts": [], "templates": []}
         probes = []
         if "tools" in caps:
             probes.append(("tools", "list_tools", "tools"))
         if "resources" in caps:
-            probes.extend((
-                ("resources", "list_resources", "resources"),
-                ("templates", "list_resource_templates", "resourceTemplates"),
-            ))
+            probes.extend((("resources", "list_resources", "resources"),
+                           ("templates", "list_resource_templates", "resourceTemplates")))
         if "prompts" in caps:
             probes.append(("prompts", "list_prompts", "prompts"))
         if not probes:
             raise GatewayError("discovery_failed", "Downstream declared no discoverable capabilities")
-
-        errors = []
-        succeeded = 0
+        errors, succeeded = [], 0
         for capability, method, key in probes:
             try:
-                items = await self._list(method, key)
-                if capability == "tools":
-                    items = [tool for tool in items if self.tool_allowed(tool["name"])]
-                result[capability] = items
+                async for entries in self._pages(method, key, budget):
+                    if capability == "tools":
+                        entries = [tool for tool in entries if self.tool_allowed(tool["name"])]
+                    for offset in range(0, len(entries), budget.batch_size):
+                        yield capability, entries[offset:offset + budget.batch_size]
                 succeeded += 1
-            except Exception as exc:  # noqa: BLE001 - isolate each declared capability probe
-                errors.append({
-                    "capability": capability,
-                    "error": (str(exc) or type(exc).__name__)[:500],
-                })
+            except GatewayError as exc:
+                if exc.code == "discovery_budget_exceeded":
+                    raise
+                from .diagnostics import safe_diagnostic_error
+                error = {"capability": capability, "error": safe_diagnostic_error(exc, config=self.config)["message"]}
+                errors.append(error)
+                yield "_error", [error]
+            except Exception as exc:  # noqa: BLE001 - one unsupported capability does not hide the others
+                from .diagnostics import safe_diagnostic_error
+                error = {"capability": capability, "error": safe_diagnostic_error(exc, config=self.config)["message"]}
+                errors.append(error)
+                yield "_error", [error]
         if not succeeded:
-            summary = "; ".join(
-                item["capability"] + ": " + item["error"] for item in errors
-            )
-            raise GatewayError(
-                "discovery_failed", "All declared MCP capabilities failed: " + summary
-            )
-        result["capability_errors"] = errors
-        result["serverInfo"] = wire(self.client.server_info) if self.client.server_info else {}
-        result["protocolVersion"] = self.client.protocol_version
+            summary = "; ".join(item["capability"] + ": " + item["error"] for item in errors)
+            raise GatewayError("discovery_failed", "All declared MCP capabilities failed: " + summary)
+        yield "_metadata", [{
+            "capability_errors": errors, "serverInfo": wire(self.client.server_info) if self.client.server_info else {},
+            "protocolVersion": self.client.protocol_version,
+        }]
+
+    async def discover(self):
+        result = dict.fromkeys(("tools", "resources", "prompts", "templates"))
+        result = {kind: [] for kind in result}
+        async for kind, entries in self.iter_capabilities(budget=DiscoveryBudget.from_config(self.config)):
+            if kind == "_error":
+                for error in entries:
+                    result[error["capability"]] = []
+            elif kind == "_metadata":
+                result.update(entries[0])
+            else:
+                result[kind].extend(entries)
         return result
 
     async def call(self, name, arguments):
@@ -383,7 +538,7 @@ async def connect(spec: ServerSpec):
     validate_config(spec.transport, config)
     if spec.transport in PLUGINS:
         async with PLUGINS[spec.transport].connect(spec) as connection:
-            yield connection
+            yield PluginConnection(connection, config)
         return
     if spec.transport == "rest":
         async with httpx.AsyncClient(timeout=float(config.get("call_timeout", 60)),
@@ -399,7 +554,7 @@ async def connect(spec: ServerSpec):
                                        encoding=config.get("encoding", "utf-8"))
         if sys.platform != "win32":
             from .posix_transport import posix_stdio
-            source = posix_stdio(source)
+            source = posix_stdio(source, max_message_bytes=DiscoveryBudget.from_config(config).max_message_bytes)
         client = Client(source, read_timeout_seconds=float(config.get("call_timeout", 60)), cache=None)
         # The timeout scope encloses the SDK's scopes; disable its deadline once ready.
         with anyio.fail_after(timeout) as startup:

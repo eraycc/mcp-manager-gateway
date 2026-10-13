@@ -17,7 +17,11 @@ from jsonschema import Draft202012Validator
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
+from .artifact_store import ArtifactStore
+from .catalog_store import CatalogStore
+from .catalog_types import CatalogScope
 from .credentials import catalog_owner, credential_owner
+from .db_types import strict_json_dumps
 from .diagnostics import SECRET_KEYS, safe_gateway_error
 from .diagnostics import diagnostic_cause as diagnostic_cause
 from .diagnostics import sanitize_diagnostic_error as sanitize_diagnostic_error
@@ -107,6 +111,8 @@ class Catalog:
         self.tasks = set()
         self.cache_store = JsonlStore(self.cache_dir / "catalog.jsonl", fail_closed=True)
         self._cache_failures = {}
+        self.artifacts = ArtifactStore(config.data_dir)
+        self.index = CatalogStore(db, self.artifacts, signing_key=config.jwt_secret, scope_resolver=self._index_scope)
         self.startup_failure_threshold = 3
         def legacy_cache(path, value):
             server_id, revision, owner = path.stem.rsplit("-", 2)
@@ -775,6 +781,53 @@ class Catalog:
                 )
             except (GatewayError, HTTPException):
                 return self.cached(row, user_id)
+
+    async def _index_scope(self, session, row, owner):
+        if row.isolation != "user" and owner != "service":
+            raise GatewayError("credential_changed", "Catalog owner does not match service isolation")
+        keys = {
+            self.credentials.key(row.id, owner),
+            self.credentials.key(row.id, "service"),
+            "oauth:" + row.id + ":" + owner,
+        }
+        stored = []
+        for key in sorted(keys):
+            item = await session.get(SystemSetting, key, populate_existing=True)
+            stored.append([key, item.value if item else None])
+        # Hash sealed payloads, never place credentials in the public catalog DTO.
+        credential_generation = hashlib.sha256(strict_json_dumps([row.config, stored]).encode()).hexdigest()
+        return CatalogScope(row.id, owner, row.revision, credential_generation)
+
+    async def index_scope(self, row, user_id=None):
+        async with self.db.session() as session:
+            current = await session.get(McpServer, row.id, populate_existing=True)
+            if not current or current.revision != row.revision:
+                raise GatewayError("revision_changed", "MCP configuration changed")
+            return await self._index_scope(session, current, catalog_owner(current.isolation, user_id))
+
+    async def refresh_index(self, server_id, user_id=None, *, authorize=None):
+        if authorize:
+            await authorize()
+        row = await self.get(server_id)
+        lease, spec = None, None
+        try:
+            spec = await self.spec(row, user_id, allow_failed=True)
+            scope = await self.index_scope(row, user_id)
+            lease = self.runtime.create_lease(user_id or "system", "maintenance", kind="maintenance")
+            result = await self.runtime.perform(
+                spec, lease.id, "ingest_catalog", self.index, scope, authorize,
+                authorize=authorize, business=False,
+            )
+            if authorize:
+                await authorize()
+            if await self.index_scope(await self.get(server_id), user_id) != scope:
+                raise GatewayError("credential_changed", "MCP scope changed while publishing capabilities")
+            return result
+        except Exception as exc:
+            raise safe_gateway_error(exc, config=spec.config if spec else self.unseal(row.config)) from None
+        finally:
+            if lease:
+                await self.runtime.release(lease.id)
 
     async def refresh(self, server_id, user_id=None, *, authorize=None):
         if authorize:

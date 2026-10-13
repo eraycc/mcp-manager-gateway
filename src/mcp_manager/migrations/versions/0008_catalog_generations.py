@@ -29,6 +29,7 @@ def upgrade():
         sa.Column("status", sa.String(32), nullable=False),
         sa.Column("digest", sa.String(64), nullable=False),
         sa.Column("counts", sa.JSON(), nullable=False),
+        sa.Column("details", sa.JSON(), nullable=False),
         sa.Column("created_at", timestamp(), nullable=False),
         sa.Column("published_at", timestamp(), nullable=True))
     for column in ("scope_key", "server_id", "status"):

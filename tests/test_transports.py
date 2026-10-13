@@ -40,7 +40,10 @@ async def test_android_stdio_uses_posix_transport(monkeypatch):
     wrapped_source = object()
     client_sources = []
 
-    def wrap_source(source):
+    received_budgets = []
+
+    def wrap_source(source, *, max_message_bytes):
+        received_budgets.append(max_message_bytes)
         return wrapped_source
 
     class FakeClient:
@@ -56,12 +59,14 @@ async def test_android_stdio_uses_posix_transport(monkeypatch):
     monkeypatch.setattr(transports.sys, "platform", "android")
     monkeypatch.setattr(posix_transport, "posix_stdio", wrap_source)
     monkeypatch.setattr(transports, "Client", FakeClient)
-    spec = ServerSpec(id="android", transport="stdio", config={"command": "ignored"})
+    spec = ServerSpec(id="android", transport="stdio", config={"command": "ignored",
+        "discovery_max_message_bytes": 12345})
 
     async with transports.connect(spec):
         pass
 
     assert client_sources == [wrapped_source]
+    assert received_budgets == [12345]
 
 
 @pytest.mark.asyncio

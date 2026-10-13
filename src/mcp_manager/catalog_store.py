@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from .artifact_store import ArtifactStore
@@ -149,6 +149,26 @@ class CatalogStore:
         except IntegrityError:
             raise GatewayError("catalog_duplicate_entry", "Catalog contains duplicate entries or conflicting hashes") from None
 
+    async def set_metadata(self, identity, metadata):
+        size = await asyncio.to_thread(lambda: len(strict_json_dumps(metadata).encode()))
+        if size > 16384:
+            raise GatewayError("catalog_metadata_too_large", "Capability metadata exceeds the summary budget")
+        async with self.db.locked() as session:
+            generation, _, _ = await self._staging(session, identity)
+            generation.details = metadata
+
+    async def discard_kind(self, identity, kind):
+        self._check_kind(kind)
+        while True:
+            async with self.db.locked() as session:
+                await self._staging(session, identity)
+                ids = list((await session.scalars(select(CatalogEntry.id).where(
+                    CatalogEntry.generation_id == identity, CatalogEntry.kind == kind
+                ).limit(250))).all())
+                if not ids:
+                    return
+                await session.execute(delete(CatalogEntry).where(CatalogEntry.id.in_(ids)))
+
     async def publish(self, identity, *, expected_scope):
         # Freeze staging before the bounded streaming digest pass, outside the final publish transaction.
         async with self.db.locked() as session:
@@ -207,6 +227,7 @@ class CatalogStore:
                 "status": "ready" if generation else "empty",
                 "tool_count": counts.get("tools", 0), "resource_count": counts.get("resources", 0),
                 "prompt_count": counts.get("prompts", 0), "template_count": counts.get("templates", 0),
+                **(generation.details if generation else {}),
             }
 
     def _cursor(self, payload):
