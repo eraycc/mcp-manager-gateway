@@ -370,27 +370,36 @@ class Discovery:
                   and catalog.cached_view(row, user.id if user else None)["tools"]]
         if not legacy:
             return await self.indexed_tool_search(
-                selected_rows, scopes, indexed, arguments, version, authorize
+                selected_rows,
+                scopes,
+                indexed,
+                arguments,
+                version,
+                config,
+                authorize,
             )
         return await self.compatibility_tool_search(
             selected_rows, scopes, indexed, arguments, version, embedding_scope, config, authorize
         )
 
-    def tool_envelope(self, page, *, missing=None, names_only=False):
+    def tool_envelope(self, page, *, missing=None, names_only=False, search=None):
         # Provider metadata is charged and disclosed only for contracts in this page.
         providers = {entry["provider"]["id"]: entry["provider"] for entry in page["items"]}
         response = {
             "instructions": ("Query the exact tool name without names_only to obtain its complete inputSchema before gateway_call."
                              if names_only else "Use gateway_call with gateway_name and arguments matching inputSchema."),
-            "names_only": names_only,
             "mcps": sorted(providers.values(), key=lambda value: (value["slug"], value["id"])),
             "tools": [entry["tool"] for entry in page["items"]],
             "truncated": bool(page["next_cursor"]), "returned": page["returned"], "total": page["total"],
         }
+        if names_only:
+            response["names_only"] = True
         if page["next_cursor"]:
             response.update(next_cursor=page["next_cursor"], hint="Use a narrower tool/tools query or continue with next_cursor.")
         if missing:
             response["missing_tools"] = missing
+        if search:
+            response["search"] = search
         return result_json(response)
 
     @staticmethod
@@ -401,7 +410,16 @@ class Discovery:
     def page_entry(self, row, tool):
         return {"tool": tool, "provider": {"id": row.id, "name": row.name, "slug": row.slug}}
 
-    async def indexed_tool_search(self, selected, scopes, summaries, arguments, version, authorize):
+    async def indexed_tool_search(
+        self,
+        selected,
+        scopes,
+        summaries,
+        arguments,
+        version,
+        config,
+        authorize,
+    ):
         catalog, state = self.gateway.app.state.catalog, self.gateway.app.state
         generations = [summaries[row.id]["generation"] for row in selected if summaries[row.id].get("generation")]
         offset = decode_cursor(arguments.get("cursor"), version, state.config.jwt_secret)
@@ -412,9 +430,57 @@ class Discovery:
             exact_total, _entries = await catalog.index.query_tool_entries(generations, exact_names=[query], limit=0)
             if exact_total:
                 exact_names, query = [query], ""
-        total, entries = await catalog.index.query_tool_entries(
-            generations, query=query, exact_names=exact_names, offset=offset, limit=arguments.get("limit", 20),
-        )
+        search_status = {"mode": "keyword", "semantic_status": "not_needed"}
+        if query and exact_names is None:
+            total, candidates = await catalog.index.query_tool_entries(
+                generations,
+                query=query,
+                offset=0,
+                limit=200,
+            )
+            semantic, search_status = await state.embeddings.score_candidates(
+                scopes,
+                candidates,
+                query,
+                config,
+                deadline=2.0,
+                authorize=authorize,
+            )
+            if semantic:
+                lexical_order = {
+                    state.embeddings.candidate_key(entry): position
+                    for position, entry in enumerate(candidates, 1)
+                }
+                semantic_order = {
+                    key: position
+                    for position, key in enumerate(
+                        sorted(semantic, key=lambda item: (-semantic[item], item)),
+                        1,
+                    )
+                }
+                candidates.sort(
+                    key=lambda entry: (
+                        -(
+                            1 / (60 + lexical_order[state.embeddings.candidate_key(entry)])
+                            + (
+                                1 / (60 + semantic_order[state.embeddings.candidate_key(entry)])
+                                if state.embeddings.candidate_key(entry) in semantic_order
+                                else 0
+                            )
+                        ),
+                        entry.server_id,
+                        entry.original_name,
+                    )
+                )
+            entries = candidates[offset:offset + arguments.get("limit", 20)]
+        else:
+            total, entries = await catalog.index.query_tool_entries(
+                generations,
+                query=query,
+                exact_names=exact_names,
+                offset=offset,
+                limit=arguments.get("limit", 20),
+            )
         if arguments.get("cursor") and offset >= total:
             raise DiscoveryError("invalid_cursor", "Discovery cursor is outside the result")
         missing = []
@@ -426,7 +492,12 @@ class Discovery:
         builder = await asyncio.to_thread(
             McpPageBuilder, total=total, offset=offset, limit=arguments.get("limit", 20),
             version=version, signing_key=state.config.jwt_secret,
-            envelope=lambda page: self.tool_envelope(page, missing=missing, names_only=arguments.get("names_only", False)),
+            envelope=lambda page: self.tool_envelope(
+                page,
+                missing=missing,
+                names_only=arguments.get("names_only", False),
+                search=search_status,
+            ),
         )
         by_id = {row.id: row for row in selected}
         for entry in entries:

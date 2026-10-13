@@ -116,13 +116,43 @@ def fingerprint(value):
 
 
 def paginate(items, *, cursor, limit, version, key):
-    """Generic discovery page; concrete handlers supply their complete envelope elsewhere."""
-    from .paging import bounded_mcp_page
+    """Compatibility paginator for the former items-only discovery budget."""
+    from .paging import decode_cursor, encode_cursor
+    from .runtime import GatewayError
 
-    def envelope(page):
-        return {
-            "content": [{"type": "text", "text": json.dumps(page, ensure_ascii=False)}],
-            "structuredContent": page, "isError": False, "resultType": "complete",
+    offset = decode_cursor(cursor, version, key)
+    if cursor and offset >= len(items):
+        raise GatewayError("invalid_cursor", "Cursor offset is outside the result")
+    selected = []
+    for item in items[offset:offset + limit]:
+        candidate = [*selected, item]
+        following = encode_cursor(offset + len(candidate), version, key) if (
+            offset + len(candidate) < len(items)
+        ) else None
+        page = {
+            "items": candidate,
+            "total": len(items),
+            "returned": len(candidate),
+            "next_cursor": following,
+            "catalog_version": version,
         }
-    return bounded_mcp_page(items, envelope=envelope, cursor=cursor, limit=limit,
-                            version=version, signing_key=key)
+        size = len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode())
+        if size > MAX_PAGE_BYTES:
+            if not selected:
+                name = item.get("gateway_name", item.get("name", "catalog entry"))
+                raise GatewayError(
+                    "catalog_entry_too_large",
+                    f"Complete catalog contract for {name} exceeds the page budget",
+                )
+            break
+        selected = candidate
+    following = encode_cursor(offset + len(selected), version, key) if (
+        offset + len(selected) < len(items)
+    ) else None
+    return {
+        "items": selected,
+        "total": len(items),
+        "returned": len(selected),
+        "next_cursor": following,
+        "catalog_version": version,
+    }

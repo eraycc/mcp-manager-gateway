@@ -5,6 +5,7 @@ from sqlalchemy import delete, exists, select
 
 from .catalog_models import ArtifactObject, CatalogEntry, CatalogGeneration, CatalogHead, ProposalTestEntry
 from .database import McpProposal
+from .embedding_models import EmbeddingVector
 from .job_models import JobResult
 
 
@@ -57,6 +58,7 @@ async def _prune_artifacts(state, limit):
             ~exists().where(CatalogEntry.artifact_id == ArtifactObject.id),
             ~exists().where(ProposalTestEntry.artifact_id == ArtifactObject.id),
             ~exists().where(JobResult.artifact_id == ArtifactObject.id),
+            ~exists().where(EmbeddingVector.artifact_id == ArtifactObject.id),
         ).limit(limit))).all())
     removed = await state.catalog.artifacts.discard(ids, limit=limit)
     if not removed:
@@ -68,6 +70,7 @@ async def _prune_artifacts(state, limit):
             ~exists().where(CatalogEntry.artifact_id == ArtifactObject.id),
             ~exists().where(ProposalTestEntry.artifact_id == ArtifactObject.id),
             ~exists().where(JobResult.artifact_id == ArtifactObject.id),
+            ~exists().where(EmbeddingVector.artifact_id == ArtifactObject.id),
         ))).all())
         if deletable:
             await session.execute(delete(ArtifactObject).where(ArtifactObject.id.in_(deletable)))

@@ -1,8 +1,8 @@
 """Application configuration; paths are independent of the launch directory."""
 import base64
 import hashlib
-import re
 import os
+import re
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -44,6 +44,21 @@ class Settings(BaseSettings):
     secret_key: str = ""
     cookie_secure: bool = False
     public_url: str = "http://127.0.0.1:8765"
+    runtime_global_calls: int = 64
+    runtime_user_calls: int = 16
+    runtime_mcp_calls: int = 16
+    runtime_queued_calls: int = 256
+    runtime_global_instances: int = 64
+    runtime_user_instances: int = 16
+    runtime_instance_waiters: int = 64
+    runtime_queue_timeout: float = 60.0
+    password_workers: int = 2
+    password_waiters: int = 32
+    login_failure_limit: int = 20
+    login_failure_window: float = 300.0
+    registration_limit: int = 100
+    registration_window: float = 3600.0
+    identity_rate_limit_entries: int = 10000
 
     def __init__(self, **values):
         home = Path(values.get("home_dir") or default_home()).expanduser().resolve()

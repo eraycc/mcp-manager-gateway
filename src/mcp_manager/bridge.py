@@ -18,7 +18,8 @@ class BridgeUpstream:
 
     def __init__(self, base, token):
         self.base, self.token = base, token
-        self.queue = asyncio.Queue()
+        self.queue = asyncio.Queue(maxsize=64)
+        self.dispatch_limit = 64
         self.stale = False
 
     async def __aenter__(self):
@@ -64,10 +65,19 @@ class BridgeUpstream:
                 lease_http.headers["X-MCP-Manager-Client"] = lease["client_secret"]
             task = asyncio.create_task(self.heartbeat(lease_http, lease_id, lease.get("heartbeat_seconds", 30)))
             try:
-                async with httpx2.AsyncClient(headers=headers, timeout=300, trust_env=False) as http:
-                    async with Client(streamable_http_client(self.base + "/mcp", http_client=http),
-                                      cache=None, read_timeout_seconds=300) as client:
-                        yield client
+                async with (
+                    httpx2.AsyncClient(
+                        headers=headers,
+                        timeout=300,
+                        trust_env=False,
+                    ) as http,
+                    Client(
+                        streamable_http_client(self.base + "/mcp", http_client=http),
+                        cache=None,
+                        read_timeout_seconds=300,
+                    ) as client,
+                ):
+                    yield client
             finally:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
@@ -78,7 +88,10 @@ class BridgeUpstream:
         if self.task.done():
             raise RuntimeError("Bridge connection closed")
         result = asyncio.get_running_loop().create_future()
-        await self.queue.put((result, method, args, kwargs))
+        try:
+            self.queue.put_nowait((result, method, args, kwargs))
+        except asyncio.QueueFull:
+            raise RuntimeError("Bridge request queue is full; retry later") from None
         try:
             # The owner may die immediately after the queue check.
             await asyncio.wait({result, self.task}, return_when=asyncio.FIRST_COMPLETED)
@@ -96,7 +109,7 @@ class BridgeUpstream:
             if not current.done():
                 current.set_exception(RuntimeError("Bridge connection closed"))
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- SDK request errors are forwarded to the caller.
             if not is_request_error(exc):
                 self.stale = True
             if not current.done():
@@ -114,6 +127,12 @@ class BridgeUpstream:
                 self.ready.set_result(None)
                 try:
                     while True:
+                        if len(in_flight) >= self.dispatch_limit:
+                            done, _pending = await asyncio.wait(
+                                in_flight,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            in_flight.difference_update(done)
                         item = await self.queue.get()
                         if item is None:
                             await asyncio.gather(*in_flight, return_exceptions=True)
@@ -133,7 +152,7 @@ class BridgeUpstream:
                                 task = asyncio.create_task(self.dispatch(client, current, method, args, kwargs))
                                 in_flight.add(task)
                                 task.add_done_callback(in_flight.discard)
-                        except Exception as exc:
+                        except Exception as exc:  # noqa: BLE001 -- reconnect on SDK boundary failures.
                             self.stale = True
                             if not current.done():
                                 current.set_exception(exc)
@@ -185,9 +204,7 @@ def create_bridge_server(upstream):
 
 
 async def run_bridge(url, token):
-    base = url.rstrip("/")
-    if base.endswith("/mcp"):
-        base = base[:-4]
+    base = url.rstrip("/").removesuffix("/mcp")
     async with BridgeUpstream(base, token) as upstream:
         server = create_bridge_server(upstream)
         async with stdio_server() as (reader, writer):

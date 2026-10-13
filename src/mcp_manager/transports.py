@@ -28,12 +28,43 @@ BUILTIN_TRANSPORTS = {"stdio", "streamable-http", "sse", "rest"}
 PLUGINS = {}
 
 
+MAX_TOOL_RESPONSE_BYTES = 8 * 1024 * 1024
+
+
+async def read_response_with_budget(response, max_bytes=MAX_TOOL_RESPONSE_BYTES) -> bytes:
+    """Read an HTTP response incrementally and stop before unbounded buffering."""
+    if type(max_bytes) is not int or max_bytes < 1:
+        raise ValueError("Response byte budget must be a positive integer")
+    declared = response.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > max_bytes:
+                raise GatewayError(
+                    "outcome_unknown",
+                    "Downstream response exceeded the byte budget after dispatch",
+                )
+        except ValueError:
+            raise GatewayError(
+                "outcome_unknown",
+                "Downstream returned an invalid Content-Length after dispatch",
+            ) from None
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            raise GatewayError(
+                "outcome_unknown",
+                "Downstream response exceeded the byte budget after dispatch",
+            )
+    return bytes(body)
+
+
 def register_transport(name, plugin):
     """Plugin exposes validate(config) and async-context-manager connect(spec)."""
     if not re.fullmatch(r"[a-z][a-z0-9-]{1,31}", name) or name in BUILTIN_TRANSPORTS or name in PLUGINS:
         raise ValueError("Transport plugin name is invalid or already registered")
     if not callable(getattr(plugin, "validate", None)) or not callable(getattr(plugin, "connect", None)):
-        raise ValueError("Plugin requires validate and connect")
+        raise TypeError("Plugin requires validate and connect")
     PLUGINS[name] = plugin
 
 
@@ -105,9 +136,9 @@ def auth_headers(config):
 
 def validate_config(transport, config):
     if not isinstance(config, dict):
-        raise ValueError("MCP config must be an object")
+        raise TypeError("MCP config must be an object")
     if not isinstance(config.get("auth", {}), dict):
-        raise ValueError("auth must be an object")
+        raise TypeError("auth must be an object")
     for key in ("headers", "env", "env_headers"):
         value = config.get(key, {})
         if not isinstance(value, dict) or any(not isinstance(k, str) or not isinstance(v, str)
@@ -156,14 +187,14 @@ def validate_config(transport, config):
         names = set()
         for tool in tools:
             if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
-                raise ValueError("Every REST tool requires a string name")
+                raise TypeError("Every REST tool requires a string name")
             if not tool.get("name") or tool["name"] in names:
                 raise ValueError("REST tool names must be nonempty and unique")
             names.add(tool["name"])
             Draft202012Validator.check_schema(tool.get("inputSchema", {"type": "object"}))
             request = tool.get("request", {})
             if not isinstance(request, dict) or not isinstance(tool.get("response", {}), dict):
-                raise ValueError("REST request and response must be objects")
+                raise TypeError("REST request and response must be objects")
             check_url(request.get("url", ""), template=True)
             if request.get("method", "GET").upper() not in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
                 raise ValueError("Unsupported REST HTTP method")
@@ -202,7 +233,7 @@ def validate_service_config(transport, isolation, config):
 
 def check_url(url, *, template=False):
     if not isinstance(url, str):
-        raise ValueError("URL must be a string")
+        raise TypeError("URL must be a string")
     parsed = urlsplit(url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise ValueError("URL must use http or https")
@@ -412,18 +443,36 @@ class RestConnection(CapabilityConnection):
         if "body" in req:
             body = substitute(req["body"], arguments)
             kwargs["content"] = body if isinstance(body, (str, bytes)) else json.dumps(body)
-        response = await self.client.request(req.get("method", "GET"), url, **kwargs)
         options = tool.get("response", {})
-        is_error = not 200 <= response.status_code < 300
         kind = options.get("type", "json")
+        raw_budget = MAX_TOOL_RESPONSE_BYTES * 3 // 4 if kind in ("image", "audio") else MAX_TOOL_RESPONSE_BYTES
+        async with self.client.stream(
+            req.get("method", "GET"),
+            url,
+            **kwargs,
+        ) as response:
+            raw = await read_response_with_budget(response, max_bytes=raw_budget)
+            status_code = response.status_code
+            content_type = response.headers.get(
+                "content-type",
+                "application/octet-stream",
+            )
+            encoding = response.encoding or "utf-8"
+        is_error = not 200 <= status_code < 300
         if kind in ("image", "audio"):
-            return {"content": [{"type": kind, "data": base64.b64encode(response.content).decode(),
-                                 "mimeType": response.headers.get("content-type", "application/octet-stream")}],
-                    "isError": is_error}
+            return {
+                "content": [{
+                    "type": kind,
+                    "data": base64.b64encode(raw).decode(),
+                    "mimeType": content_type,
+                }],
+                "isError": is_error,
+            }
+        text_value = raw.decode(encoding, errors="replace")
         try:
-            data = response.json() if kind != "text" else response.text
-        except ValueError:
-            data = response.text
+            data = json.loads(raw) if kind != "text" else text_value
+        except (ValueError, UnicodeDecodeError):
+            data = text_value
         if not is_error:
             data = pointer(data, options.get("pointer"))
             if options.get("mapping"):

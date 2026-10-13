@@ -1,8 +1,13 @@
 """Cookie sessions, opaque API tokens and permission intersections."""
+import asyncio
 import hashlib
+import heapq
 import math
 import secrets
+from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -22,6 +27,130 @@ router = APIRouter(prefix="/api/v1")
 hasher = PasswordHasher()
 ISSUER = "mcp-manager"
 AUDIENCE = "mcp-manager-console"
+
+
+class PasswordPoolBusy(RuntimeError):
+    """Password work was rejected before entering the bounded queue."""
+
+
+class PasswordWorkPool:
+    """Run expensive password operations off-loop with a bounded submission queue."""
+
+    def __init__(self, max_workers=2, max_waiters=32):
+        self.max_workers = max(1, min(int(max_workers), 8))
+        self.max_waiters = max(0, min(int(max_waiters), 128))
+        self._capacity = self.max_workers + self.max_waiters
+        self._pending = 0
+        self._lock = asyncio.Lock()
+        self._executor = ThreadPoolExecutor(
+            max_workers=self.max_workers,
+            thread_name_prefix="mmg-password",
+        )
+
+    async def _run(self, function, *args):
+        async with self._lock:
+            if self._pending >= self._capacity:
+                raise PasswordPoolBusy("Password service is busy")
+            self._pending += 1
+        try:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(self._executor, partial(function, *args))
+        finally:
+            async with self._lock:
+                self._pending -= 1
+
+    async def hash(self, value):
+        return await self._run(hasher.hash, value)
+
+    async def verify(self, value, encoded):
+        return await self._run(verify_password, value, encoded)
+
+    def close(self):
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+class IdentityRateLimiter:
+    """Bounded in-memory sliding windows for unauthenticated identity endpoints."""
+
+    def __init__(self, max_entries=10000, *, clock=None):
+        self.max_entries = max(1, min(int(max_entries), 10000))
+        self._entries = OrderedDict()
+        self._expiries = []
+        self._generation = 0
+        self._clock = clock
+        self._lock = asyncio.Lock()
+
+    def _now(self):
+        return self._clock() if self._clock is not None else asyncio.get_running_loop().time()
+
+    def _purge(self, current):
+        while self._expiries and self._expiries[0][0] <= current:
+            _expires, generation, key = heapq.heappop(self._expiries)
+            record = self._entries.get(key)
+            if record is not None and record[2] == generation:
+                del self._entries[key]
+
+    async def check(self, key, limit, window, *, consume=False):
+        limit = max(1, int(limit))
+        window = max(1.0, float(window))
+        current = self._now()
+        async with self._lock:
+            self._purge(current)
+            record = self._entries.get(key)
+            values = record[0] if record is not None else deque()
+            cutoff = current - window
+            while values and values[0] <= cutoff:
+                values.popleft()
+            if len(values) >= limit:
+                retry_after = max(1, math.ceil(values[0] + window - current))
+                raise HTTPException(
+                    429,
+                    "Too many identity attempts",
+                    headers={"Retry-After": str(retry_after)},
+                )
+            if consume:
+                values.append(current)
+            if not values:
+                self._entries.pop(key, None)
+                return
+            self._generation += 1
+            expires = values[-1] + window
+            self._entries[key] = (values, expires, self._generation)
+            self._entries.move_to_end(key)
+            heapq.heappush(self._expiries, (expires, self._generation, key))
+            while len(self._entries) > self.max_entries:
+                self._entries.popitem(last=False)
+
+    async def record(self, key, limit, window):
+        await self.check(key, limit, window, consume=True)
+
+
+def _request_ip(request):
+    return (request.client.host if request.client else "unknown")[:64]
+
+
+def _password_pool(request):
+    pool = getattr(request.app.state, "password_pool", None)
+    if pool is None:
+        config = request.app.state.config
+        pool = PasswordWorkPool(config.password_workers, config.password_waiters)
+        request.app.state.password_pool = pool
+    return pool
+
+
+def _rate_limiter(request):
+    limiter = getattr(request.app.state, "identity_rates", None)
+    if limiter is None:
+        limiter = IdentityRateLimiter(request.app.state.config.identity_rate_limit_entries)
+        request.app.state.identity_rates = limiter
+    return limiter
+
+
+async def _password_call(request, method, *args):
+    try:
+        return await getattr(_password_pool(request), method)(*args)
+    except PasswordPoolBusy as exc:
+        raise HTTPException(429, str(exc), headers={"Retry-After": "1"}) from exc
 
 
 def expired(value):
@@ -262,7 +391,14 @@ async def bootstrap(request: Request):
 async def register(data: Register, request: Request):
     origin_check(request)
     db = request.app.state.db
-    encoded = hasher.hash(data.password)
+    config = request.app.state.config
+    await _rate_limiter(request).check(
+        ("register", _request_ip(request)),
+        config.registration_limit,
+        config.registration_window,
+        consume=True,
+    )
+    encoded = await _password_call(request, "hash", data.password)
     async with db.locked() as s:
         setting = await s.get(SystemSetting, "registration_enabled")
         if setting and not setting.value:
@@ -280,10 +416,41 @@ async def register(data: Register, request: Request):
 async def login(data: Login, request: Request, response: Response):
     origin_check(request)
     db, config = request.app.state.db, request.app.state.config
+    rate_key = ("login", _request_ip(request), data.username.casefold())
+    await _rate_limiter(request).check(
+        rate_key,
+        config.login_failure_limit,
+        config.login_failure_window,
+    )
     days = await get_setting(db, "jwt_days", 30)
+    async with db.session() as s:
+        candidate = await s.scalar(select(User).where(User.username == data.username))
+        snapshot = (
+            candidate.id,
+            candidate.password_hash,
+            candidate.auth_version,
+            candidate.disabled,
+        ) if candidate else None
+    verified = bool(
+        snapshot
+        and not snapshot[3]
+        and await _password_call(request, "verify", data.password, snapshot[1])
+    )
+    if not verified:
+        await _rate_limiter(request).record(
+            rate_key,
+            config.login_failure_limit,
+            config.login_failure_window,
+        )
+        raise HTTPException(401, "Invalid username or password")
     async with db.locked() as s:
-        user = await s.scalar(select(User).where(User.username == data.username))
-        if not user or user.disabled or not verify_password(data.password, user.password_hash):
+        user = await s.get(User, snapshot[0], populate_existing=True)
+        if (
+            user is None
+            or user.disabled
+            or user.password_hash != snapshot[1]
+            or user.auth_version != snapshot[2]
+        ):
             raise HTTPException(401, "Invalid username or password")
         expiry = now() + timedelta(days=float(days)) if days else None
         session = AuthSession(
@@ -326,14 +493,28 @@ async def me(user=CURRENT_USER):
 
 @router.patch("/me")
 async def update_me(data: ProfilePatch, request: Request, user=CURRENT_USER):
-    async with request.app.state.db.locked() as s:
+    db = request.app.state.db
+    values = data.model_dump(exclude_unset=True, exclude_none=True)
+    password_snapshot = None
+    encoded = None
+    if data.password:
+        async with db.session() as session:
+            candidate = await session.get(User, user.id)
+            password_snapshot = (candidate.password_hash, candidate.auth_version) if candidate else None
+        if (
+            not data.current_password
+            or password_snapshot is None
+            or not await _password_call(request, "verify", data.current_password, password_snapshot[0])
+        ):
+            raise HTTPException(400, "Current password is incorrect")
+        encoded = await _password_call(request, "hash", data.password)
+    async with db.locked() as s:
         user = await revalidate_user(request, s)
-        target = await s.get(User, user.id)
-        values = data.model_dump(exclude_unset=True, exclude_none=True)
+        target = await s.get(User, user.id, populate_existing=True)
         if data.password:
-            if not data.current_password or not verify_password(data.current_password, target.password_hash):
-                raise HTTPException(400, "Current password is incorrect")
-            target.password_hash = hasher.hash(data.password)
+            if (target.password_hash, target.auth_version) != password_snapshot:
+                raise HTTPException(409, "Identity changed while updating password")
+            target.password_hash = encoded
             target.auth_version += 1
             own = await s.get(AuthSession, request.state.session_id)
             own.auth_version = target.auth_version
@@ -435,9 +616,10 @@ async def users(request: Request, q: str = "", page: int = 1, page_size: int = 2
 @router.post("/users")
 async def create_user(data: UserCreate, request: Request, user=ADMIN_USER):
     values = data.model_dump(exclude={"password"})
+    encoded = await _password_call(request, "hash", data.password)
     async with request.app.state.db.locked() as s:
         await revalidate_user(request, s, require_admin=True)
-        target = User(**values, password_hash=hasher.hash(data.password))
+        target = User(**values, password_hash=encoded)
         s.add(target)
         await commit_user(s)
         return public(target)
@@ -462,6 +644,7 @@ async def batch_users(data: Batch, request: Request, user=ADMIN_USER):
 
 @router.patch("/users/{user_id}")
 async def patch_user(user_id: str, data: UserPatch, request: Request, user=ADMIN_USER):
+    encoded = await _password_call(request, "hash", data.password) if data.password else None
     async with request.app.state.db.locked() as s:
         await revalidate_user(request, s, require_admin=True)
         target = await s.get(User, user_id)
@@ -471,7 +654,7 @@ async def patch_user(user_id: str, data: UserPatch, request: Request, user=ADMIN
         for key, value in values.items():
             setattr(target, key, value)
         if data.password:
-            target.password_hash = hasher.hash(data.password)
+            target.password_hash = encoded
         if data.password or "disabled" in values or "role" in values:
             target.auth_version += 1
         await commit_user(s)

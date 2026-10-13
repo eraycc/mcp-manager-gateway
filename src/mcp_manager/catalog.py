@@ -362,6 +362,7 @@ class Catalog:
             "forbidden",
             "lease_expired",
             "queue_timeout",
+            "busy",
             "stopped",
             "disabled",
             "shutting_down",
@@ -418,7 +419,7 @@ class Catalog:
         if (
             self.runtime.versions.get(row.id, row.revision) != row.revision
             or code in {"credential_changed", "revision_changed", "permission_revoked", "forbidden",
-                        "lease_expired", "queue_timeout", "stopped", "disabled", "shutting_down"}
+                        "lease_expired", "queue_timeout", "busy", "stopped", "disabled", "shutting_down"}
         ):
             return exc
         if getattr(exc, "startup_failure_recorded", False):

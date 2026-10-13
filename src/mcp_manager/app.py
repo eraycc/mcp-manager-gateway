@@ -11,19 +11,20 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from filelock import FileLock, Timeout
 from jsonschema import ValidationError
+from sqlalchemy import select
 
 from . import catalog_api, credentials_api, embedding_api, identity, operations_api, proposals
 from .catalog import Catalog
 from .config import PACKAGE_ROOT, Settings
 from .credentials import CredentialStore
-from .database import ApiToken, Database, User, get_setting, now
+from .database import ApiToken, Database, McpServer, User, get_setting, now
 from .embeddings import EmbeddingIndex
 from .job_store import JobStore
 from .jobs import Jobs
 from .logs import LogStore
 from .oauth import OAuth
 from .oauth import router as oauth_router
-from .runtime import GatewayError, Runtime
+from .runtime import GatewayError, Runtime, RuntimeCapacity
 from .transports import connect, load_transport_plugins
 
 
@@ -34,50 +35,113 @@ async def _reap_runtime(app):
         await state.gateway.reap()
 
 
+async def batch_authorization_state(db, leases):
+    """Load each unique identity once and derive every lease's current MCP scope."""
+    relevant = [
+        lease for lease in leases
+        if lease.token_id not in {"maintenance", "test", "diagnostic"}
+        and lease.user_id
+        and lease.user_id != "anonymous"
+    ]
+    if not relevant:
+        return {}
+    user_ids = {lease.user_id for lease in relevant}
+    token_ids = {lease.token_id for lease in relevant if lease.token_id}
+    async with db.session() as session:
+        users = {
+            row.id: row
+            for row in (
+                await session.scalars(select(User).where(User.id.in_(user_ids)))
+            ).all()
+        }
+        tokens = {
+            row.id: row
+            for row in (
+                await session.scalars(select(ApiToken).where(ApiToken.id.in_(token_ids)))
+            ).all()
+        }
+        enabled = set(
+            (
+                await session.scalars(
+                    select(McpServer.id).where(McpServer.mode != "disabled")
+                )
+            ).all()
+        )
+    result = {}
+    for lease in relevant:
+        user = users.get(lease.user_id)
+        token = tokens.get(lease.token_id)
+        if (
+            user is None
+            or user.disabled
+            or token is None
+            or token.user_id != user.id
+            or token.disabled
+            or identity.expired(token.expires_at)
+        ):
+            result[lease.id] = None
+            continue
+        allowed = set(enabled)
+        if user.role != "admin" and user.scope_mode != "all":
+            allowed.intersection_update(user.mcp_ids)
+        if token.scope_mode != "all":
+            allowed.intersection_update(token.mcp_ids)
+        result[lease.id] = allowed
+    return result
+
+
 async def _revoke_leases(app):
     """Revalidate active identities and immediately narrow revoked access."""
     state = app.state
-    async with state.db.session() as session:
-        for lease in list(state.runtime.leases.values()):
-            if lease.token_id in {"maintenance", "test", "diagnostic"}:
-                continue
-            if not lease.user_id or lease.user_id == "anonymous":
-                continue
-            user = await session.get(User, lease.user_id)
-            token = await session.get(ApiToken, lease.token_id) if lease.token_id else None
-            if (not user or user.disabled or not token or token.disabled
-                    or identity.expired(token.expires_at)):
-                await state.runtime.release(lease.id)
-                continue
-            allowed = await identity.effective_mcp_ids(state.db, user, token)
+    leases = list(state.runtime.leases.values())
+    states = await batch_authorization_state(state.db, leases)
+    for lease in leases:
+        if lease.id not in states:
+            continue
+        allowed = states[lease.id]
+        if allowed is None:
+            await state.runtime.release(lease.id)
+        else:
             await state.runtime.restrict_lease(lease.id, allowed)
 
 
 async def _clean_instances(app):
     """Stop eager personal instances whose owner lost access."""
     state = app.state
+    instances = list(state.runtime.instances.values())
+    ownership = {
+        instance.key: (
+            instance.spec.credential_owner
+            if instance.spec.credential_owner not in {"", "service"}
+            else instance.key[-1] if instance.spec.isolation == "user" else None
+        )
+        for instance in instances
+    }
+    owners = {owner for owner in ownership.values() if owner}
     async with state.db.session() as session:
-        for instance in list(state.runtime.instances.values()):
-            owner = (
-                instance.spec.credential_owner
-                if instance.spec.credential_owner not in {"", "service"}
-                else instance.key[-1] if instance.spec.isolation == "user" else None
+        users = {
+            row.id: row
+            for row in (
+                await session.scalars(select(User).where(User.id.in_(owners)))
+            ).all()
+        } if owners else {}
+    for instance in instances:
+        owner = ownership[instance.key]
+        if not owner:
+            continue
+        user = users.get(owner)
+        denied = (
+            not user or user.disabled
+            or (
+                user.role != "admin" and user.scope_mode != "all"
+                and instance.spec.id not in user.mcp_ids
             )
-            if not owner:
-                continue
-            user = await session.get(User, owner)
-            denied = (
-                not user or user.disabled
-                or (
-                    user.role != "admin" and user.scope_mode != "all"
-                    and instance.spec.id not in user.mcp_ids
-                )
-            )
-            if denied:
-                instance.refs.clear()
-                await state.runtime.stop_instance(instance)
-                if instance.spec.credential_owner:
-                    state.runtime.credential_versions[(instance.spec.id, owner)] = None
+        )
+        if denied:
+            instance.refs.clear()
+            await state.runtime.stop_instance(instance)
+            if instance.spec.credential_owner:
+                state.runtime.credential_versions[(instance.spec.id, owner)] = None
 
 
 async def _restrict_anonymous(app):
@@ -116,6 +180,15 @@ async def _scheduled_refresh(app):
         state.refresh_next = trigger.get_next_fire_time(state.refresh_next, current)
 
 
+async def _build_embeddings(app):
+    from .embedding_api import load_embedding_config
+
+    await app.state.embeddings.build_pending(
+        await load_embedding_config(app.state),
+        generation_limit=1,
+    )
+
+
 async def _log_retention(app):
     state = app.state
     loop = asyncio.get_running_loop()
@@ -144,6 +217,7 @@ MAINTENANCE_STEPS = (
     _clean_instances,
     _restrict_anonymous,
     _scheduled_refresh,
+    _build_embeddings,
     _log_retention,
 )
 
@@ -183,14 +257,37 @@ def create_app(config=None):
             raise RuntimeError("Another MCP Manager runtime already owns this data directory")
         state.db = Database(config)
         state.logs = LogStore(config.data_dir)
+        state.password_pool = identity.PasswordWorkPool(
+            max_workers=config.password_workers,
+            max_waiters=config.password_waiters,
+        )
+        state.identity_rates = identity.IdentityRateLimiter(
+            max_entries=config.identity_rate_limit_entries,
+        )
         load_transport_plugins()
-        state.runtime = Runtime(connect)
+        state.runtime = Runtime(
+            connect,
+            capacity=RuntimeCapacity(
+                global_calls=config.runtime_global_calls,
+                user_calls=config.runtime_user_calls,
+                mcp_calls=config.runtime_mcp_calls,
+                queued_calls=config.runtime_queued_calls,
+                global_instances=config.runtime_global_instances,
+                user_instances=config.runtime_user_instances,
+                per_instance_waiters=config.runtime_instance_waiters,
+                queue_timeout=config.runtime_queue_timeout,
+            ),
+        )
         state.catalog = Catalog(state.db, state.runtime, state.logs, config)
         state.jobs = Jobs(store=JobStore(state.db, state.catalog.artifacts, signing_key=config.jwt_secret))
         state.catalog.jobs = state.jobs
         state.credentials = CredentialStore(state.catalog)
         state.catalog.credentials = state.credentials
-        state.embeddings = EmbeddingIndex(config.data_dir)
+        state.embeddings = EmbeddingIndex(
+            config.data_dir,
+            db=state.db,
+            artifacts=state.catalog.artifacts,
+        )
         state.oauth = OAuth(state.catalog, state.credentials)
         state.catalog.oauth = state.oauth
         state.runtime.on_starting = state.catalog.connection_starting
@@ -237,6 +334,7 @@ def create_app(config=None):
             await state.runtime.close()
             await state.logs.close()
             await state.db.close()
+            state.password_pool.close()
             lock.release()
 
     app = FastAPI(title="MCP Manager", lifespan=lifespan)
@@ -245,7 +343,12 @@ def create_app(config=None):
 
     @app.exception_handler(GatewayError)
     async def gateway_error(request: Request, exc):
-        return JSONResponse({"detail": str(exc), "code": exc.code, **exc.details}, status_code=502)
+        busy = exc.code in {"busy", "queue_timeout"}
+        return JSONResponse(
+            {"detail": str(exc), "code": exc.code, **exc.details},
+            status_code=429 if busy else 502,
+            headers={"Retry-After": "1"} if busy else None,
+        )
 
     @app.exception_handler(ValueError)
     async def value_error(request: Request, exc):

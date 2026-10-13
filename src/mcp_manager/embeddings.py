@@ -9,7 +9,12 @@ from weakref import WeakValueDictionary
 
 import httpx
 from fastapi import HTTPException
+from sqlalchemy import exists, select
 
+from .catalog_models import ArtifactObject, CatalogEntry, CatalogGeneration, CatalogHead
+from .catalog_store import generation_scope, scope_key
+from .catalog_types import ArtifactRef, CatalogScope
+from .embedding_models import EmbeddingVector
 from .jsonl_store import JsonlStore
 from .runtime import GatewayError
 
@@ -126,8 +131,10 @@ def _cosine(left: list[float], right: list[float]) -> float:
 class EmbeddingIndex:
     """Compute real model similarities while reusing document vectors per authorization scope."""
 
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, *, db=None, artifacts=None):
         self.store = JsonlStore(Path(data_dir) / "indexes" / "embeddings.jsonl", fail_closed=True)
+        self.db = db
+        self.artifacts = artifacts
         self._locks = WeakValueDictionary()
         self._transport = None
 
@@ -302,6 +309,327 @@ class EmbeddingIndex:
             return {}, {"mode": "keyword", "semantic_status": "unavailable", "reason": exc.code}
         except Exception:  # noqa: BLE001 -- semantic search must fail closed to keyword mode.
             return {}, {"mode": "keyword", "semantic_status": "unavailable", "reason": "internal_error"}
+
+    @staticmethod
+    def _model_hash(endpoint: str, model: str) -> str:
+        return hashlib.sha256(
+            json.dumps([endpoint, model], separators=(",", ":")).encode()
+        ).hexdigest()
+
+    @staticmethod
+    def candidate_key(candidate) -> str:
+        return candidate.generation_id + "\x1f" + candidate.original_name
+
+    @staticmethod
+    def _scope_map(scope):
+        if isinstance(scope, CatalogScope):
+            return {scope.server_id: scope}
+        if isinstance(scope, dict) and all(
+            isinstance(key, str) and isinstance(value, CatalogScope)
+            for key, value in scope.items()
+        ):
+            return scope
+        raise _EmbeddingError("invalid_input")
+
+    async def _validate_generations(self, scopes, generation_ids):
+        async with self.db.session() as session:
+            generations = {
+                row.id: row
+                for row in (
+                    await session.scalars(
+                        select(CatalogGeneration).where(
+                            CatalogGeneration.id.in_(generation_ids)
+                        )
+                    )
+                ).all()
+            }
+            for generation_id in generation_ids:
+                generation = generations.get(generation_id)
+                if generation is None or generation.status != "ready":
+                    raise GatewayError("catalog_changed", "Catalog changed during semantic retrieval")
+                scope = scopes.get(generation.server_id)
+                if scope is None or generation_scope(generation) != scope:
+                    raise GatewayError("unauthorized", "Semantic catalog scope is no longer authorized")
+                head = await session.get(CatalogHead, scope_key(scope))
+                if (
+                    head is None
+                    or head.generation_id != generation_id
+                    or head.status != "ready"
+                ):
+                    raise GatewayError("catalog_changed", "Catalog changed during semantic retrieval")
+
+    async def build_generation_vectors(self, scope, generation: str, config: dict) -> dict:
+        """Build immutable document vectors in batches outside interactive queries."""
+        if not isinstance(config, dict) or config.get("enabled") is not True:
+            return {"status": "disabled", "built": 0}
+        if self.db is None or self.artifacts is None or not isinstance(scope, CatalogScope):
+            raise _EmbeddingError("invalid_input")
+        endpoint, model, api_key, _timeout, _minimum = _settings(config)
+        model_hash = self._model_hash(endpoint, model)
+        build_timeout = config.get("build_timeout_seconds", 30.0)
+        if not _number(build_timeout):
+            build_timeout = 30.0
+        build_timeout = max(0.1, min(30.0, float(build_timeout)))
+        built = 0
+        async with self._lock(endpoint, model, "build:" + generation):
+            await self._validate_generations({scope.server_id: scope}, {generation})
+            while True:
+                indexed = exists().where(
+                    EmbeddingVector.generation_id == CatalogEntry.generation_id,
+                    EmbeddingVector.entry_id == CatalogEntry.id,
+                    EmbeddingVector.model_hash == model_hash,
+                )
+                async with self.db.session() as session:
+                    rows = list(
+                        (
+                            await session.execute(
+                                select(
+                                    CatalogEntry.id,
+                                    CatalogEntry.generation_id,
+                                    CatalogEntry.search_text,
+                                )
+                                .where(
+                                    CatalogEntry.generation_id == generation,
+                                    CatalogEntry.kind == "tools",
+                                    ~indexed,
+                                )
+                                .order_by(CatalogEntry.sort_key, CatalogEntry.name_hash)
+                                .limit(250)
+                            )
+                        ).all()
+                    )
+                if not rows:
+                    break
+                for offset in range(0, len(rows), MAX_BATCH_INPUTS):
+                    batch = rows[offset:offset + MAX_BATCH_INPUTS]
+                    texts = [row.search_text[:MAX_TEXT_CHARS] for row in batch]
+                    vectors = await self._embed(
+                        endpoint,
+                        model,
+                        api_key,
+                        build_timeout,
+                        texts,
+                    )
+                    ref = await self.artifacts.put_json(
+                        {"vectors": vectors},
+                        max_bytes=MAX_RESPONSE_BYTES,
+                    )
+                    async with self.db.locked() as session:
+                        current = await session.get(
+                            CatalogGeneration,
+                            generation,
+                            populate_existing=True,
+                        )
+                        head = await session.get(CatalogHead, scope_key(scope))
+                        if (
+                            current is None
+                            or current.status != "ready"
+                            or generation_scope(current) != scope
+                            or head is None
+                            or head.generation_id != generation
+                            or head.status != "ready"
+                        ):
+                            raise GatewayError(
+                                "catalog_changed",
+                                "Catalog changed while publishing semantic vectors",
+                            )
+                        pending = []
+                        for index, (entry, vector) in enumerate(zip(batch, vectors, strict=True)):
+                            identity = (generation, entry.id, model_hash)
+                            if await session.get(EmbeddingVector, identity) is None:
+                                pending.append((index, entry, vector))
+                        if not pending:
+                            continue
+                        if await session.get(ArtifactObject, ref.id) is None:
+                            session.add(
+                                ArtifactObject(
+                                    id=ref.id,
+                                    size_bytes=ref.size_bytes,
+                                    sha256=ref.sha256,
+                                )
+                            )
+                            await session.flush()
+                        for index, entry, vector in pending:
+                            session.add(
+                                EmbeddingVector(
+                                    generation_id=generation,
+                                    entry_id=entry.id,
+                                    model_hash=model_hash,
+                                    scope_key=scope_key(scope),
+                                    owner=scope.owner,
+                                    content_hash=hashlib.sha256(
+                                        entry.search_text.encode()
+                                    ).hexdigest(),
+                                    artifact_id=ref.id,
+                                    artifact_bytes=ref.size_bytes,
+                                    vector_index=index,
+                                    dimension=len(vector),
+                                )
+                            )
+                        built += len(pending)
+                if len(rows) < 250:
+                    break
+        return {"status": "ready", "built": built, "model_hash": model_hash}
+
+    async def build_pending(self, config: dict, *, generation_limit: int = 1) -> dict:
+        """Incrementally build vectors for current ready generations."""
+        if not isinstance(config, dict) or config.get("enabled") is not True:
+            return {"status": "disabled", "generations": 0, "built": 0}
+        if self.db is None or self.artifacts is None:
+            return {"status": "unavailable", "generations": 0, "built": 0}
+        endpoint, model, _api_key, _timeout, _minimum = _settings(config)
+        model_hash = self._model_hash(endpoint, model)
+        indexed_entry = exists().where(
+            EmbeddingVector.generation_id == CatalogEntry.generation_id,
+            EmbeddingVector.entry_id == CatalogEntry.id,
+            EmbeddingVector.model_hash == model_hash,
+        )
+        missing_vector = exists().where(
+            CatalogEntry.generation_id == CatalogGeneration.id,
+            CatalogEntry.kind == "tools",
+            ~indexed_entry,
+        )
+        async with self.db.session() as session:
+            generations = list(
+                (
+                    await session.scalars(
+                        select(CatalogGeneration)
+                        .join(
+                            CatalogHead,
+                            CatalogHead.generation_id == CatalogGeneration.id,
+                        )
+                        .where(
+                            CatalogGeneration.status == "ready",
+                            CatalogHead.status == "ready",
+                            missing_vector,
+                        )
+                        .order_by(CatalogGeneration.published_at, CatalogGeneration.id)
+                        .limit(max(1, min(16, generation_limit)))
+                    )
+                ).all()
+            )
+        total = 0
+        for generation in generations:
+            result = await self.build_generation_vectors(
+                generation_scope(generation),
+                generation.id,
+                config,
+            )
+            total += result["built"]
+        return {"status": "ready", "generations": len(generations), "built": total}
+
+    async def score_candidates(
+        self,
+        scope,
+        refs,
+        query: str,
+        config: dict,
+        *,
+        deadline: float = 2.0,
+        authorize=None,
+    ) -> tuple[dict[str, float], dict]:
+        """Embed only the query and score at most 200 preselected catalog references."""
+        if not isinstance(config, dict) or config.get("enabled") is not True:
+            return {}, {"mode": "keyword", "semantic_status": "disabled"}
+        try:
+            if self.db is None or self.artifacts is None:
+                raise _EmbeddingError("cold_index")
+            candidates = list(refs)[:200]
+            if not candidates or not isinstance(query, str) or not query.strip():
+                return {}, {"mode": "hybrid", "semantic_status": "ready"}
+            endpoint, model, api_key, timeout, minimum = _settings(config)
+            model_hash = self._model_hash(endpoint, model)
+            scopes = self._scope_map(scope)
+            generation_ids = {row.generation_id for row in candidates}
+            await self._validate_generations(scopes, generation_ids)
+            if authorize:
+                await authorize()
+            entry_ids = [row.id for row in candidates]
+            async with asyncio.timeout(max(0.001, min(float(deadline), timeout))):
+                async with self.db.session() as session:
+                    metadata = list(
+                        (
+                            await session.scalars(
+                                select(EmbeddingVector).where(
+                                    EmbeddingVector.entry_id.in_(entry_ids),
+                                    EmbeddingVector.model_hash == model_hash,
+                                )
+                            )
+                        ).all()
+                    )
+                by_entry = {row.entry_id: row for row in metadata}
+                if len(by_entry) != len(candidates):
+                    raise _EmbeddingError("cold_index")
+                for candidate in candidates:
+                    vector = by_entry[candidate.id]
+                    expected_scope = scopes.get(candidate.server_id)
+                    if (
+                        expected_scope is None
+                        or vector.generation_id != candidate.generation_id
+                        or vector.scope_key != scope_key(expected_scope)
+                        or vector.owner != expected_scope.owner
+                        or vector.content_hash
+                        != hashlib.sha256(candidate.search_text.encode()).hexdigest()
+                    ):
+                        raise _EmbeddingError("cold_index")
+                artifacts = {}
+                for vector in metadata:
+                    if vector.artifact_id not in artifacts:
+                        artifacts[vector.artifact_id] = await self.artifacts.read_json(
+                            ArtifactRef(
+                                vector.artifact_id,
+                                vector.artifact_bytes,
+                                vector.artifact_id,
+                            ),
+                            max_bytes=MAX_RESPONSE_BYTES,
+                        )
+                query_vector = (
+                    await self._embed(
+                        endpoint,
+                        model,
+                        api_key,
+                        min(timeout, float(deadline)),
+                        [query[:MAX_TEXT_CHARS]],
+                        authorize=authorize,
+                    )
+                )[0]
+                if authorize:
+                    await authorize()
+                await self._validate_generations(scopes, generation_ids)
+                scores = {}
+                for candidate in candidates:
+                    metadata_row = by_entry[candidate.id]
+                    payload = artifacts[metadata_row.artifact_id]
+                    vectors = payload.get("vectors") if isinstance(payload, dict) else None
+                    if (
+                        not isinstance(vectors, list)
+                        or not 0 <= metadata_row.vector_index < len(vectors)
+                    ):
+                        raise _EmbeddingError("invalid_response")
+                    score = _cosine(query_vector, vectors[metadata_row.vector_index])
+                    if score >= minimum:
+                        scores[self.candidate_key(candidate)] = score
+                return scores, {"mode": "hybrid", "semantic_status": "ready"}
+        except (asyncio.CancelledError, GatewayError, HTTPException):
+            raise
+        except TimeoutError:
+            return {}, {
+                "mode": "keyword",
+                "semantic_status": "unavailable",
+                "reason": "timeout",
+            }
+        except _EmbeddingError as exc:
+            return {}, {
+                "mode": "keyword",
+                "semantic_status": "unavailable",
+                "reason": exc.code,
+            }
+        except Exception:  # noqa: BLE001 -- semantic failure preserves keyword results.
+            return {}, {
+                "mode": "keyword",
+                "semantic_status": "unavailable",
+                "reason": "internal_error",
+            }
 
     async def probe(self, config: dict) -> dict:
         if not isinstance(config, dict) or config.get("enabled") is not True:

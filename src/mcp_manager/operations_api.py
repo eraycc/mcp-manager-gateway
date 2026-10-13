@@ -80,8 +80,20 @@ async def dashboard(request: Request, user=USER):
         if user.role != "admin":
             query = query.where(ApiToken.user_id == user.id)
         token_count = await s.scalar(query)
+    capacity = state.runtime.capacity_status()
+    public_capacity = {
+        key: capacity[key]
+        for key in (
+            "active_business_calls",
+            "queued_business_calls",
+            "instances",
+            "instance_waiters",
+            "queue_delay_ms_last",
+            "queue_delay_ms_max",
+        )
+    }
     return stats | {"token_count": token_count, "mcp_count": len(rows), "running_count": len(running),
-                    "stopped_count": len(rows) - len(running),
+                    "stopped_count": len(rows) - len(running), "runtime_capacity": public_capacity,
                     "lease_count": sum(1 for l in state.runtime.leases.values()
                                        if user.role == "admin" or l.user_id == user.id),
                     "connection_count": len([r for r in runtime if r["phase"] == "ready"]),

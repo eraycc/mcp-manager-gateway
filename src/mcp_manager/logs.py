@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
 import math
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,10 +31,36 @@ def redact(value, parent=""):
     return value
 
 
+LOG_SUMMARY_FIELDS = {
+    "id", "event_id", "timestamp", "user_id", "username", "token_id",
+    "token_name", "mcp_id", "mcp_name", "tool_name", "status", "source",
+    "duration_ms",
+}
+
+
+def log_summary_and_ref(event, max_preview_bytes=65536):
+    """Split oversized redacted events into a bounded query summary and full payload."""
+    if type(max_preview_bytes) is not int or max_preview_bytes < 1024:
+        raise ValueError("Log preview budget must be at least 1024 bytes")
+    value = redact(dict(event))
+    raw = json.dumps(value, ensure_ascii=False, default=str, separators=(",", ":")).encode()
+    if len(raw) <= max_preview_bytes:
+        return {"summary": value, "payload": None, "payload_bytes": len(raw)}
+    summary = {key: value[key] for key in LOG_SUMMARY_FIELDS if key in value}
+    summary["payload_truncated"] = True
+    summary["payload_bytes"] = len(raw)
+    encoded = json.dumps(summary, ensure_ascii=False, default=str, separators=(",", ":")).encode()
+    if len(encoded) > max_preview_bytes:
+        raise ValueError("Log metadata exceeds the preview budget")
+    return {"summary": summary, "payload": value, "payload_bytes": len(raw)}
+
+
 class LogStore:
     def __init__(self, data_dir: Path, timezone_name="Asia/Shanghai"):
         self.root = Path(data_dir) / "logs"
         self.root.mkdir(parents=True, exist_ok=True)
+        self.payload_root = self.root / "payloads"
+        self.payload_root.mkdir(exist_ok=True)
         index = Path(data_dir) / "indexes"
         index.mkdir(parents=True, exist_ok=True)
         self.timezone = ZoneInfo(timezone_name)
@@ -40,6 +69,8 @@ class LogStore:
         self.export_capacity = asyncio.Semaphore(4)
         self.active = set()
         self.deleted = set()
+        self._stats_epoch = 0
+        self._stats_cache = {}
         tombstones = self.root / "deletions"
         tombstones.mkdir(exist_ok=True)
         for path in tombstones.glob("????-??-??.jsonl"):
@@ -61,6 +92,10 @@ class LogStore:
         self.conn.execute("CREATE INDEX IF NOT EXISTS calls_token ON calls(token_id)")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS index_offsets (
             path TEXT PRIMARY KEY, offset INTEGER NOT NULL)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS payloads (
+            log_id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL,
+            path TEXT NOT NULL, size INTEGER NOT NULL)""")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS payload_artifact ON payloads(artifact_id)")
         self.conn.commit()
         self._rebuild()
 
@@ -80,6 +115,17 @@ class LogStore:
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=UTC)
         path = self.root / (stamp.astimezone(self.timezone).strftime("%Y-%m-%d") + ".jsonl")
+        separated = log_summary_and_ref(event)
+        payload_ref = None
+        if separated["payload"] is not None:
+            payload_raw = json.dumps(
+                separated["payload"],
+                ensure_ascii=False,
+                default=str,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            payload_ref = self._write_payload(payload_raw)
+            event = separated["summary"] | {"_payload_ref": payload_ref}
         raw = (json.dumps(event, ensure_ascii=False, default=str) + "\n").encode("utf-8")
         with self.lock:
             if event["id"] in self.deleted:
@@ -102,7 +148,37 @@ class LogStore:
             self._index(event, path, offset, len(raw))
             self._set_offset(path.name, offset + len(raw))
             self.conn.commit()
+            self._invalidate_stats()
         return event["id"]
+
+    def _payload_path(self, identity):
+        if not isinstance(identity, str) or len(identity) != 64:
+            raise ValueError("Invalid log payload reference")
+        return self.payload_root / (identity + ".json")
+
+    def _write_payload(self, raw):
+        identity = hashlib.sha256(raw).hexdigest()
+        target = self._payload_path(identity)
+        with self.lock:
+            if target.exists():
+                return {"id": identity, "size": len(raw)}
+            temporary = self.payload_root / ("." + uuid.uuid4().hex + ".tmp")
+            try:
+                with temporary.open("xb") as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return {"id": identity, "size": len(raw)}
+
+    def _read_payload(self, reference):
+        with reference["path"].open("rb") as source:
+            raw = source.read(reference["size"] + 1)
+        if len(raw) != reference["size"]:
+            raise RuntimeError("Log payload size changed")
+        return json.loads(raw)
 
     def _index(self, event, path, offset, size):
         if event["id"] in self.deleted:
@@ -113,6 +189,19 @@ class LogStore:
                           [event["id"], path.name, offset, size] + [
                               self.normalize_time(event["timestamp"], default_timezone=UTC)
                               if f == "timestamp" else event.get(f) for f in fields])
+        payload = event.get("_payload_ref")
+        if isinstance(payload, dict):
+            self.conn.execute(
+                "INSERT OR REPLACE INTO payloads(log_id,artifact_id,path,size) VALUES(?,?,?,?)",
+                [
+                    event["id"],
+                    payload["id"],
+                    payload["id"] + ".json",
+                    payload["size"],
+                ],
+            )
+        else:
+            self.conn.execute("DELETE FROM payloads WHERE log_id=?", [event["id"]])
 
     def _set_offset(self, path, offset):
         self.conn.execute(
@@ -126,6 +215,7 @@ class LogStore:
             if full:
                 self.conn.execute("DELETE FROM calls")
                 self.conn.execute("DELETE FROM index_offsets")
+                self.conn.execute("DELETE FROM payloads")
             paths = sorted(self.root.glob("????-??-??.jsonl"))
             names = {path.name for path in paths}
             indexed_names = {
@@ -172,6 +262,11 @@ class LogStore:
             else:
                 self.conn.execute("UPDATE calls SET status='outcome_unknown' WHERE status='running'")
             self.conn.commit()
+            self._invalidate_stats()
+
+    def _invalidate_stats(self):
+        self._stats_epoch += 1
+        self._stats_cache.clear()
 
     async def rebuild(self):
         await asyncio.to_thread(self._rebuild, full=True)
@@ -219,7 +314,10 @@ class LogStore:
             rows = self.conn.execute("SELECT * FROM calls" + where +
                 " ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?",
                 values + [page_size, (page - 1) * page_size]).fetchall()
-            items = [{k: r[k] for k in r if k not in ("path", "offset", "size")} for r in rows]
+            items = [
+                {key: value for key, value in dict(row).items() if key not in ("path", "offset", "size")}
+                for row in rows
+            ]
         return {"items": items, "total": total, "page": page, "page_size": page_size, "total_pages": pages}
 
     async def reference(self, id, *, user_id=None):
@@ -230,11 +328,16 @@ class LogStore:
             row = self.conn.execute("SELECT * FROM calls WHERE id=?", [id]).fetchone()
             if not row or user_id is not None and row["user_id"] != user_id:
                 return None
+            payload = self.conn.execute(
+                "SELECT artifact_id,path,size FROM payloads WHERE log_id=?",
+                [id],
+            ).fetchone()
             return {
                 "id": row["id"],
-                "path": self.root / row["path"],
-                "offset": row["offset"],
-                "size": row["size"],
+                "path": self.payload_root / payload["path"] if payload else self.root / row["path"],
+                "offset": 0 if payload else row["offset"],
+                "size": payload["size"] if payload else row["size"],
+                "artifact_id": payload["artifact_id"] if payload else None,
                 "user_id": row["user_id"],
             }
 
@@ -277,9 +380,19 @@ class LogStore:
             row = self.conn.execute("SELECT * FROM calls WHERE id=?", [id]).fetchone()
             if not row or user_id is not None and row["user_id"] != user_id:
                 return None
-            with (self.root / row["path"]).open("rb") as f:
-                f.seek(row["offset"])
-                event = json.loads(f.read(row["size"]))
+            payload = self.conn.execute(
+                "SELECT path,size FROM payloads WHERE log_id=?",
+                [id],
+            ).fetchone()
+            if payload:
+                event = self._read_payload({
+                    "path": self.payload_root / payload["path"],
+                    "size": payload["size"],
+                })
+            else:
+                with (self.root / row["path"]).open("rb") as source:
+                    source.seek(row["offset"])
+                    event = json.loads(source.read(row["size"]))
             if event.get("id") != id or (user_id is not None and event.get("user_id") != user_id):
                 raise RuntimeError("Log index does not match source; rebuild required")
             event["status"] = row["status"]
@@ -297,11 +410,25 @@ class LogStore:
             rows = self.conn.execute("SELECT * FROM calls" + where +
                 " ORDER BY timestamp DESC, id DESC LIMIT ?", values + [limit]).fetchall()
             result = []
+            payload_rows = {
+                item["log_id"]: item
+                for item in self.conn.execute(
+                    "SELECT log_id,path,size FROM payloads WHERE log_id IN ("
+                    + ",".join("?" for _ in rows) + ")",
+                    [row["id"] for row in rows],
+                )
+            } if rows else {}
             for row in rows:
-                # One indexed batch read, no additional SQL query per log detail.
-                with (self.root / row["path"]).open("rb") as source:
-                    source.seek(row["offset"])
-                    event = json.loads(source.read(row["size"]))
+                payload = payload_rows.get(row["id"])
+                if payload:
+                    event = self._read_payload({
+                        "path": self.payload_root / payload["path"],
+                        "size": payload["size"],
+                    })
+                else:
+                    with (self.root / row["path"]).open("rb") as source:
+                        source.seek(row["offset"])
+                        event = json.loads(source.read(row["size"]))
                 if event.get("id") != row["id"]:
                     raise RuntimeError("Log index does not match source; rebuild required")
                 event["status"] = row["status"]
@@ -327,10 +454,22 @@ class LogStore:
                 os.fsync(f.fileno())
             self.deleted.update(selected)
             self.active.difference_update(selected)
+            payloads = list(self.conn.execute(
+                "SELECT artifact_id,path FROM payloads WHERE log_id IN ("
+                + ",".join("?" for _ in selected) + ")",
+                list(selected),
+            ))
             try:
                 self._rewrite_deleted(selected)
             finally:
                 self._rebuild(full=True)
+            for payload in payloads:
+                remaining = self.conn.execute(
+                    "SELECT 1 FROM payloads WHERE artifact_id=? LIMIT 1",
+                    [payload["artifact_id"]],
+                ).fetchone()
+                if remaining is None:
+                    (self.payload_root / payload["path"]).unlink(missing_ok=True)
             return len(selected)
 
     def _rewrite_deleted(self, selected):
@@ -355,20 +494,27 @@ class LogStore:
         return await asyncio.to_thread(self._stats, user_id, token_id)
 
     def _stats(self, user_id, token_id):
-        where, args = self._where({"user_id": user_id, "token_id": token_id, "source": "gateway"})
+        cache_key = (user_id, token_id)
+        current = time.monotonic()
         with self.lock:
+            cached = self._stats_cache.get(cache_key)
+            if cached and cached[0] > current and cached[1] == self._stats_epoch:
+                return copy.deepcopy(cached[2])
+            where, args = self._where({"user_id": user_id, "token_id": token_id, "source": "gateway"})
             rows = self.conn.execute("SELECT status,count(*) n FROM calls" + where + " GROUP BY status", args)
             counts = {r["status"]: r["n"] for r in rows}
             daily = [dict(r) for r in self.conn.execute(
                 "SELECT local_day(timestamp) day,count(*) calls,"
                 "sum(CASE WHEN status='success' THEN 1 ELSE 0 END) success "
                 "FROM calls" + where + " GROUP BY day ORDER BY day DESC LIMIT 30", args)]
-        return {"calls": sum(v for k, v in counts.items() if k != "running"),
-                "success": counts.get("success", 0),
-                "failed": sum(counts.get(k, 0) for k in ("tool_error", "gateway_error", "auth_rejected")),
-                "unknown": counts.get("outcome_unknown", 0),
-                "cancelled": counts.get("cancelled", 0), "by_status": counts,
-                "daily": list(reversed(daily))}
+            result = {"calls": sum(v for k, v in counts.items() if k != "running"),
+                      "success": counts.get("success", 0),
+                      "failed": sum(counts.get(k, 0) for k in ("tool_error", "gateway_error", "auth_rejected")),
+                      "unknown": counts.get("outcome_unknown", 0),
+                      "cancelled": counts.get("cancelled", 0), "by_status": counts,
+                      "daily": list(reversed(daily))}
+            self._stats_cache[cache_key] = (current + 10.0, self._stats_epoch, result)
+            return copy.deepcopy(result)
 
     async def token_counts(self, ids):
         def query():

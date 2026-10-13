@@ -215,4 +215,4 @@ async def set_setting(db: Database, key: str, value: Any) -> None:
 
 
 # Register auxiliary models after Base and the identity models exist (shared Alembic metadata).
-from . import catalog_models, job_models  # noqa: F401
+from . import catalog_models, embedding_models, job_models  # noqa: F401

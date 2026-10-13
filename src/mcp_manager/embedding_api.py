@@ -17,7 +17,8 @@ DEFAULTS = {
     "base_url": "",
     "model": "",
     "api_key": "",
-    "timeout_seconds": 10.0,
+    "timeout_seconds": 2.0,
+    "build_timeout_seconds": 30.0,
     "min_similarity": 0.5,
 }
 
@@ -46,8 +47,9 @@ def _validate(value: dict) -> dict:
             _ = parsed.port
         except (ValueError, TypeError):
             raise HTTPException(422, "base_url must be an HTTP(S) API base or embeddings endpoint") from None
-    if not _valid_number(value["timeout_seconds"]) or not 0 < float(value["timeout_seconds"]) <= 60:
-        raise HTTPException(422, "timeout_seconds must be greater than 0 and at most 60")
+    for key in ("timeout_seconds", "build_timeout_seconds"):
+        if not _valid_number(value[key]) or not 0 < float(value[key]) <= 60:
+            raise HTTPException(422, key + " must be greater than 0 and at most 60")
     if not _valid_number(value["min_similarity"]) or not -1 <= float(value["min_similarity"]) <= 1:
         raise HTTPException(422, "min_similarity must be between -1 and 1")
     if value["enabled"] and (not base_url or not model):
@@ -58,6 +60,7 @@ def _validate(value: dict) -> dict:
         "model": model,
         "api_key": value["api_key"],
         "timeout_seconds": float(value["timeout_seconds"]),
+        "build_timeout_seconds": float(value["build_timeout_seconds"]),
         "min_similarity": float(value["min_similarity"]),
     }
 

@@ -10,9 +10,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import load_only
 
 from .artifact_store import ArtifactStore
-from .catalog_models import ArtifactObject, CatalogEntry, CatalogGeneration, CatalogHead
+from .catalog_models import ArtifactObject, CatalogEntry, CatalogGeneration, CatalogHead, CatalogTerm
 from .catalog_types import ArtifactRef, CatalogPage, CatalogScope, GenerationRef, ToolRef
-from .database import McpServer, now
+from .database import McpServer, now, uid
 from .db_types import strict_json_dumps
 from .runtime import GatewayError
 
@@ -153,24 +153,39 @@ class CatalogStore:
             schema_hash = await asyncio.to_thread(
                 lambda definition=entry: digest(strict_json_dumps(definition.get("inputSchema", {})))
             ) if kind == "tools" else ""
-            prepared.append((ref, {
-                "generation_id": identity, "kind": kind, "original_name": name, "name_hash": digest(name),
+            entry_id = uid()
+            search_text = await asyncio.to_thread(searchable_text, entry)
+            values = {
+                "id": entry_id, "generation_id": identity, "kind": kind,
+                "original_name": name, "name_hash": digest(name),
                 # A bounded ASCII sort prefix + full hash gives portable deterministic keyset pagination.
                 "sort_key": name.encode("utf-8")[:128].hex(),
                 "gateway_name": gateway_name, "gateway_hash": digest(gateway_name) if gateway_name else None,
                 "legacy_gateway_hash": digest(server_id + "__" + name) if gateway_name else None,
-                "schema_hash": schema_hash, "summary": summary,
-                "search_text": await asyncio.to_thread(searchable_text, entry),
+                "schema_hash": schema_hash, "summary": summary, "search_text": search_text,
                 "artifact_id": ref.id, "artifact_bytes": ref.size_bytes,
-            }))
+            }
+            term_rows = []
+            if kind == "tools":
+                from .catalog_retrieval import index_document
+
+                term_rows = await asyncio.to_thread(
+                    index_document, identity,
+                    {**entry, "entry_id": entry_id, "search_text": search_text},
+                )
+            prepared.append((ref, values, term_rows))
         try:
             async with self.db.locked() as session:
                 await self._staging(session, identity)
-                for ref, values in prepared:
+                pending_terms = []
+                for ref, values, term_rows in prepared:
                     if await session.get(ArtifactObject, ref.id) is None:
                         session.add(ArtifactObject(id=ref.id, size_bytes=ref.size_bytes, sha256=ref.sha256))
                         await session.flush()
                     session.add(CatalogEntry(**values))
+                    pending_terms.extend(term_rows)
+                await session.flush()
+                session.add_all(CatalogTerm(**values) for values in pending_terms)
                 await session.flush()
         except IntegrityError:
             raise GatewayError("catalog_duplicate_entry", "Catalog contains duplicate entries or conflicting hashes") from None
@@ -263,6 +278,12 @@ class CatalogStore:
     async def query_tool_entries(self, generations, *, kind="tools", query="", exact_names=None, offset=0, limit=20):
         """Filter/count/page lightweight rows in SQL before any contract or artifact read."""
         self._check_kind(kind)
+        if query and exact_names is None and kind == "tools":
+            from .catalog_retrieval import MAX_CANDIDATES, search_candidates
+
+            candidates = await search_candidates(self.db, list(generations), query, limit=MAX_CANDIDATES)
+            total = len(candidates)
+            return total, candidates[offset:offset + limit] if limit else []
         filters = [CatalogEntry.generation_id.in_(generations), CatalogEntry.kind == kind]
         if exact_names is not None:
             hashes = [digest(name) for name in exact_names]
@@ -276,7 +297,8 @@ class CatalogStore:
         async with self.db.session() as session:
             total = await session.scalar(select(func.count()).select_from(CatalogEntry).where(*filters))
             rows = (await session.execute(select(
-                CatalogEntry.generation_id, CatalogGeneration.server_id, CatalogEntry.original_name,
+                CatalogEntry.id, CatalogEntry.generation_id, CatalogGeneration.server_id,
+                CatalogEntry.original_name,
                 CatalogEntry.gateway_name, CatalogEntry.schema_hash, CatalogEntry.artifact_id,
                 CatalogEntry.artifact_bytes, CatalogEntry.summary, CatalogEntry.search_text,
             ).join(CatalogGeneration, CatalogGeneration.id == CatalogEntry.generation_id).join(

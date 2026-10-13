@@ -9,13 +9,14 @@ export async function embeddingSettings(signal){
   ['base_url','Embedding 接口地址','url','例如 http://localhost:8098 或 http://localhost:8098/v1；也支持完整 /embeddings 地址。'],
   ['model','Embedding 模型','text','填写接口实际提供的 embedding 模型名，例如 BAAI/bge-m3。reranker 模型不能用于此接口。'],
   ['api_key','Embedding API Key','password','密钥加密保存。[REDACTED] 表示保留现有密钥，清空后保存则删除密钥。'],
-  ['timeout_seconds','Embedding 超时（秒）','number','接口不可用或超时后回退关键词检索。'],
+  ['timeout_seconds','交互检索超时（秒）','number','默认 2 秒；接口不可用或超时后立即回退关键词检索。'],
+  ['build_timeout_seconds','后台向量构建超时（秒）','number','默认 30 秒；仅影响目录发布后的后台增量构建，不阻塞交互检索。'],
   ['min_similarity','最低语义相似度','number','范围 -1 到 1，默认 0.5；阈值越高，语义候选越少。已保存的自定义值不会自动更改。']
  ];
  const fields={};
  for(const[key,label,type,hint]of definitions){
   const f=field(label,saved[key],type,hint);f.input.setAttribute('aria-label',label);fields[key]=f.input;
-  if(key==='timeout_seconds'){f.input.min=.1;f.input.max=60;f.input.step=.1}
+  if(['timeout_seconds','build_timeout_seconds'].includes(key)){f.input.min=.1;f.input.max=60;f.input.step=.1}
   if(key==='min_similarity'){f.input.min=-1;f.input.max=1;f.input.step=.01}
   grid.append(f.node);
  }

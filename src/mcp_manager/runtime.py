@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import uuid
+from collections import Counter, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 from weakref import WeakValueDictionary
 
 from .protocol_errors import is_request_error
@@ -23,6 +26,176 @@ class GatewayError(Exception):
         self.code = code
         self.details = details or {}
         super().__init__(message)
+
+
+@dataclass(frozen=True)
+class RuntimeCapacity:
+    global_calls: int = 64
+    user_calls: int = 16
+    mcp_calls: int = 16
+    queued_calls: int = 256
+    global_instances: int = 64
+    user_instances: int = 16
+    per_instance_waiters: int = 64
+    queue_timeout: float = 60.0
+
+    def __post_init__(self):
+        limits = {
+            "global_calls": 256,
+            "user_calls": 64,
+            "mcp_calls": 64,
+            "queued_calls": 1024,
+            "global_instances": 128,
+            "user_instances": 32,
+            "per_instance_waiters": 128,
+        }
+        for name, hard_limit in limits.items():
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise ValueError(name + " must be a positive integer")
+            object.__setattr__(self, name, min(value, hard_limit))
+        if not isinstance(self.queue_timeout, (int, float)) or not 0 < self.queue_timeout <= 300:
+            raise ValueError("queue_timeout must be greater than 0 and at most 300 seconds")
+        object.__setattr__(self, "queue_timeout", float(self.queue_timeout))
+
+
+@dataclass
+class _CallWaiter:
+    user_id: str
+    mcp_id: str
+    future: asyncio.Future
+    queued_at: float
+    granted: bool = False
+
+
+class _FairCallGate:
+    def __init__(self, capacity: RuntimeCapacity, clock):
+        self.capacity = capacity
+        self.clock = clock
+        self.lock = asyncio.Lock()
+        self.active = 0
+        self.active_users = Counter()
+        self.active_mcps = Counter()
+        self.queues = {}
+        self.order = deque()
+        self.queued = 0
+        self.last_queue_delay_ms = 0.0
+        self.max_queue_delay_ms = 0.0
+
+    def _can_grant(self, user_id, mcp_id):
+        return (
+            self.active < self.capacity.global_calls
+            and self.active_users[user_id] < self.capacity.user_calls
+            and self.active_mcps[mcp_id] < self.capacity.mcp_calls
+        )
+
+    def _activate(self, user_id, mcp_id):
+        self.active += 1
+        self.active_users[user_id] += 1
+        self.active_mcps[mcp_id] += 1
+
+    def _deactivate(self, user_id, mcp_id):
+        self.active -= 1
+        self.active_users[user_id] -= 1
+        self.active_mcps[mcp_id] -= 1
+        if not self.active_users[user_id]:
+            del self.active_users[user_id]
+        if not self.active_mcps[mcp_id]:
+            del self.active_mcps[mcp_id]
+
+    def _pump(self):
+        while self.order and self.active < self.capacity.global_calls:
+            progress = False
+            for _ in range(len(self.order)):
+                mcp_id = self.order.popleft()
+                queue = self.queues.get(mcp_id)
+                if not queue:
+                    self.queues.pop(mcp_id, None)
+                    continue
+                chosen = None
+                for _ in range(len(queue)):
+                    waiter = queue[0]
+                    if waiter.future.cancelled():
+                        queue.popleft()
+                        self.queued -= 1
+                        continue
+                    if self._can_grant(waiter.user_id, mcp_id):
+                        chosen = queue.popleft()
+                        break
+                    queue.rotate(-1)
+                if queue:
+                    self.order.append(mcp_id)
+                else:
+                    self.queues.pop(mcp_id, None)
+                if chosen is None:
+                    continue
+                self.queued -= 1
+                chosen.granted = True
+                self._activate(chosen.user_id, chosen.mcp_id)
+                delay = max(0.0, (self.clock() - chosen.queued_at) * 1000)
+                self.last_queue_delay_ms = delay
+                self.max_queue_delay_ms = max(self.max_queue_delay_ms, delay)
+                if not chosen.future.done():
+                    chosen.future.set_result(None)
+                progress = True
+            if not progress:
+                break
+
+    async def acquire(self, user_id: str, mcp_id: str, timeout: float):
+        loop = asyncio.get_running_loop()
+        waiter = None
+        async with self.lock:
+            if self._can_grant(user_id, mcp_id):
+                self._activate(user_id, mcp_id)
+                return
+            if self.queued >= self.capacity.queued_calls:
+                raise GatewayError("busy", "Gateway call queue is full; retry later")
+            queue = self.queues.setdefault(mcp_id, deque())
+            waiter = _CallWaiter(user_id, mcp_id, loop.create_future(), self.clock())
+            queue.append(waiter)
+            self.queued += 1
+            if mcp_id not in self.order:
+                self.order.append(mcp_id)
+            self._pump()
+        try:
+            await asyncio.wait_for(asyncio.shield(waiter.future), timeout)
+        except BaseException as exc:
+            async with self.lock:
+                if waiter.granted:
+                    self._deactivate(user_id, mcp_id)
+                else:
+                    queue = self.queues.get(mcp_id)
+                    if queue and waiter in queue:
+                        queue.remove(waiter)
+                        self.queued -= 1
+                        if not queue:
+                            self.queues.pop(mcp_id, None)
+                            with contextlib.suppress(ValueError):
+                                self.order.remove(mcp_id)
+                if not waiter.future.done():
+                    waiter.future.cancel()
+                self._pump()
+            if isinstance(exc, TimeoutError):
+                raise GatewayError(
+                    "busy",
+                    "Gateway call queue timed out; retry later",
+                ) from exc
+            raise
+
+    async def release(self, user_id: str, mcp_id: str):
+        async with self.lock:
+            self._deactivate(user_id, mcp_id)
+            self._pump()
+
+    def status(self):
+        return {
+            "active_business_calls": self.active,
+            "queued_business_calls": self.queued,
+            "active_calls_by_user": dict(self.active_users),
+            "active_calls_by_mcp": dict(self.active_mcps),
+            "queue_delay_ms_last": round(self.last_queue_delay_ms, 3),
+            "queue_delay_ms_max": round(self.max_queue_delay_ms, 3),
+        }
 
 
 @dataclass(frozen=True)
@@ -55,6 +228,8 @@ class Instance:
     phase: str = "starting"
     refs: set[str] = field(default_factory=set)
     in_flight: int = 0
+    waiters: int = 0
+    admitted_user: str = ""
     last_activity: float = 0
     connection: Any = None
     error: str | None = None
@@ -68,11 +243,20 @@ class Instance:
 
 
 class Runtime:
-    def __init__(self, connector, *, clock: Callable[[], float] = time.monotonic,
-                 idle_seconds: float = 86400):
+    def __init__(
+        self,
+        connector,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        idle_seconds: float = 86400,
+        capacity: RuntimeCapacity | None = None,
+    ):
         self.connector = connector
         self.clock = clock
         self.idle_seconds = idle_seconds
+        self.capacity = capacity or RuntimeCapacity()
+        self._business_gate = _FairCallGate(self.capacity, clock)
+        self._instance_lock = asyncio.Lock()
         self.leases: dict[str, Lease] = {}
         self.instances: dict[tuple, Instance] = {}
         # Waiters keep strong references; inactive session/revision keys can disappear.
@@ -130,7 +314,7 @@ class Runtime:
                     await instance.stop.wait()
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- transport boundary normalizes plugin failures.
             code = getattr(
                 exc,
                 "code",
@@ -150,7 +334,7 @@ class Runtime:
             if self.on_start_failure is not None:
                 try:
                     await self.on_start_failure(instance.spec, failure)
-                except Exception as callback_error:
+                except Exception as callback_error:  # noqa: BLE001 -- callback errors are sanitized.
                     callback_error = safe_gateway_error(callback_error, config=instance.spec.config)
                     instance.error = str(callback_error)
                     instance.failure = callback_error
@@ -160,8 +344,9 @@ class Runtime:
                 instance.phase = "stopped"
             instance.ready.set()
             instance.closed.set()
-            if self.instances.get(instance.key) is instance:
-                self.instances.pop(instance.key, None)
+            async with self._instance_lock:
+                if self.instances.get(instance.key) is instance:
+                    self.instances.pop(instance.key, None)
 
     def _available(self, spec):
         if self._closing:
@@ -200,11 +385,36 @@ class Runtime:
                     wait_closed = instance.closed
                 else:
                     if instance is None or instance.closed.is_set():
-                        instance = Instance(key, spec, last_activity=self.clock())
-                        instance.drained.set()
-                        concurrency = max(1, min(256, int(spec.config.get("concurrency", 1))))
-                        instance.semaphore = asyncio.Semaphore(concurrency)
-                        self.instances[key] = instance
+                        async with self._instance_lock:
+                            active = [
+                                item for item in self.instances.values()
+                                if not item.closed.is_set()
+                            ]
+                            owned = sum(
+                                item.admitted_user == lease.user_id
+                                for item in active
+                            )
+                            if (
+                                len(active) >= self.capacity.global_instances
+                                or owned >= self.capacity.user_instances
+                            ):
+                                raise GatewayError(
+                                    "busy",
+                                    "Runtime instance capacity is full; retry later",
+                                )
+                            instance = Instance(
+                                key,
+                                spec,
+                                admitted_user=lease.user_id,
+                                last_activity=self.clock(),
+                            )
+                            instance.drained.set()
+                            concurrency = max(
+                                1,
+                                min(256, int(spec.config.get("concurrency", 1))),
+                            )
+                            instance.semaphore = asyncio.Semaphore(concurrency)
+                            self.instances[key] = instance
                         instance.owner = asyncio.create_task(self._owner(instance))
                     instance.refs.add(lease_id)
             if wait_closed:
@@ -227,7 +437,10 @@ class Runtime:
                 self.check_lease(lease_id)
                 if instance.phase != "ready":
                     continue
+                if instance.waiters >= self.capacity.per_instance_waiters:
+                    raise GatewayError("busy", "MCP instance wait queue is full; retry later")
                 instance.in_flight += 1
+                instance.waiters += 1
                 instance.drained.clear()
                 return instance
 
@@ -235,55 +448,95 @@ class Runtime:
                       *args, authorize=None, business=True):
         if authorize is not None:
             await authorize()
-        instance = await self._acquire(spec, lease_id)
+        lease = self.check_lease(lease_id)
+        permit = None
+        instance = None
+        waiting = False
         dispatched = False
+        acquired = False
+        queue_timeout = min(
+            float(spec.config.get("queue_timeout", self.capacity.queue_timeout)),
+            self.capacity.queue_timeout,
+        )
+        if business:
+            await self._business_gate.acquire(
+                lease.user_id,
+                spec.id,
+                queue_timeout,
+            )
+            permit = (lease.user_id, spec.id)
         try:
-            queue_timeout = float(spec.config.get("queue_timeout", 60))
+            self.check_lease(lease_id)
+            if authorize is not None:
+                await authorize()
+            self._available(spec)
+            instance = await self._acquire(spec, lease_id)
+            waiting = True
             try:
                 await asyncio.wait_for(instance.semaphore.acquire(), queue_timeout)
+                acquired = True
+                instance.waiters -= 1
+                waiting = False
             except TimeoutError as exc:
                 raise GatewayError("queue_timeout", "MCP call queue timed out") from exc
-            try:
-                self.check_lease(lease_id)
-                if authorize is not None:
-                    await authorize()
-                self._available(spec)
-                if instance.phase != "ready":
-                    raise GatewayError("stopped", "MCP is draining or stopped")
-                if business:
-                    instance.last_activity = self.clock()
-                dispatched = True
-                method = getattr(instance.connection, operation)
-                timeout = float(spec.config.get("call_timeout", 60))
-                return await asyncio.wait_for(method(*args), timeout)
-            finally:
-                instance.semaphore.release()
+            self.check_lease(lease_id)
+            if authorize is not None:
+                await authorize()
+            self._available(spec)
+            if instance.phase != "ready":
+                raise GatewayError("stopped", "MCP is draining or stopped")
+            if business:
+                instance.last_activity = self.clock()
+            dispatched = True
+            method = getattr(instance.connection, operation)
+            timeout = float(spec.config.get("call_timeout", 60))
+            return await asyncio.wait_for(method(*args), timeout)
         except GatewayError as exc:
-            if exc.code in {"permission_revoked", "auth_required", "credential_changed", "forbidden", "lease_expired"}:
+            if (
+                instance is not None
+                and exc.code in {
+                    "permission_revoked",
+                    "auth_required",
+                    "credential_changed",
+                    "forbidden",
+                    "lease_expired",
+                }
+            ):
                 instance.refs.discard(lease_id)
             raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if not dispatched:
-                instance.refs.discard(lease_id)
+                if instance is not None:
+                    instance.refs.discard(lease_id)
                 raise
             if is_request_error(exc):
                 raise GatewayError("downstream_error", str(exc)) from exc
             instance.phase = "draining"
             instance.refs.clear()
-            code = "outcome_unknown" if dispatched and business else "connection_error"
+            code = "outcome_unknown" if business else "connection_error"
             raise GatewayError(code, str(exc) or "Downstream did not return a result") from exc
         finally:
-            if business and dispatched:
-                instance.last_activity = self.clock()
-            instance.in_flight -= 1
-            if instance.in_flight == 0:
-                instance.drained.set()
-                if instance.phase == "draining":
-                    await self._stop_instance(instance)
-                elif not instance.refs and (instance.spec.mode == "lazy" or instance.spec.isolation == "session"):
-                    await self._stop_instance(instance, only_unreferenced=True)
+            if acquired and instance is not None:
+                instance.semaphore.release()
+            if waiting and instance is not None:
+                instance.waiters -= 1
+            if instance is not None:
+                if business and dispatched:
+                    instance.last_activity = self.clock()
+                instance.in_flight -= 1
+                if instance.in_flight == 0:
+                    instance.drained.set()
+                    if instance.phase == "draining":
+                        await self._stop_instance(instance)
+                    elif not instance.refs and (
+                        instance.spec.mode == "lazy"
+                        or instance.spec.isolation == "session"
+                    ):
+                        await self._stop_instance(instance, only_unreferenced=True)
+            if permit is not None:
+                await self._business_gate.release(*permit)
 
     async def call(self, spec, lease_id, name, arguments, *, authorize=None):
         return await self.perform(spec, lease_id, "call", name, arguments, authorize=authorize)
@@ -396,6 +649,20 @@ class Runtime:
         for lease in list(self.leases.values()):
             if lease.kind == "retention" and lease.id not in referenced:
                 self.leases.pop(lease.id, None)
+
+    def capacity_status(self):
+        active_instances = [
+            item for item in self.instances.values() if not item.closed.is_set()
+        ]
+        status = self._business_gate.status()
+        status.update(
+            instances=len(active_instances),
+            instances_by_user=dict(Counter(
+                item.admitted_user for item in active_instances
+            )),
+            instance_waiters=sum(item.waiters for item in active_instances),
+        )
+        return status
 
     def status(self, *, user_id: str | None = None):
         result = []
