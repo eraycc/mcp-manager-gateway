@@ -210,3 +210,7 @@ async def set_setting(db: Database, key: str, value: Any) -> None:
         else:
             session.add(SystemSetting(key=key, value=value))
     invalidate_setting_cache(db, [key])
+
+
+# Register auxiliary models after Base and the identity models exist (shared Alembic metadata).
+from . import catalog_models as catalog_models  # noqa: E402

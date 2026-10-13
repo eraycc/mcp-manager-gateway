@@ -3,6 +3,7 @@ from io import StringIO
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
 from mcp_manager.config import PACKAGE_ROOT
@@ -48,7 +49,8 @@ async def test_upgrade_preserves_legacy_identity_and_payload(db_settings):
             row = await session.get(McpProposal, "legacy-proposal")
             assert row.payload == {"sealed": "unchanged-marker"}
             assert row.revision == 1 and row.test_run_id is None and row.public_name is None
-            assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == "0007"
+            head = ScriptDirectory.from_config(migration_config()).get_current_head()
+            assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == head
         async with db.engine.connect() as connection:
             foreign_keys = await connection.run_sync(lambda conn: inspect(conn).get_foreign_keys("mcp_proposals"))
             assert {fk["referred_table"] for fk in foreign_keys} == {"users", "api_tokens", "mcp_servers"}
