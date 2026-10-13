@@ -72,8 +72,26 @@ def upgrade():
         sa.Column("term", sa.Text(), nullable=False),
         sa.Column("frequency", sa.Integer(), nullable=False))
     op.create_index("ix_catalog_term_lookup", "catalog_terms", ["generation_id", "term_hash"])
+    op.create_table("proposal_test_entries",
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("proposal_id", sa.String(36), sa.ForeignKey("mcp_proposals.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("actor_id", sa.String(36), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("run_id", sa.String(36), nullable=False),
+        sa.Column("revision", sa.Integer(), nullable=False),
+        sa.Column("kind", sa.String(16), nullable=False),
+        sa.Column("name", sa.Text(), nullable=False),
+        sa.Column("name_hash", sa.String(64), nullable=False),
+        sa.Column("sort_key", sa.String(256), nullable=False),
+        sa.Column("summary", sa.JSON(), nullable=False),
+        sa.Column("search_text", sa.Text(), nullable=False),
+        sa.Column("artifact_id", sa.String(64), sa.ForeignKey("artifact_objects.id"), nullable=False),
+        sa.Column("artifact_bytes", sa.BigInteger(), nullable=False),
+        sa.Column("created_at", timestamp(), nullable=False),
+        sa.UniqueConstraint("run_id", "kind", "name_hash", name="uq_proposal_test_entry"))
+    op.create_index("ix_proposal_test_page", "proposal_test_entries", ["run_id", "kind", "sort_key", "name_hash"])
+    op.create_index("ix_proposal_test_expiry", "proposal_test_entries", ["created_at"])
 
 
 def downgrade():
-    for name in ("catalog_terms", "catalog_entries", "catalog_heads", "catalog_generations", "artifact_objects"):
+    for name in ("proposal_test_entries", "catalog_terms", "catalog_entries", "catalog_heads", "catalog_generations", "artifact_objects"):
         op.drop_table(name)

@@ -19,6 +19,8 @@ EXACT_FIELDS = (("users", "username", 64), ("mcp_servers", "slug", 128), ("api_t
 
 
 def upgrade():
+    op.add_column("mcp_servers", sa.Column("auth_type", sa.String(16), nullable=True))
+    op.add_column("mcp_servers", sa.Column("config_isolation", sa.String(16), nullable=True))
     op.add_column("mcp_proposals", sa.Column("revision", sa.Integer(), nullable=False, server_default="1"))
     op.add_column("mcp_proposals", sa.Column("test_run_id", sa.String(36), nullable=True))
     op.add_column("mcp_proposals", sa.Column("tested_revision", sa.Integer(), nullable=True))
@@ -40,3 +42,5 @@ def downgrade():
     # Precision/case guarantees are intentionally not weakened on downgrade.
     for column in ("public_name", "tested_revision", "test_run_id", "revision"):
         op.drop_column("mcp_proposals", column)
+    op.drop_column("mcp_servers", "config_isolation")
+    op.drop_column("mcp_servers", "auth_type")

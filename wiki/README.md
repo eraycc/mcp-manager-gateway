@@ -26,6 +26,7 @@
 - [渐进式发现](concepts/progressive-discovery.md)
 - [运行时与生命周期](concepts/runtime-and-lifecycle.md)
 - [网关工具参考](reference/gateway-tools.md)
+- [能力目录与审批诊断 API](reference/catalog-api.md)
 - [CLI 参考](reference/cli.md)
 - [传输插件](development/transport-plugins.md)
 - [参与开发](development/contributing.md)

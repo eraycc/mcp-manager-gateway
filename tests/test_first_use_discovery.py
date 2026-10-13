@@ -1,4 +1,4 @@
-"""The first authorized directory read discovers one owner exactly once."""
+"""Directory reads stay cached; explicit refresh discovers an authorized owner."""
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -67,17 +67,20 @@ async def discovery_console(tmp_path):
             yield app, web, actor, row, calls
 
 
-async def test_tools_endpoint_discovers_ready_personal_credentials_once(tmp_path):
+async def test_tools_endpoint_is_read_only_and_explicit_refresh_discovers(tmp_path):
     async with discovery_console(tmp_path) as (_app, web, _actor, row, calls):
         responses = await asyncio.gather(*[
             web.get(f"/api/v1/mcps/{row.id}/tools") for _ in range(8)
         ])
         assert all(response.status_code == 200 for response in responses)
+        assert calls["count"] == 0
+        assert all(response.json()["cache_status"] == "empty" for response in responses)
+        refreshed = await web.post(f"/api/v1/mcps/{row.id}/refresh")
+        assert refreshed.status_code == 200 and refreshed.json()["cache_status"] == "ready"
         assert calls["count"] == 1
-        assert all(
-            response.json()["cache_status"] == "ready"
-            for response in responses
-        )
+        cached = await web.get(f"/api/v1/mcps/{row.id}/tools")
+        assert cached.status_code == 200 and cached.json()["tools"][0]["name"] == "whoami"
+        assert calls["count"] == 1
 
 
 async def test_missing_personal_credentials_returns_status_not_empty_ready(tmp_path):

@@ -40,7 +40,8 @@ async def managed_mysql_database(version):
     try:
         await asyncio.to_thread(
             docker, "run", "--detach", "--name", name, "--label", "mmg.test=isolated",
-            "--publish", "127.0.0.1::3306", "--env", "MYSQL_ROOT_PASSWORD=mmg-test-only",
+            "--publish", "127.0.0.1::3306", "--tmpfs", "/var/lib/mysql:rw,size=1073741824",
+            "--env", "MYSQL_ROOT_PASSWORD=mmg-test-only",
             "--env", "MYSQL_ROOT_HOST=%", image, timeout=600,
         )
         started = True
@@ -65,7 +66,7 @@ async def managed_mysql_database(version):
     finally:
         if started:
             # Exact unique name created above; no volumes or unrelated containers.
-            await asyncio.to_thread(docker, "rm", "--force", name)
+            await asyncio.to_thread(docker, "rm", "--force", "--volumes", name)
 
 
 @asynccontextmanager

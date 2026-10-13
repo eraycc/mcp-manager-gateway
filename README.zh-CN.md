@@ -50,6 +50,8 @@ MCP Manager Gateway
 
 每个 Agent 只连接 MMG，不再分别维护几十份 MCP 配置。服务、凭据、权限和运行状态由网关集中管理；同一套 MCP 可以安全地分配给不同用户和 Token。
 
+大目录的 Web 集成请使用[能力摘要分页与精确详情](wiki/reference/catalog-api.md)。审批测试支持有界摘要响应；旧全量列表接口有明确的大小限制。
+
 ### Agent 提议，人类审批
 
 迁移 MCP 时，不建议在管理台里逐条重建。给受信任的管理员 Token 开启“MCP 提议”权限后，Agent 可以：

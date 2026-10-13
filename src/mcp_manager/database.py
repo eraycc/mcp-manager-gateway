@@ -68,6 +68,8 @@ class McpServer(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     tags: Mapped[list] = mapped_column(JSON, default=list)
     transport: Mapped[str] = mapped_column(String(32))
+    auth_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    config_isolation: Mapped[str | None] = mapped_column(String(16), nullable=True)
     mode: Mapped[str] = mapped_column(String(16), default="lazy")
     isolation: Mapped[str] = mapped_column(String(16), default="service")
     config: Mapped[dict] = mapped_column(JSON, default=dict)

@@ -9,7 +9,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from .catalog import masked, restore, validate_slug, web_authorizer
 from .database import McpProposal, McpServer, now
@@ -101,58 +101,28 @@ def normalize_proposals(value: dict) -> list[dict]:
 
 
 async def list_proposals(app, user, *, q="", status="", page=1, page_size=20):
-    """Read-only listing of MCP proposals with status filter, paging and per-status counts.
-
-    Returns a trimmed, agent-friendly view: per-status counts plus a paged list of
-    metadata fields. The full config payload (which may contain credentials) is
-    intentionally excluded. Permission mirrors submit_proposals (admin only).
-    """
     if user.role != "admin":
         raise HTTPException(403, "Administrator required to list MCP proposals")
-    if page < 1 or not 1 <= page_size <= 200:
-        raise HTTPException(422, "Invalid pagination")
-    if status not in {"", "pending", "incomplete", "approved", "rejected"}:
-        raise HTTPException(422, "Invalid status")
+    if page < 1 or not 1 <= page_size <= 200 or status not in {"", "pending", "incomplete", "approved", "rejected"}:
+        raise HTTPException(422, "Invalid proposal filters")
+    filters = proposal_filters(q, status)
     async with app.state.db.session() as session:
-        rows = list((await session.scalars(select(McpProposal).order_by(
+        counts = dict((await session.execute(select(McpProposal.status, func.count()).group_by(McpProposal.status))).all())
+        total = await session.scalar(select(func.count()).select_from(McpProposal).where(*filters))
+        rows = list((await session.scalars(select(McpProposal).where(*filters).order_by(
             McpProposal.created_at.desc(), McpProposal.id
-        ))).all())
-    counts = {key: 0 for key in ("pending", "incomplete", "approved", "rejected")}
-    for row in rows:
-        if row.status in counts:
-            counts[row.status] += 1
-    catalog = app.state.catalog
-    query = q.lower()
-
-    def name_of(row):
-        try:
-            return catalog.unseal(row.payload).get("name", "")
-        except Exception:  # noqa: BLE001 - one corrupt proposal must not break listing
-            return ""
-
-    haystack = lambda row: (name_of(row) + " " + (row.purpose or "") + " " + (row.source or "")).lower()
-    filtered = [row for row in rows
-                if (not status or row.status == status)
-                and (not query or query in haystack(row))]
-    total = len(filtered)
-    page_rows = filtered[(page - 1) * page_size: page * page_size]
+        ).offset((page - 1) * page_size).limit(page_size))).all())
+        missing = await session.scalar(select(func.count()).select_from(McpProposal).where(McpProposal.public_name.is_(None)))
     return {
-        "total": total,
-        "counts": counts,
-        "page": page,
-        "page_size": page_size,
-        "total_pages": math.ceil(total / page_size) if total else 0,
-        "items": [
-            {
-                "id": row.id, "name": name_of(row), "status": row.status,
-                "purpose": row.purpose or "", "source": row.source or "",
-                "created_at": row.created_at.isoformat() if row.created_at else "",
-                "updated_at": row.updated_at.isoformat() if row.updated_at else "",
-                **({"rejection_reason": row.rejection_reason or ""}
-                   if row.status == "rejected" else {}),
-            }
-            for row in page_rows
-        ],
+        "items": [{
+            "id": row.id, "name": row.public_name or app.state.catalog.unseal(row.payload).get("name", ""),
+            "status": row.status, "purpose": row.purpose, "source": row.source,
+            "created_at": row.created_at.isoformat(), "updated_at": row.updated_at.isoformat(),
+            **({"rejection_reason": row.rejection_reason} if row.status == "rejected" else {}),
+        } for row in rows],
+        "total": total, "counts": {key: counts.get(key, 0) for key in ("pending", "incomplete", "approved", "rejected")},
+        "page": page, "page_size": page_size, "total_pages": math.ceil(total / page_size),
+        "indexing_needed": bool(missing),
     }
 
 
@@ -246,36 +216,47 @@ async def submit_proposals(app, user, token, value):
     return {"items": result, "message": "MCP 提议已提交，请前往控制面板审批"}
 
 
+def proposal_filters(q="", status=""):
+    filters = []
+    if status:
+        filters.append(McpProposal.status == status)
+    if q:
+        pattern = "%" + q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        filters.append(or_(*[
+            func.lower(field).like(pattern, escape="\\")
+            for field in (McpProposal.public_name, McpProposal.purpose, McpProposal.source)
+        ]))
+    return filters
+
+
 @router.get("")
 async def listing(request: Request, q: str = "", status: str = "", page: int = 1,
                   page_size: int = 20, user=ADMIN):
     if page < 1 or not 1 <= page_size <= 200:
         raise HTTPException(422, "Invalid pagination")
-    allowed = {"", "pending", "incomplete", "approved", "rejected"}
-    if status not in allowed:
+    if status not in {"", "pending", "incomplete", "approved", "rejected"}:
         raise HTTPException(422, "Invalid proposal status")
-    statement = select(McpProposal)
-    if status:
-        statement = statement.where(McpProposal.status == status)
-    db = request.app.state.db
-    async with db.session() as session:
-        rows = list((await session.scalars(statement.order_by(
+    await web_authorizer(request)()
+    filters = proposal_filters(q, status)
+    async with request.app.state.db.session() as session:
+        total = await session.scalar(select(func.count()).select_from(McpProposal).where(*filters))
+        rows = list((await session.scalars(select(McpProposal).where(*filters).order_by(
             McpProposal.created_at.desc(), McpProposal.id
-        ))).all())
-    if q:
-        query = q.lower()
-        rows = [row for row in rows if query in (
-            request.app.state.catalog.unseal(row.payload)["name"] + " " + row.purpose + " " + row.source
-        ).lower()]
-    total = len(rows)
-    rows = rows[(page - 1) * page_size:page * page_size]
-    return {
-        "items": [proposal_public(row, request.app.state.catalog) for row in rows],
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "total_pages": math.ceil(total / page_size),
+        ).offset((page - 1) * page_size).limit(page_size))).all())
+        missing = await session.scalar(select(func.count()).select_from(McpProposal).where(
+            McpProposal.public_name.is_(None)
+        ))
+    await web_authorizer(request)()
+    result = {
+        "items": [proposal_public(row, request.app.state.catalog) for row in rows], "total": total,
+        "page": page, "page_size": page_size, "total_pages": math.ceil(total / page_size),
+        "indexing_needed": bool(missing),
     }
+    from .http_budget import ensure_json_budget
+
+    await ensure_json_budget(result)
+    await web_authorizer(request)()
+    return result
 
 
 @router.get("/{proposal_id}")
@@ -294,6 +275,8 @@ async def detail(proposal_id: str, request: Request, response: Response,
 
 
 async def _configure(row, values, catalog, session=None):
+    if values.get("revision") is not None and values["revision"] != row.revision:
+        raise HTTPException(409, "Proposal configuration changed; reload before editing")
     payload = catalog.unseal(row.payload)
     for key in ("name", "slug", "description", "tags", "transport"):
         if key in values:
@@ -386,7 +369,7 @@ async def _persist_test_result(
         )
 
 
-async def run_proposal_test(request, proposal_id, user):
+async def run_proposal_test(request, proposal_id, user, *, summary=False):
     from .proposal_service import begin_test
 
     catalog = request.app.state.catalog
@@ -409,22 +392,41 @@ async def run_proposal_test(request, proposal_id, user):
             "diagnose-proposal-" + uuid4().hex,
             payload["transport"], payload["config"], "lazy", isolation,
         )
-        discovered = await runtime.discover(spec, lease.id)
-        result = {
+        if summary:
+            from .catalog_types import CatalogScope
+            from .proposal_snapshots import ProposalSnapshotStore
+
+            scope = CatalogScope(proposal_id, actor.id, tested_revision, run_id)
+            snapshots = ProposalSnapshotStore(
+                catalog.db, catalog.artifacts, scope, signing_key=catalog.config.jwt_secret
+            )
+            result = await runtime.perform(
+                spec, lease.id, "ingest_catalog", snapshots, scope, web_authorizer(request),
+                authorize=web_authorizer(request), business=False,
+            )
+            discovered = None
+        else:
+            discovered = await runtime.discover(spec, lease.id)
+            result = {
             "tool_count": len(discovered.get("tools", [])),
             "resource_count": len(discovered.get("resources", [])),
             "prompt_count": len(discovered.get("prompts", [])),
             "template_count": len(discovered.get("templates", [])),
-            "capability_errors": discovered.get("capability_errors", []),
-        }
+                "capability_errors": discovered.get("capability_errors", []),
+            }
         await web_authorizer(request)()
         published = await _persist_test_result(
             request, proposal_id, "success", result=result, run_id=run_id, tested_revision=tested_revision
         )
         if not published:
             return {"ok": False, "status": "superseded", "run_id": run_id, "tested_revision": tested_revision}
-        return {"ok": True, **result, "capabilities": discovered,
-                "run_id": run_id, "tested_revision": tested_revision}
+        response = {"ok": True, **result, **({"capabilities": discovered} if not summary else {}),
+                    "run_id": run_id, "tested_revision": tested_revision}
+        from .http_budget import ensure_json_budget
+
+        await ensure_json_budget(response, max_bytes=16384 if summary else 1048576)
+        await web_authorizer(request)()
+        return response
     except asyncio.CancelledError:
         await asyncio.shield(_persist_test_result(
             request, proposal_id, "cancelled", error="Operation cancelled",
@@ -443,9 +445,48 @@ async def run_proposal_test(request, proposal_id, user):
             await runtime.release(lease.id)
 
 
+async def snapshot_store(request, proposal_id):
+    from .catalog_types import CatalogScope
+    from .proposal_snapshots import ProposalSnapshotStore
+
+    actor = await web_authorizer(request)()
+    catalog = request.app.state.catalog
+    async with catalog.db.session() as session:
+        row = await session.get(McpProposal, proposal_id)
+        if not row or (row.test_result or {}).get("snapshot_owner") != actor.id:
+            raise HTTPException(404, "Diagnostic snapshot not found")
+        scope = CatalogScope(row.id, actor.id, row.revision, row.test_run_id or "")
+        store = ProposalSnapshotStore(catalog.db, catalog.artifacts, scope, signing_key=catalog.config.jwt_secret)
+        try:
+            await store._check(session, published=True)
+        except GatewayError:
+            raise HTTPException(404, "Diagnostic snapshot not found or expired") from None
+    return store, scope
+
+
+@router.get("/{proposal_id}/test-capabilities")
+async def test_capabilities(proposal_id: str, request: Request, kind: str = "tools", q: str = "",
+                            cursor: str | None = None, limit: int = 50, user=ADMIN):
+    store, scope = await snapshot_store(request, proposal_id)
+    page = await store.list_capabilities(scope, kind=kind, query=q, cursor=cursor, limit=limit)
+    await web_authorizer(request)()
+    return {"items": page.items, "total": page.total, "next_cursor": page.next_cursor,
+            "generation": page.generation}
+
+
+@router.get("/{proposal_id}/test-capabilities/{kind}/{name:path}")
+async def test_capability_definition(proposal_id: str, kind: str, name: str, request: Request, user=ADMIN):
+    store, scope = await snapshot_store(request, proposal_id)
+    value = await store.get_definition(scope, kind=kind, name=name)
+    await web_authorizer(request)()
+    if value is None:
+        raise HTTPException(404, "Diagnostic capability not found")
+    return value
+
+
 @router.post("/{proposal_id}/test")
-async def test_proposal(proposal_id: str, request: Request, user=ADMIN):
-    return await run_proposal_test(request, proposal_id, user)
+async def test_proposal(proposal_id: str, request: Request, summary: bool = False, user=ADMIN):
+    return await run_proposal_test(request, proposal_id, user, summary=summary)
 
 
 @router.post("/batch-test")
@@ -456,7 +497,7 @@ async def batch_test(data: dict, request: Request, user=ADMIN):
         raise HTTPException(422, "Select between 1 and 500 proposals")
 
     async def operation(proposal_id):
-        return await run_proposal_test(request, proposal_id, user)
+        return await run_proposal_test(request, proposal_id, user, summary=data.get("summary") is True)
 
     async def cancelled(proposal_id):
         await _persist_test_result(
@@ -496,6 +537,7 @@ async def batch(data: dict, request: Request, user=ADMIN):
 @router.post("/{proposal_id}/approve")
 async def approve(proposal_id: str, data: dict, request: Request, user=ADMIN):
     from sqlalchemy.exc import IntegrityError
+
     from .proposal_service import approve_proposal
 
     db, catalog = request.app.state.db, request.app.state.catalog

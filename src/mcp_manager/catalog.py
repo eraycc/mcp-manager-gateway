@@ -588,6 +588,9 @@ class Catalog:
             id=str(uuid4()), name=name, slug=slug,
             description=values.get("description", ""), tags=values.get("tags", []),
             transport=transport, mode=mode, isolation=isolation, config=self.seal({}),
+            auth_type=config.get("auth", {}).get("type", "none"),
+            config_isolation=config.get("auth", {}).get("config_isolation", "shared")
+                if config.get("auth", {}).get("type") == "oauth" else None,
         )
         session.add(row)
         await session.flush()
@@ -643,6 +646,9 @@ class Catalog:
                     row.mode = mode
                     row.isolation = isolation
                     row.transport = transport
+                    row.auth_type = config.get("auth", {}).get("type", "none")
+                    row.config_isolation = config.get("auth", {}).get("config_isolation", "shared") \
+                        if row.auth_type == "oauth" else None
                     row.config = self.seal(stored)
                     row.revision += 1
                     await s.flush()
@@ -785,22 +791,52 @@ class Catalog:
     async def _index_scope(self, session, row, owner):
         if row.isolation != "user" and owner != "service":
             raise GatewayError("credential_changed", "Catalog owner does not match service isolation")
-        keys = {
-            self.credentials.key(row.id, owner),
-            self.credentials.key(row.id, "service"),
+        keys = self._index_credential_keys(row, owner)
+        stored = dict((await session.execute(select(
+            SystemSetting.key, SystemSetting.value
+        ).where(SystemSetting.key.in_(keys)))).all())
+        return self._scope_from_settings(row, owner, stored)
+
+    def _index_credential_keys(self, row, owner):
+        return {
+            self.credentials.key(row.id, owner), self.credentials.key(row.id, "service"),
             "oauth:" + row.id + ":" + owner,
         }
-        stored = []
-        for key in sorted(keys):
-            item = await session.get(SystemSetting, key, populate_existing=True)
-            stored.append([key, item.value if item else None])
+
+    def _scope_from_settings(self, row, owner, stored):
+        values = [[key, stored.get(key)] for key in sorted(self._index_credential_keys(row, owner))]
         # Hash sealed payloads, never place credentials in the public catalog DTO.
-        credential_generation = hashlib.sha256(strict_json_dumps([row.config, stored]).encode()).hexdigest()
-        return CatalogScope(row.id, owner, row.revision, credential_generation)
+        generation = hashlib.sha256(strict_json_dumps([row.revision, values]).encode()).hexdigest()
+        return CatalogScope(row.id, owner, row.revision, generation)
+
+    async def index_scopes(self, rows, user_id=None):
+        """Batch current metadata and credential generations without opening configurations."""
+        from sqlalchemy.orm import load_only
+
+        if not rows:
+            return {}
+        async with self.db.session() as session:
+            current = list((await session.scalars(select(McpServer).options(load_only(
+                McpServer.id, McpServer.revision, McpServer.isolation
+            )).where(McpServer.id.in_([row.id for row in rows])))).all())
+            expected = {row.id: (row.revision, row.isolation) for row in rows}
+            if {row.id: (row.revision, row.isolation) for row in current} != expected:
+                raise GatewayError("revision_changed", "MCP configuration changed")
+            owners = {row.id: catalog_owner(row.isolation, user_id) for row in current}
+            keys = {key for row in current for key in self._index_credential_keys(row, owners[row.id])}
+            stored = dict((await session.execute(select(
+                SystemSetting.key, SystemSetting.value
+            ).where(SystemSetting.key.in_(keys)))).all())
+            return {row.id: self._scope_from_settings(row, owners[row.id], stored) for row in current}
+
 
     async def index_scope(self, row, user_id=None):
+        from sqlalchemy.orm import load_only
+
         async with self.db.session() as session:
-            current = await session.get(McpServer, row.id, populate_existing=True)
+            current = await session.get(McpServer, row.id, populate_existing=True, options=[load_only(
+                McpServer.id, McpServer.revision, McpServer.isolation
+            )])
             if not current or current.revision != row.revision:
                 raise GatewayError("revision_changed", "MCP configuration changed")
             return await self._index_scope(session, current, catalog_owner(current.isolation, user_id))

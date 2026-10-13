@@ -50,6 +50,8 @@ Listing MCPs, searching tools, and paging through the catalog never starts a dow
 
 Each agent connects to MMG instead of carrying dozens of independent MCP definitions. The gateway centrally manages services, credentials, permissions, health, and runtime state. The same catalog can be safely assigned to different users and tokens.
 
+For Web integrations with large catalogs, use [capability summary pages and exact definitions](wiki/reference/catalog-api.md). Approval tests support a bounded summary response; legacy full-list responses have explicit size limits.
+
 ### Agent proposals with human approval
 
 The recommended migration path is not to rebuild every MCP by hand. Give a trusted administrator token permission to submit MCP proposals, then ask an agent to:

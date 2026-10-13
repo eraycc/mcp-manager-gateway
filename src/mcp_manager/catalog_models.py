@@ -80,3 +80,26 @@ class CatalogTerm(Base):
     term_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     term: Mapped[str] = mapped_column(Text)
     frequency: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class ProposalTestEntry(Base):
+    __tablename__ = "proposal_test_entries"
+    __table_args__ = (
+        UniqueConstraint("run_id", "kind", "name_hash", name="uq_proposal_test_entry"),
+        Index("ix_proposal_test_page", "run_id", "kind", "sort_key", "name_hash"),
+        Index("ix_proposal_test_expiry", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    proposal_id: Mapped[str] = mapped_column(ForeignKey("mcp_proposals.id", ondelete="CASCADE"))
+    actor_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    run_id: Mapped[str] = mapped_column(String(36))
+    revision: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(Text)
+    name_hash: Mapped[str] = mapped_column(String(64))
+    sort_key: Mapped[str] = mapped_column(String(256))
+    summary: Mapped[dict] = mapped_column(JSON)
+    search_text: Mapped[str] = mapped_column(Text)
+    artifact_id: Mapped[str] = mapped_column(ForeignKey("artifact_objects.id"))
+    artifact_bytes: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=now)

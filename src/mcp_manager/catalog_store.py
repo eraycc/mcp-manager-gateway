@@ -7,6 +7,7 @@ import json
 
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import load_only
 
 from .artifact_store import ArtifactStore
 from .catalog_models import ArtifactObject, CatalogEntry, CatalogGeneration, CatalogHead
@@ -39,6 +40,21 @@ def tool_ref(row):
     return ToolRef(row.generation_id, row.original_name, row.gateway_name, row.schema_hash, row.artifact_id)
 
 
+async def bounded_summary_rows(rows, limit, *, max_bytes=131072):
+    def select_rows():
+        selected, size = [], 4096  # Leave room for counters, generation and bounded signed cursor.
+        for row in rows[:limit]:
+            cost = len(strict_json_dumps(row.summary).encode("utf-8")) + 1
+            if size + cost > max_bytes:
+                if not selected:
+                    raise GatewayError("catalog_entry_too_large", "Capability summary exceeds the page byte budget")
+                break
+            selected.append(row)
+            size += cost
+        return selected
+    return await asyncio.to_thread(select_rows)
+
+
 class CatalogStore:
     def __init__(self, db, artifacts: ArtifactStore, *, signing_key, scope_resolver=None):
         self.db = db
@@ -52,7 +68,9 @@ class CatalogStore:
             raise ValueError("Unknown capability kind")
 
     async def _validate_scope(self, session, scope):
-        row = await session.get(McpServer, scope.server_id, populate_existing=True)
+        row = await session.get(McpServer, scope.server_id, populate_existing=True, options=[load_only(
+            McpServer.id, McpServer.slug, McpServer.revision, McpServer.isolation, McpServer.mode
+        )])
         if not row or row.revision != scope.revision:
             raise GatewayError("revision_changed", "MCP configuration changed during catalog refresh")
         if row.mode == "disabled":
@@ -204,7 +222,9 @@ class CatalogStore:
         return result
 
     async def _current(self, session, scope):
-        row = await session.get(McpServer, scope.server_id, populate_existing=True)
+        row = await session.get(McpServer, scope.server_id, populate_existing=True, options=[load_only(
+            McpServer.id, McpServer.slug, McpServer.revision, McpServer.isolation, McpServer.mode
+        )])
         if not row or row.revision != scope.revision or row.mode == "disabled":
             return None
         head = await session.get(CatalogHead, scope_key(scope), populate_existing=True)
@@ -228,6 +248,29 @@ class CatalogStore:
                 "tool_count": counts.get("tools", 0), "resource_count": counts.get("resources", 0),
                 "prompt_count": counts.get("prompts", 0), "template_count": counts.get("templates", 0),
                 **(generation.details if generation else {}),
+            }
+
+    async def get_summaries(self, scopes):
+        """One metadata query for a bounded service page, without capability or Schema rows."""
+        if not scopes:
+            return {}
+        expected = {scope_key(scope): scope for scope in scopes}
+        async with self.db.session() as session:
+            rows = (await session.execute(select(CatalogGeneration).join(
+                CatalogHead, CatalogHead.generation_id == CatalogGeneration.id
+            ).where(
+                CatalogHead.scope_key.in_(expected), CatalogHead.status == "ready",
+                CatalogGeneration.status == "ready",
+            ))).scalars().all()
+            return {
+                row.server_id: {
+                    "generation": row.id, "cache_status": "ready", "cache_at": row.published_at,
+                    "tool_count": row.counts.get("tools", 0),
+                    "resource_count": row.counts.get("resources", 0),
+                    "prompt_count": row.counts.get("prompts", 0),
+                    "template_count": row.counts.get("templates", 0),
+                }
+                for row in rows if generation_scope(row) == expected.get(row.scope_key)
             }
 
     def _cursor(self, payload):
@@ -261,7 +304,8 @@ class CatalogStore:
                 if cursor:
                     raise GatewayError("invalid_cursor", "Catalog scope or generation changed")
                 return CatalogPage([], 0, None, "")
-            binding = [scope_key(scope), generation.id, scope.revision, scope.credential_generation, kind, query, limit]
+            binding = digest(strict_json_dumps([scope_key(scope), generation.id, scope.revision,
+                                               scope.credential_generation, kind, query, limit]))
             key = self._decode_cursor(cursor, binding) if cursor else None
             filters = [CatalogEntry.generation_id == generation.id, CatalogEntry.kind == kind]
             if query:
@@ -277,8 +321,8 @@ class CatalogStore:
             rows = (await session.execute(statement.order_by(
                 CatalogEntry.sort_key, CatalogEntry.name_hash
             ).limit(limit + 1))).all()
-            selected = rows[:limit]
-            next_cursor = self._cursor({"binding": binding, "key": [selected[-1].sort_key, selected[-1].name_hash]}) if len(rows) > limit else None
+            selected = await bounded_summary_rows(rows, limit)
+            next_cursor = self._cursor({"binding": binding, "key": [selected[-1].sort_key, selected[-1].name_hash]}) if len(rows) > len(selected) else None
             return CatalogPage([dict(row.summary) for row in selected], total, next_cursor, generation.id)
 
     async def _entry(self, session, scope, kind, name):
