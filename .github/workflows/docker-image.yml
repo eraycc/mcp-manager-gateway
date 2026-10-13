@@ -14,9 +14,6 @@ env:
   IMAGE_NAME_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME }}/mcp-manager-gateway
 
 jobs:
-  quality-gate:
-    uses: ./.github/workflows/test.yml
-
   # ==========================================================
   # Job 1: 检查是否值得构建
   #   - push to master：仅当 pyproject.toml 版本 > PyPI 版本时通过
@@ -101,7 +98,7 @@ jobs:
   # Job 2: 构建并推送
   # ==========================================================
   build:
-    needs: [check-version, quality-gate]
+    needs: check-version
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:

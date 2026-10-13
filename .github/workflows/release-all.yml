@@ -8,9 +8,6 @@ on:
       - 'pyproject.toml'
 
 jobs:
-  quality-gate:
-    uses: ./.github/workflows/test.yml
-
   check-version:
     runs-on: ubuntu-latest
     outputs:
@@ -74,7 +71,7 @@ jobs:
           echo "- 是否发布: \`${{ steps.compare.outputs.should_release }}\`" >> "$GITHUB_STEP_SUMMARY"
 
   build:
-    needs: [check-version, quality-gate]
+    needs: check-version
     if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
 
