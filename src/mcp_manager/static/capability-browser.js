@@ -1,4 +1,4 @@
-import{api,badge,button,dialog,el,empty,loading,pretty}from './core.js';
+import{api,badge,button,dialog,el,empty,loading,renderFullJson}from './core.js';
 
 export const CAPABILITY_PAGE_SIZE=50;
 export const capabilityKinds=[
@@ -15,7 +15,7 @@ export function capabilityDetailUrl(resource,kind,name){
  return resource+'/'+encodeURIComponent(kind)+'/'+encodeURIComponent(name);
 }
 
-export function capabilityBrowser({resource,signal,title='能力目录',initialKind='tools',onTool,actions=[]}){
+export function capabilityBrowser({resource,signal,title='能力目录',initialKind='tools',onTool,actions=[],refreshAction}){
  const owned=new AbortController();
  if(signal){
   if(signal.aborted)owned.abort();
@@ -27,6 +27,7 @@ export function capabilityBrowser({resource,signal,title='能力目录',initialK
  const form=el('form',{class:'toolbar capability-toolbar'},search,el('button',{type:'submit'},'搜索'));
  const body=el('div',{class:'capability-list','aria-live':'polite'});
  const foot=el('div',{class:'pagination capability-pagination'});
+ if(refreshAction)actions=[button('刷新发现缓存',async()=>{await refreshAction();page=0;cursors=[null];await load()}),...actions];
  const shell=el('div',{class:'stack capability-browser',role:'region'},actions.length?el('div',{class:'actions capability-actions'},...actions):null,tabs,form,body,foot);
  const popup=dialog(title,shell);
  popup.addEventListener('close',()=>owned.abort(),{once:true});
@@ -58,7 +59,9 @@ export function capabilityBrowser({resource,signal,title='能力目录',initialK
   try{
    const value=await api(capabilityDetailUrl(resource,kind,nameOf(item)),{signal:current.signal});
    if(request!==epoch||owned.signal.aborted||!card.isConnected)return;
-   area.dataset.loaded='true';area.replaceChildren(el('pre',{},pretty(value)));
+   const output=el('pre');area.replaceChildren(output);await renderFullJson(output,value,{signal:current.signal});
+   if(request!==epoch||owned.signal.aborted)return;
+   area.dataset.loaded='true';
    control.querySelector('.button-label').textContent='收起定义';control.setAttribute('aria-expanded','true');
    if(kind==='tools'&&onTool)card.querySelector('[data-test-tool]')?.removeAttribute('disabled');
   }catch(error){
@@ -70,6 +73,7 @@ export function capabilityBrowser({resource,signal,title='能力目录',initialK
  }
  function render(){
   body.replaceChildren();
+  if(data.refresh_required)body.append(el('p',{class:'notice capability-cache-hint'},'检测到旧版发现缓存，请点击“刷新发现缓存”更新能力目录。'));
   for(const item of data.items.slice(0,CAPABILITY_PAGE_SIZE)){
    const card=el('article',{class:'card capability-card'});
    const detailButton=button('查看完整定义',()=>showDefinition(item,card,detailButton));

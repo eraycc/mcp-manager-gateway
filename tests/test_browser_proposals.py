@@ -83,7 +83,7 @@ async def test_proposal_test_feedback_and_batch_job_dialog(running_gateway, monk
 
         await expect(page.get_by_role("columnheader", name="测试结果", exact=True)).to_be_visible()
         single = page.locator(f'tr[data-row-id="{single_id}"]')
-        await single.get_by_role("button", name="工具 / 测试", exact=True).click()
+        await single.get_by_role("button", name="能力测试", exact=True).click()
         await expect(page.locator("#toast")).to_have_text("正在测试 MCP 连接…")
         await asyncio.wait_for(entered["single"].wait(), 5)
         release["single"].set()
@@ -96,6 +96,17 @@ async def test_proposal_test_feedback_and_batch_job_dialog(running_gateway, monk
         ).get_by_role("button", name="关闭", exact=True).click()
         await expect(single).to_contain_text("部分可用")
         await expect(single).to_contain_text("资源不可用（Method not found）")
+
+        test_requests = []
+        page.on("request", lambda request: test_requests.append(request.url) if "/test?summary=" in request.url else None)
+        await single.get_by_role("button", name="能力测试", exact=True).click()
+        choice = page.get_by_role("dialog", name="已有能力目录", exact=True)
+        await expect(choice).to_be_visible()
+        await choice.get_by_role("button", name="查看缓存能力目录", exact=True).click()
+        cached = page.get_by_role("dialog", name="Single proposal · 测试能力", exact=True)
+        await expect(cached.locator(".capability-card")).to_have_count(2)
+        assert test_requests == []
+        await cached.get_by_role("button", name="关闭", exact=True).click()
 
         batch = page.locator(f'tr[data-row-id="{batch_id}"]')
         await batch.get_by_role("checkbox").check()
@@ -216,7 +227,7 @@ async def test_proposal_uses_shared_full_editor_and_global_secret_toggle(running
         assert saved["payload"]["config"]["auth"]["client_secret"] == "browser-secret"
 
         row = page.locator(f'tr[data-row-id="{proposal_id}"]')
-        await row.get_by_role("button", name="工具 / 测试", exact=True).click()
+        await row.get_by_role("button", name="能力测试", exact=True).click()
         await expect(page.locator("#toast")).to_have_text(
             "OAuth 类型需要在审批通过并授权后验证"
         )

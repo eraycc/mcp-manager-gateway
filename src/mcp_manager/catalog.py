@@ -614,7 +614,7 @@ class Catalog:
         await session.flush()
         return row
 
-    async def create(self, values, *, authorize=None, user_id=None):
+    async def create(self, values, *, authorize=None, user_id=None, discover=True):
         try:
             async with self.db.locked() as session:
                 if authorize:
@@ -623,7 +623,8 @@ class Catalog:
         except IntegrityError:
             raise HTTPException(409, "MCP slug already exists") from None
         self.runtime.versions[row.id] = row.revision
-        await self.refresh_after_change(row, user_id, authorize)
+        if discover:
+            await self.refresh_after_change(row, user_id, authorize)
         return await self.get(row.id)
 
     async def update(self, server_id, values, *, authorize=None, user_id=None):

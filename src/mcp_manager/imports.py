@@ -170,7 +170,15 @@ def normalize_import(data, channel="generic"):
             item = copy.deepcopy(raw)
             if "config" in item and not isinstance(item["config"], dict):
                 raise ValueError("config must be an object")
-            config = copy.deepcopy(item.get("config", {k: v for k, v in item.items() if k not in META}))
+            extension = item.get("config", {})
+            if extension.get("format") == "mmg-v1":
+                connection = {k: v for k, v in item.items() if k not in META and k != "config"}
+                config = copy.deepcopy({**connection, **{
+                    k: v for k, v in extension.items() if k not in META and k != "format"
+                }})
+                item.update({k: v for k, v in extension.items() if k in META})
+            else:
+                config = copy.deepcopy(item.get("config", {k: v for k, v in item.items() if k not in META}))
             if channel == "dsh":
                 for key in DSH_STATE:
                     config.pop(key, None)
@@ -220,6 +228,23 @@ def normalize_import(data, channel="generic"):
         except (ValueError, TypeError, KeyError, RecursionError) as exc:
             errors.append({"name": name, "error": str(exc)})
     return {"items": items, "errors": errors}
+
+
+def export_entry(service, config):
+    """Common client connection fields plus a versioned MMG-only extension."""
+    connection_keys = {"command", "args", "env", "cwd", "url", "headers"}
+    # REST is MMG-specific, but preserve its mappings for a lossless roundtrip.
+    if service["transport"] == "rest":
+        connection_keys.add("tools")
+    entry = {k: copy.deepcopy(v) for k, v in config.items() if k in connection_keys}
+    entry["type"] = "http" if service["transport"] == "streamable-http" else service["transport"]
+    entry["config"] = {
+        **{k: copy.deepcopy(v) for k, v in config.items() if k not in connection_keys},
+        **{k: copy.deepcopy(service[k]) for k in
+           ("name", "slug", "description", "tags", "transport", "mode", "isolation")},
+        "format": "mmg-v1",
+    }
+    return entry
 
 
 def fingerprint(item):

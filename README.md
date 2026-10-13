@@ -179,7 +179,7 @@ Browser translation can send visible page text to the configured translation pro
 ## Administration overview
 
 - stdio, Streamable HTTP, legacy SSE, and REST-to-MCP transports;
-- generic JSON, Codex TOML, Claude, and DSH Cordis/registry import;
+- generic JSON, Codex TOML, Claude, and DSH Cordis/registry import; exports use common `mcpServers` connection fields with a versioned MMG `config` extension for lossless re-import ([format](wiki/reference/catalog-api.md#service-configuration-export));
 - independent user, token, anonymous-scope, and MCP assignment controls;
 - `lazy`, `eager`, and `disabled` lifecycle modes;
 - shared, per-user, and per-session runtime isolation;

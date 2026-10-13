@@ -218,18 +218,13 @@ async def export_mcps(data: dict, request: Request, user=ADMIN):
     for row in await cat.rows():
         if data.get("ids") and row.id not in data["ids"]:
             continue
+        from .imports import export_entry
+
         public = await cat.detail(row, user.id)
-        result[row.slug] = {
-            key: public[key]
-            for key in (
-                "name", "description", "tags", "transport",
-                "mode", "isolation", "config",
-            )
-        }
+        config = public["config"]
         if data.get("include_secrets", False):
-            result[row.slug]["config"] = await cat.credentials.materialize(
-                row, user.id, require=False
-            )
+            config = await cat.credentials.materialize(row, user.id, require=False)
+        result[row.slug] = export_entry(public, config)
     await request.app.state.logs.audit("mcp.export", user.id,
                                        {"count": len(result), "include_secrets": data.get("include_secrets", False)})
     return {"mcpServers": result}
@@ -375,9 +370,14 @@ async def duplicate(server_id: str, request: Request, user=ADMIN):
         mode="lazy",
     )
     copied = await cat.create(
-        values, authorize=web_authorizer(request), user_id=user.id
+        values, authorize=web_authorizer(request), user_id=user.id, discover=False
     )
-    return await cat.detail(copied, user.id)
+    try:
+        await cat.refresh_index(copied.id, user.id, authorize=web_authorizer(request))
+    except GatewayError:
+        # Copy remains saved; refresh_index records an actionable failure state.
+        pass
+    return await cat.detail(await cat.get(copied.id), user.id)
 
 
 async def indexed_permission(request, server_id, *, configuration=False):
@@ -411,8 +411,10 @@ async def capabilities(server_id: str, request: Request, kind: str = "tools", q:
         raise GatewayError("permission_revoked", "MCP scope changed during capability query")
     if ((await cat.index.get_summary(scope))["generation"] or "") != page.generation:
         raise GatewayError("revision_changed", "MCP catalog changed during capability query")
+    legacy = cat.cached_view(row, actor.id) if not page.generation else {}
     return {"items": page.items, "total": page.total, "next_cursor": page.next_cursor,
-            "generation": page.generation}
+            "generation": page.generation,
+            "refresh_required": not page.generation and legacy.get("cache_status") == "ready"}
 
 
 @router.get("/mcps/{server_id}/capabilities/{kind}/{name:path}")

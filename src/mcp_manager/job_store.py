@@ -2,6 +2,7 @@
 import asyncio
 from datetime import timedelta
 
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import delete, func, select
 
 from .catalog_models import ArtifactObject
@@ -90,6 +91,7 @@ class JobStore:
             safe["error"] = safe_diagnostic_error(
                 ValueError(str(result["error"])), config=result.get("item") if isinstance(result.get("item"), dict) else {}
             )["message"]
+        safe = await asyncio.to_thread(jsonable_encoder, safe)
         summary = await asyncio.to_thread(result_summary, ordinal, safe)
         ref = await self.artifacts.put_json(safe, max_bytes=8 * 1024 * 1024)
         async with self.db.locked() as session:

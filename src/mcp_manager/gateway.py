@@ -565,20 +565,33 @@ class Gateway:
             raise
         return types.CallToolResult.model_validate(result)
 
-    async def read_resource_tool(self, request, user, token, rows, uri):
-        row = next((r for r in rows if uri.startswith("mcp-manager://" + r.id + "/")), None)
-        if not row:
+    async def resource_value(self, request, user, token, rows, uri):
+        candidate = next((r for r in rows if uri.startswith("mcp-manager://" + r.id + "/")), None)
+        if not candidate:
             raise ValueError("Resource not authorized")
-        original = uri[len("mcp-manager://" + row.id + "/"):]
+        catalog = self.app.state.catalog
+        # Metadata listings deliberately defer encrypted config. Load only the
+        # selected target before materializing credentials for its downstream.
+        row = await catalog.get(candidate.id)
+        if row.revision != candidate.revision:
+            raise GatewayError("permission_revoked", "MCP configuration changed")
+        await self.ensure(request, row)
+        prefix = "mcp-manager://" + row.id + "/"
+        original = uri[len(prefix):]
         result = await self.app.state.runtime.perform(
-            await self.app.state.catalog.spec(row, user.id if user else None),
-            self.lease(request, user, token).id,
-            "read_resource",
-            original,
+            await catalog.spec(row, user.id if user else None),
+            self.lease(request, user, token).id, "read_resource", original,
             authorize=lambda: self.ensure(request, row),
         )
-        for content in result.get("contents", []):
-            content["uri"] = "mcp-manager://" + row.id + "/" + content["uri"]
+        await self.ensure(request, row)
+        result = dict(result, contents=[
+            dict(content, uri=prefix + content["uri"])
+            for content in result.get("contents", [])
+        ])
+        return row, result
+
+    async def read_resource_tool(self, request, user, token, rows, uri):
+        row, result = await self.resource_value(request, user, token, rows, uri)
         return result_json({
             "mcp": {"id": row.id, "name": row.name, "slug": row.slug},
             "contents": result.get("contents", []),
@@ -659,16 +672,7 @@ class Gateway:
     async def read_resource(self, ctx, params):
         user, token, allowed = await self.principal(ctx.request)
         rows = await self.app.state.catalog.rows(ids=allowed, metadata_only=True)
-        uri = str(params.uri)
-        row = next((r for r in rows if uri.startswith("mcp-manager://" + r.id + "/")), None)
-        if not row:
-            raise ValueError("Resource not authorized")
-        original = uri[len("mcp-manager://" + row.id + "/"):]
-        result = await self.app.state.runtime.perform(await self.app.state.catalog.spec(row, user.id if user else None),
-            self.lease(ctx.request, user, token).id, "read_resource", original,
-            authorize=lambda current=row: self.ensure(ctx.request, current))
-        for content in result.get("contents", []):
-            content["uri"] = "mcp-manager://" + row.id + "/" + content["uri"]
+        _row, result = await self.resource_value(ctx.request, user, token, rows, str(params.uri))
         return types.ReadResourceResult.model_validate(result)
 
     async def ensure(self, request, row):

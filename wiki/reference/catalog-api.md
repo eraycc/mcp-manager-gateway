@@ -32,3 +32,39 @@
 ## MCP protocol pagination
 
 `gateway_search_tools` accepts optional `names_only: true` for complete name traversal without reading definition artifacts. Obtain the original full `inputSchema` through exact search before `gateway_call`. Providers in each response belong only to that page. Follow opaque `next_cursor` with unchanged query and page size; identity, permission, credentials, generation, feature or retrieval changes invalidate it. Native lists use `nextCursor`. `gateway_list_resources` accepts `limit` and `cursor`, returns summary items and a total. Whole JSON-RPC responses include all text and structured representations in the 1 MiB budget. Individual oversized contracts fail explicitly with `catalog_entry_too_large`.
+
+## Console cache and full detail display
+
+检测到旧版缓存时，目录响应带有 `refresh_required: true`，控制台提示管理员刷新。刷新成功后，当前弹窗直接显示新目录。复制服务会自动尝试建立分页目录；连接失败时服务仍保留，并展示可操作的缓存错误。审批中已有成功测试快照时，“能力测试”先提供查看缓存或重新测试的选择；快照过期时需要重新测试。
+
+能力列表保持摘要分页。用户显式打开单项完整定义或执行单工具测试时，控制台显示完整响应，通过后台格式化和分批更新保持界面响应；服务器端传输与存储大小预算仍然有效，超预算返回明确错误而非成功截断。
+
+## Service configuration export
+
+`POST /api/v1/mcps/export` 返回通用 `mcpServers` JSON。stdio 的 `command`、`args`、`env`、`cwd`，以及网络传输的 `url`、`headers` 均位于条目顶层。Streamable HTTP 导出为通用客户端采用的 `type: "http"`；MMG 同时支持导入 `http` 和 `streamable-http`。
+
+```json
+{
+  "mcpServers": {
+    "example": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "example-mcp"],
+      "config": {
+        "format": "mmg-v1",
+        "name": "Example",
+        "slug": "example",
+        "description": "Example service",
+        "tags": ["development"],
+        "transport": "stdio",
+        "mode": "lazy",
+        "isolation": "service",
+        "encoding": "utf-8",
+        "startup_timeout": 30
+      }
+    }
+  }
+}
+```
+
+`config` 保存 MMG 元数据和其余运行设置；`format: "mmg-v1"` 明确区分此扩展与旧版 MMG 内部格式。MMG 通用 JSON 导入会合并顶层连接字段和扩展，旧格式继续兼容。默认导出隐藏敏感值；REST 映射属于 MMG 扩展，其他客户端不支持直接连接 REST 类型。基础连接字段参考 [Claude Code 官方 MCP 配置](https://code.claude.com/docs/en/mcp)。

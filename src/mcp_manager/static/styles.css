@@ -150,3 +150,17 @@ button.is-busy .button-label{opacity:.72}
 .job-result-summary{min-width:0}
 @media(max-width:720px){.capability-list{grid-template-columns:minmax(0,1fr)}.capability-browser{min-height:60vh}.job-result-row{align-items:flex-start}.job-result-row>button{width:100%}}
 @media(prefers-reduced-motion:reduce){.capability-list,.job-result-row,.skeleton-lines i,button.is-busy::after{animation:none!important}}
+
+/* Keep capability and tool dialogs within the viewport, including unbroken names. */
+dialog{max-width:calc(100vw - 28px);overflow:hidden}
+.dialog-head{gap:16px;min-width:0}
+.dialog-head h2{min-width:0;flex:1;overflow-wrap:anywhere;word-break:break-word}
+.dialog-head>button{flex:0 0 auto;white-space:nowrap}
+.dialog-body{min-width:0;max-width:100%;overflow-x:hidden;overscroll-behavior:contain}
+.dialog-body .stack{min-width:0;grid-template-columns:minmax(0,1fr)}
+.dialog-body .form-grid{min-width:0;grid-template-columns:repeat(2,minmax(0,1fr))}
+.dialog-body label,.dialog-body .actions,.dialog-body pre,.dialog-body .notice{min-width:0;max-width:100%;overflow-wrap:anywhere}
+.dialog-body .tabs{min-width:0;max-width:100%;overflow-x:auto;flex-wrap:wrap}
+.dialog-body .capability-tabs{flex-wrap:nowrap}
+.capability-cache-hint{grid-column:1/-1;margin:0}
+@media(max-width:720px){.dialog-head{padding:14px 18px;gap:12px}.dialog-body .form-grid{grid-template-columns:minmax(0,1fr)}.dialog-head h2{font-size:16px}}
