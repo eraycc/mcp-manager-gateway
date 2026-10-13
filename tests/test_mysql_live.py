@@ -9,13 +9,11 @@ from mcp_manager.config import Settings
 from mcp_manager.database import Database, User
 
 
-
-
 async def test_sqlite_database_round_trip_and_first_admin_race(tmp_path, db_settings, db_backend):
     target_mysql_url = db_settings.database_url
     source = Settings(data_dir=tmp_path / "source", secret_key="migration-test-key")
     app = create_app(source)
-    async with app.router.lifespan_context(app):
+    async with app.router.lifespan_context(app):  # noqa: SIM117 - client depends on app lifespan
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
             response = await client.post("/api/v1/auth/register", json={"username": "admin", "password": "password12345"})
             assert response.status_code == 200

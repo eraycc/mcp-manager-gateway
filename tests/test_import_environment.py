@@ -1,8 +1,8 @@
 import pytest
-from mcp_manager.transports import auth_headers
-from mcp_manager.runtime import GatewayError
+
 from mcp_manager.environment import connection_config, stdio_environment
-from mcp_manager.transports import SdkConnection
+from mcp_manager.runtime import GatewayError
+from mcp_manager.transports import SdkConnection, auth_headers
 
 
 def test_windows_stdio_receives_system_install_paths_without_unrelated_secrets(monkeypatch):

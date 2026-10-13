@@ -211,7 +211,7 @@ async def test_catalog_revalidates_inside_write_after_downstream_stop(web, monke
 
 
 async def test_job_cancel_uses_fresh_ownership(web):
-    app, c, actor, row = web
+    app, c, actor, _row = web
     app.state.jobs.limit = asyncio.Semaphore(0)
     queued = app.state.jobs.submit("other-user-job", [1], lambda item: None, user_id="other-user")
     entered, release = asyncio.Event(), asyncio.Event()

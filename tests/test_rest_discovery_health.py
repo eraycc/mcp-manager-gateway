@@ -39,6 +39,7 @@ async def test_explicit_rest_health_url_used_for_templated_business_routes():
 
 async def test_eager_rest_refresh_detects_server_that_stopped(tmp_path):
     from contextlib import asynccontextmanager
+
     from test_bug1_catalog import console
     online = True
     methods = []
@@ -51,7 +52,7 @@ async def test_eager_rest_refresh_detects_server_that_stopped(tmp_path):
     async def connect(spec):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             yield RestConnection(spec.config, client)
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, web, _actor):
         app.state.runtime.connector = connect
         response = await web.post("/api/v1/mcps", json={"name": "REST", "mode": "eager", "transport": "rest",
             "config": {"tools": [{"name": "create", "request": {"method": "POST", "url": "https://api.test/create"}}]}})

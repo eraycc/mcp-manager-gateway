@@ -25,8 +25,6 @@ from .credentials import catalog_owner, credential_owner
 from .database import ApiToken, McpServer, SystemSetting, User, invalidate_setting_cache, now
 from .db_types import strict_json_dumps
 from .diagnostics import SECRET_KEYS, safe_gateway_error
-from .diagnostics import diagnostic_cause as diagnostic_cause
-from .diagnostics import sanitize_diagnostic_error as sanitize_diagnostic_error
 from .identity import public as public_model
 from .identity import revalidate_user
 from .jsonl_store import JsonlStore
@@ -121,7 +119,7 @@ class Catalog:
         def legacy_cache(path, value):
             server_id, revision, owner = path.stem.rsplit("-", 2)
             if not isinstance(value, dict):
-                raise ValueError("Invalid legacy cache")
+                raise TypeError("Invalid legacy cache")
             return server_id + "-" + owner, {"revision": int(revision), "data": value}
         self.cache_store.migrate_json(legacy_cache)
 
@@ -514,7 +512,7 @@ class Catalog:
                 await self.refresh(row.id, user_id, authorize=authorize)
             else:
                 await self.warm(row.id, user_id, authorize=authorize, expected_revision=row.revision)
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - remote failure is persisted by refresh/warm
             # Saving valid configuration succeeds even when a remote service is
             # offline; the attempt and actionable status are recorded in its cache.
             pass
@@ -567,9 +565,10 @@ class Catalog:
 
     @staticmethod
     def validate_metadata(values, partial=False):
-        if not partial or "name" in values:
-            if not isinstance(values.get("name"), str) or not 1 <= len(values["name"].strip()) <= 128:
-                raise ValueError("Name must contain 1–128 characters")
+        if ((not partial or "name" in values)
+                and (not isinstance(values.get("name"), str)
+                     or not 1 <= len(values["name"].strip()) <= 128)):
+            raise ValueError("Name must contain 1–128 characters")
         if "tags" in values and (not isinstance(values["tags"], list)
                                 or any(not isinstance(tag, str) for tag in values["tags"])):
             raise ValueError("Tags must be an array of strings")
@@ -875,7 +874,7 @@ class Catalog:
             if await self.index_scope(await self.get(server_id), user_id) != scope:
                 raise GatewayError("credential_changed", "MCP scope changed while publishing capabilities")
             return result
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - normalize third-party transport errors
             raise safe_gateway_error(exc, config=spec.config if spec else self.unseal(row.config)) from None
         finally:
             if lease:
@@ -894,7 +893,7 @@ class Catalog:
             lease = self.runtime.create_lease(user_id or "system", "maintenance", kind="maintenance")
             result = await self.runtime.perform(spec, lease.id, "discover", authorize=authorize, business=False)
             return await self.store_discovery(row, result, user_id, spec=spec)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - normalize third-party transport errors
             exc = safe_gateway_error(exc, config=spec.config if spec else self.unseal(row.config))
             failure = await self.record_refresh_failure(row, exc, user_id, had_ready=had_ready)
             raise failure
@@ -924,7 +923,7 @@ class Catalog:
             if row:
                 exc = await self.record_refresh_failure(row, exc, user_id, had_ready=had_ready)
             await self.logs.audit("mcp.start.failed", user_id, {"server_id": server_id, "error": str(exc)})
-            raise exc
+            raise
         finally:
             if lease:
                 await self.runtime.release(lease.id, keep_alive=success and explicit)

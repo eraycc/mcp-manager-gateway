@@ -1,7 +1,9 @@
 import asyncio
 from contextlib import asynccontextmanager
+
 import pytest
-from mcp_manager.runtime import Runtime, ServerSpec, GatewayError
+
+from mcp_manager.runtime import GatewayError, Runtime, ServerSpec
 
 
 class Fake:

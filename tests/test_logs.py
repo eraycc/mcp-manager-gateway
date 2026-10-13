@@ -1,4 +1,5 @@
 import pytest
+
 from mcp_manager.logs import LogStore
 
 

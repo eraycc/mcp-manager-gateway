@@ -1,8 +1,14 @@
 """Windows/Linux command entry points."""
 import argparse
 import asyncio
+import base64
+import hashlib
+import json
 import os
 import sys
+from dataclasses import asdict, dataclass
+from datetime import date, datetime
+from decimal import Decimal
 
 import uvicorn
 from filelock import FileLock
@@ -10,14 +16,80 @@ from sqlalchemy import func, select
 
 from .about import VERSION
 from .config import Settings, default_home
-from .home_migration import initialize_home, migrate_home
 from .database import Base, Database, SystemSetting
+from .home_migration import initialize_home, migrate_home, reconcile_data
 
 
-async def migrate_database(config, target_url):
+@dataclass(frozen=True)
+class MigrationReport:
+    verified: bool
+    table_counts: dict[str, int]
+    table_hashes: dict[str, str]
+    batch_size: int
+    max_batch_rows: int
+    source_preserved: bool
+    recovery: str
+
+
+def _portable_value(value):
+    if isinstance(value, datetime):
+        return value.isoformat(timespec="microseconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if isinstance(value, bytes):
+        return {"base64": base64.b64encode(value).decode("ascii")}
+    if isinstance(value, dict):
+        return {str(key): _portable_value(item) for key, item in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_portable_value(item) for item in value]
+    return value
+
+
+def _update_table_hash(digest, table, rows):
+    names = [column.name for column in table.columns]
+    for row in rows:
+        value = {name: _portable_value(row.get(name)) for name in names}
+        digest.update(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
+        digest.update(b"\n")
+
+
+def _table_query(table):
+    primary = list(table.primary_key.columns)
+    return select(table).order_by(*primary)
+
+
+def _without_runtime_lock(table, rows):
+    if table.name != SystemSetting.__tablename__:
+        return rows
+    return [row for row in rows if row.get("key") != "_identity_lock"]
+
+
+async def _read_table_batches(connection, table, batch_size):
+    offset = 0
+    while True:
+        rows = [
+            dict(row)
+            for row in (
+                await connection.execute(_table_query(table).offset(offset).limit(batch_size))
+            ).mappings()
+        ]
+        if not rows:
+            return
+        offset += len(rows)
+        yield _without_runtime_lock(table, rows)
+
+
+async def migrate_database(config, target_url, *, batch_size=250):
+    if type(batch_size) is not int or not 1 <= batch_size <= 250:
+        raise ValueError("Migration batch_size must be between 1 and 250")
     target_config = Settings(data_dir=config.data_dir, database_url=target_url, secret_key=config.secret_key)
     if target_config.database_url == config.database_url:
         raise ValueError("Source and target databases must differ")
+    counts = {}
+    hashes = {}
+    max_batch_rows = 0
     with FileLock(str(config.data_dir / "runtime.lock"), timeout=0):
         source, target = Database(config), Database(target_config)
         try:
@@ -30,15 +102,44 @@ async def migrate_database(config, target_url):
                         query = query.where(table.c.key != "_identity_lock")
                     if await dst.scalar(query):
                         raise ValueError("Target database is not empty; migration refused")
+                source_hashes = {}
                 for table in Base.metadata.sorted_tables:
-                    rows = (await src.execute(select(table))).mappings().all()
-                    rows = [dict(r) for r in rows if not (table.name == "system_settings" and r["key"] == "_identity_lock")]
-                    if rows:
+                    digest = hashlib.sha256()
+                    count = 0
+                    async for rows in _read_table_batches(src, table, batch_size):
+                        if not rows:
+                            continue
+                        max_batch_rows = max(max_batch_rows, len(rows))
+                        _update_table_hash(digest, table, rows)
+                        count += len(rows)
                         await dst.execute(table.insert(), rows)
-            print("Database copied and verified. Preserve DATA_DIR/SECRET_KEY and set DATABASE_URL to the target.")
+                    counts[table.name] = count
+                    source_hashes[table.name] = digest.hexdigest()
+                for table in Base.metadata.sorted_tables:
+                    digest = hashlib.sha256()
+                    count = 0
+                    async for rows in _read_table_batches(dst, table, batch_size):
+                        if not rows:
+                            continue
+                        _update_table_hash(digest, table, rows)
+                        count += len(rows)
+                    if count != counts[table.name] or digest.hexdigest() != source_hashes[table.name]:
+                        raise RuntimeError(
+                            f"Verification failed for {table.name}; clear the target and retry while preserving source DATA_DIR"
+                        )
+                    hashes[table.name] = digest.hexdigest()
         finally:
             await source.close()
             await target.close()
+    return MigrationReport(
+        verified=True,
+        table_counts=counts,
+        table_hashes=hashes,
+        batch_size=batch_size,
+        max_batch_rows=max_batch_rows,
+        source_preserved=True,
+        recovery="Preserve source DATABASE_URL, DATA_DIR and SECRET_KEY until target acceptance succeeds.",
+    )
 
 
 def main():
@@ -60,6 +161,8 @@ def main():
     bridge.add_argument("--token", default=os.environ.get("MCP_MANAGER_TOKEN", ""))
     commands.add_parser("upgrade", help="Apply database schema migrations")
     commands.add_parser("rebuild-logs", help="Rebuild the separate JSONL query index")
+    reconcile = commands.add_parser("reconcile-data", help="Backfill metadata and import legacy cache/job indexes")
+    reconcile.add_argument("--batch-size", type=int, default=250)
     migrate = commands.add_parser("migrate-db", help="Copy configuration into an empty SQLite/MySQL database")
     migrate.add_argument("--target-database-url", required=True)
     home = commands.add_parser("migrate-home", help="Copy legacy data into an empty user directory")
@@ -68,11 +171,11 @@ def main():
     args = parser.parse_args()
     args.command = args.command or "serve"
     try:
+        import json
         if args.command == "stdio":
             asyncio.run(run_stdio(args))
             return
         if args.command == "migrate-home":
-            import json
             print(json.dumps(migrate_home(args.from_data, args.home or default_home(), args.from_env)))
             return
         if args.command == "serve":
@@ -86,7 +189,9 @@ def main():
                 config.port = args.port
             uvicorn.run(create_app(config), host=config.host, port=config.port, workers=1)
         elif args.command == "migrate-db":
-            asyncio.run(migrate_database(config, args.target_database_url))
+            print(json.dumps(asdict(asyncio.run(migrate_database(config, args.target_database_url))), ensure_ascii=False))
+        elif args.command == "reconcile-data":
+            print(json.dumps(asyncio.run(reconcile_data(config, batch_size=args.batch_size)), ensure_ascii=False))
         elif args.command == "upgrade":
             asyncio.run(upgrade(config))
         elif args.command == "rebuild-logs":

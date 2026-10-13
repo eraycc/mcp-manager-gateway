@@ -1,7 +1,8 @@
+from test_bug1_catalog import console
+
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
 from mcp_manager.database import McpServer, User, set_setting
-from test_bug1_catalog import console
 
 
 async def test_schedule_expands_personal_oauth_only_for_authorized_owners(tmp_path):
@@ -27,7 +28,7 @@ async def test_schedule_expands_personal_oauth_only_for_authorized_owners(tmp_pa
 
 
 async def test_startup_failure_threshold_setting_updates_live_catalog(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, web, _actor):
         settings = (await web.get("/api/v1/settings")).json()
         assert settings["startup_failure_threshold"] == 3
         updated = await web.patch(

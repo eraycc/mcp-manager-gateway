@@ -3,9 +3,9 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
+from test_bug1_catalog import Connection, console
 
 from mcp_manager.runtime import GatewayError
-from test_bug1_catalog import Connection, console
 
 
 class Upstream:
@@ -35,7 +35,7 @@ class Upstream:
 
 @pytest.mark.parametrize("failure", ["startup", "discovery"])
 async def test_failed_create_preserves_mode_and_records_first_failure(tmp_path, failure):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, web, _actor):
         peer = Upstream()
         if failure == "startup":
             peer.failure = FileNotFoundError("missing executable")
@@ -61,7 +61,7 @@ async def test_failure_is_persisted_across_restart(tmp_path):
     from mcp_manager.app import create_app
     from mcp_manager.config import Settings
 
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, _actor):
         peer = Upstream()
         peer.failure = OSError("offline")
         app.state.runtime.connector = peer.connect
@@ -81,7 +81,7 @@ async def test_failure_is_persisted_across_restart(tmp_path):
 
 
 async def test_late_failure_cannot_change_new_revision_state(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, _actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
         row = await app.state.catalog.create(
@@ -117,7 +117,7 @@ async def test_late_failure_cannot_change_new_revision_state(tmp_path):
 
 
 async def test_nested_transport_failure_preserves_specific_reason(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, _actor):
         peer = Upstream()
         peer.failure = ExceptionGroup(
             "transport tasks failed",

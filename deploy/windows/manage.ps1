@@ -8,6 +8,7 @@ $ErrorActionPreference = 'Stop'
 $scriptDir = $PSScriptRoot
 $daemon    = Join-Path $scriptDir 'mmg-daemon.ps1'
 $envFile   = Join-Path $scriptDir '.env'
+$stateFile = Join-Path $scriptDir '.mmg-instance.json'
 $userHome  = $env:USERPROFILE
 $runKey    = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $entryName = 'mmg-gateway'
@@ -64,11 +65,19 @@ function Get-EnvConfig {
 
 function Get-ConfigPort { (Get-EnvConfig)['PORT'] }
 
+function Protect-ConfigLine([string]$line) {
+  $trimmed = $line.Trim()
+  if ($trimmed -match '^(DATABASE_URL|SECRET_KEY|.*PASSWORD.*|.*TOKEN.*|.*API_KEY.*)=') {
+    return ($trimmed.Split('=')[0] + '=[REDACTED]')
+  }
+  return $line
+}
+
 function Show-Config {
   Write-Host ''
-  Write-Host "--- 当前 .env 内容（$envFile）---"
+  Write-Host "--- 当前 .env 内容（敏感值已隐藏，$envFile）---"
   if (Test-Path $envFile) {
-    Get-Content -LiteralPath $envFile | ForEach-Object { Write-Host '  ' $_ }
+    Get-Content -LiteralPath $envFile | ForEach-Object { Write-Host '  ' (Protect-ConfigLine $_) }
   } else {
     Write-Host '  （尚无 .env；将使用默认值）'
   }
@@ -116,24 +125,46 @@ function Get-ServiceCmd {
   "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$daemon`""
 }
 
+function Test-SameStart([System.Diagnostics.Process]$process, [string]$saved) {
+  try {
+    $expected = [DateTimeOffset]::Parse($saved).UtcDateTime
+    return [Math]::Abs(($process.StartTime.ToUniversalTime() - $expected).TotalSeconds) -lt 2
+  } catch { return $false }
+}
+
+function Get-OwnedInstance {
+  if (-not (Test-Path -LiteralPath $stateFile)) { return $null }
+  try {
+    $state = Get-Content -LiteralPath $stateFile -Raw | ConvertFrom-Json
+    if ([IO.Path]::GetFullPath([string]$state.script_path) -ne [IO.Path]::GetFullPath($daemon)) { return $null }
+    $daemonProcess = Get-Process -Id ([int]$state.daemon_pid) -ErrorAction SilentlyContinue
+    $daemonCim = Get-CimInstance Win32_Process -Filter "ProcessId=$($state.daemon_pid)" -ErrorAction SilentlyContinue
+    if (-not $daemonProcess -or -not $daemonCim -or
+        -not (Test-SameStart $daemonProcess ([string]$state.daemon_started_at)) -or
+        $daemonCim.CommandLine -notlike "*$daemon*") { return $null }
+    $child = Get-Process -Id ([int]$state.child_pid) -ErrorAction SilentlyContinue
+    if ($child) {
+      $pathMatches = $child.Path -and (
+        [IO.Path]::GetFullPath($child.Path) -eq [IO.Path]::GetFullPath([string]$state.executable)
+      )
+      if (-not $pathMatches -or -not (Test-SameStart $child ([string]$state.child_started_at))) {
+        $child = $null
+      }
+    }
+    return [PSCustomObject]@{ State = $state; Daemon = $daemonProcess; Child = $child }
+  } catch { return $null }
+}
+
 function Get-RealDaemons {
-  # 返回真实守护进程（powershell.exe 跑 mmg-daemon.ps1），排除 pwsh/node 自身
-  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.Name -eq 'powershell.exe' -and
-    $_.CommandLine -like '*mmg-daemon.ps1*' -and
-    $_.CommandLine -notlike '*node.exe*' -and
-    $_.CommandLine -notlike '*runner.js*'
-  }
+  $owned = Get-OwnedInstance
+  if ($owned) { return @($owned.Daemon) }
+  return @()
 }
 
 function Install-Service {
-  if (Get-Process -Name mmg -ErrorAction SilentlyContinue) {
-    Write-Host '检测到 mmg 残留进程，先自动清理...'
+  if (Get-OwnedInstance) {
+    Write-Host '检测到本脚本管理的实例，先停止该实例...'
     Stop-Service
-  }
-  if (Get-Process -Name mmg -ErrorAction SilentlyContinue) {
-    Write-Host 'mmg 仍在运行且无法自动停止；请在任务管理器手动结束 mmg.exe 后重试。'
-    return
   }
   $cmd = Get-ServiceCmd
   Set-ItemProperty -Path $runKey -Name $entryName -Value $cmd
@@ -146,13 +177,13 @@ function Install-Service {
 function Uninstall-Service {
   Stop-Service
   Remove-ItemProperty -Path $runKey -Name $entryName -ErrorAction SilentlyContinue
-  Write-Host "服务已卸载（删除 $entryName 并停止 mmg）。"
+  Write-Host "服务已卸载（删除 $entryName 并仅停止本脚本拥有的实例）。"
   [void](Read-Host '按回车继续...')
 }
 
 function Start-Service {
-  if (Get-Process -Name mmg -ErrorAction SilentlyContinue) {
-    Write-Host 'mmg 已在运行。'
+  if (Get-OwnedInstance) {
+    Write-Host '本脚本管理的 mmg 实例已在运行。'
     return
   }
   Start-Process powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$daemon" -WindowStyle Hidden
@@ -162,23 +193,32 @@ function Start-Service {
 }
 
 function Stop-Service {
-  # 1) 先杀守护（排除 pwsh/node 自身的误匹配），防止 mmg 被 while 循环重启
-  $dcount = 0
-  foreach ($d in (Get-RealDaemons)) {
-    Stop-Process -Id $d.ProcessId -Force -ErrorAction SilentlyContinue; $dcount++
+  $owned = Get-OwnedInstance
+  if (-not $owned) {
+    Write-Host '没有可验证的本脚本实例；未停止任何其他 mmg 进程。'
+    [void](Read-Host '按回车继续...')
+    return
   }
-  # 2) 多轮杀 mmg（uv trampoline 可能派生子 Python 进程，需打断 while 循环）
-  for ($i = 0; $i -lt 3; $i++) {
-    Stop-Process -Name mmg -Force -ErrorAction SilentlyContinue
-    Start-Sleep 1
-    if (-not (Get-Process -Name mmg -ErrorAction SilentlyContinue)) { break }
+  $daemonId = $owned.Daemon.Id
+  $childId = if ($owned.Child) { $owned.Child.Id } else { $null }
+  Stop-Process -Id $daemonId -ErrorAction SilentlyContinue
+  if ($childId) { Stop-Process -Id $childId -ErrorAction SilentlyContinue }
+  if ($childId) { Wait-Process -Id $childId -Timeout 10 -ErrorAction SilentlyContinue }
+  Wait-Process -Id $daemonId -Timeout 5 -ErrorAction SilentlyContinue
+  $remainingDaemon = Get-Process -Id $daemonId -ErrorAction SilentlyContinue
+  if ($remainingDaemon -and (Test-SameStart $remainingDaemon ([string]$owned.State.daemon_started_at))) {
+    Stop-Process -Id $daemonId -Force -ErrorAction SilentlyContinue
   }
-  $remaining = Get-Process -Name mmg -ErrorAction SilentlyContinue
-  if ($remaining) {
-    Write-Host "已停止守护（$dcount 个），但 mmg 仍有 $($remaining.Count) 个进程无法结束（可能权限不足）。请在任务管理器手动结束 mmg.exe。"
-  } else {
-    Write-Host "已停止（守护 $dcount 个 + mmg）。"
+  if ($childId) {
+    $remainingChild = Get-Process -Id $childId -ErrorAction SilentlyContinue
+    $sameChild = $remainingChild -and
+      (Test-SameStart $remainingChild ([string]$owned.State.child_started_at)) -and
+      $remainingChild.Path -and
+      ([IO.Path]::GetFullPath($remainingChild.Path) -eq [IO.Path]::GetFullPath([string]$owned.State.executable))
+    if ($sameChild) { Stop-Process -Id $childId -Force -ErrorAction SilentlyContinue }
   }
+  Remove-Item -LiteralPath $stateFile -Force -ErrorAction SilentlyContinue
+  Write-Host '已停止并清理本脚本拥有的实例；未按进程名处理其他实例。'
   [void](Read-Host '按回车继续...')
 }
 
@@ -191,13 +231,13 @@ function Restart-Service {
 
 function Service-Status {
   $port = Get-ConfigPort
+  $owned = Get-OwnedInstance
   Write-Host ''
   Write-Host "--- 服务状态（端口 $port）---"
-  $p = Get-Process -Name mmg -ErrorAction SilentlyContinue
-  if ($p) { Write-Host "  mmg: 运行中 (PID $(($p | ForEach-Object { $_.Id }) -join ', '))" }
-  else    { Write-Host '  mmg: 未运行' }
-  $d = Get-RealDaemons
-  if ($d) { Write-Host "  守护: 运行中 (PID $(($d.ProcessId) -join ', '))" } else { Write-Host '  守护: 未运行' }
+  if ($owned -and $owned.Child) { Write-Host "  mmg: 运行中 (PID $($owned.Child.Id))" }
+  else { Write-Host '  mmg: 未运行或实例记录无法验证' }
+  if ($owned) { Write-Host "  守护: 运行中 (PID $($owned.Daemon.Id))" }
+  else { Write-Host '  守护: 未运行' }
   $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
   if ($c) { Write-Host "  端口 $port : 监听中" } else { Write-Host "  端口 $port : 未监听" }
   $prop = Get-ItemProperty -Path $runKey -ErrorAction SilentlyContinue
@@ -239,10 +279,10 @@ function Service-Menu {
 
 function Direct-Status {
   $port = Get-ConfigPort
+  $owned = Get-OwnedInstance
   Write-Host ''
   Write-Host "--- 直接启动状态（端口 $port）---"
-  $p = Get-Process -Name mmg -ErrorAction SilentlyContinue
-  if ($p) { Write-Host "  mmg: 运行中 (PID $(($p | ForEach-Object { $_.Id }) -join ', '))" } else { Write-Host '  mmg: 未运行' }
+  if ($owned -and $owned.Child) { Write-Host "  mmg: 运行中 (PID $($owned.Child.Id))" } else { Write-Host '  mmg: 未运行或实例记录无法验证' }
   $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
   if ($c) { Write-Host "  端口 $port : 监听中" } else { Write-Host "  端口 $port : 未监听" }
   Write-Host ''
@@ -263,7 +303,7 @@ function Direct-Menu {
     $in = Read-Host '请选择'; if ($null -eq $in) { $loop = $false; break }; $c = $in.Trim()
     switch ($c) {
       '1' {
-        if (Get-Process -Name mmg -ErrorAction SilentlyContinue) { Write-Host 'mmg 已在运行。' }
+        if (Get-OwnedInstance) { Write-Host '本脚本管理的 mmg 实例已在运行。' }
         else {
           Start-Process powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$daemon" -WindowStyle Hidden
           Start-Sleep 2
@@ -337,9 +377,8 @@ function Update-Tool {
   Write-Host ''
   Write-Host '--- 一键更新 ---'
   # 1) 自动判断并清理守护/直接启动
-  $running = Get-Process -Name mmg -ErrorAction SilentlyContinue
-  $daemons = Get-RealDaemons
-  if ($running -or $daemons) {
+  $owned = Get-OwnedInstance
+  if ($owned) {
     Write-Host '  检测到 mmg/守护正在运行，先自动停止...'
     Stop-Service
     Start-Sleep 1
@@ -369,9 +408,8 @@ function Uninstall-Tool {
   Write-Host '  将卸载 mcp-manager-gateway（含 mmg / mcp-manager 命令），确认？(y/N) ' -NoNewline
   $yn = Read-Host; if (-not $yn -or -not $yn.Trim().StartsWith('y')) { Write-Host '  已取消。'; return }
   # 1) 自动判断并清理守护/直接启动
-  $running = Get-Process -Name mmg -ErrorAction SilentlyContinue
-  $daemons = Get-RealDaemons
-  if ($running -or $daemons) {
+  $owned = Get-OwnedInstance
+  if ($owned) {
     Write-Host '  检测到 mmg/守护正在运行，先自动停止...'
     Stop-Service
     Start-Sleep 1

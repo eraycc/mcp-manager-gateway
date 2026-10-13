@@ -2,12 +2,13 @@
 import os
 
 from playwright.async_api import async_playwright, expect
+from test_browser_profile_settings import login
 
-from test_browser_profile_settings import login, running_gateway  # noqa: F401
+pytest_plugins = ("test_browser_profile_settings",)
 
 
 async def test_embedding_settings_persist_masked_key_and_show_probe_result(running_gateway):
-    app, web, url, _, _ = running_gateway
+    _app, web, url, _, _ = running_gateway
     async with async_playwright() as pw:
         executable = "C:/Program Files/Google/Chrome/Application/chrome.exe"
         browser = await pw.chromium.launch(headless=True, executable_path=executable if os.path.exists(executable) else None)
@@ -42,7 +43,7 @@ async def test_embedding_settings_persist_masked_key_and_show_probe_result(runni
 
 
 async def test_admin_token_views_copy_and_editor_reveal(running_gateway):
-    app, web, url, _, _ = running_gateway
+    _app, web, url, _, _ = running_gateway
     other = (await web.post("/api/v1/users", json={"username": "otheruser", "password": "password12345"})).json()
     own = (await web.post("/api/v1/tokens", json={"name": "my-test-token"})).json()
     await web.post("/api/v1/tokens", json={"name": "other-test-token", "user_id": other["id"]})

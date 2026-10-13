@@ -5,15 +5,15 @@ import httpx2
 import pytest
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
+from test_gateway import running_gateway  # noqa: F401
 
 from mcp_manager import bridge
 from mcp_manager.bridge import BridgeUpstream
-from test_gateway import running_gateway  # noqa: F401
 
 
 async def test_idle_session_reap_uses_config_and_closes_sdk_session(running_gateway):  # noqa: F811
-    app, web, url, token, _ = running_gateway
-    async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + token}, trust_env=False) as http:
+    app, _web, url, token, _ = running_gateway
+    async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + token}, trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
         async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None, mode="legacy") as client:
             await client.list_tools()
             sid = next(iter(app.state.gateway.sessions))
@@ -28,14 +28,14 @@ async def test_idle_session_reap_uses_config_and_closes_sdk_session(running_gate
 
 
 async def test_bridge_expired_lease_recovers_next_call_and_cleans_old_session(running_gateway, monkeypatch):  # noqa: F811
-    app, web, url, token, _ = running_gateway
+    app, _web, url, token, _ = running_gateway
     monkeypatch.setattr(bridge, "Client", lambda *args, **kwargs: Client(*args, **kwargs, mode="legacy"))
     async with BridgeUpstream(url, token) as upstream:
         assert (await upstream.request("call_tool", "echo__echo", {"value": "first"})).content[0].text == "first"
         old = next(l for l in app.state.runtime.leases.values() if l.kind == "bridge")
         old.touched -= 100
         # The first uncertain request is returned as an error, never replayed.
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017 - SDK transport exception type is not stable
             await upstream.request("list_tools", cache_mode="bypass")
         assert (await upstream.request("call_tool", "echo__echo", {"value": "second"})).content[0].text == "second"
         assert old.id not in app.state.runtime.leases
@@ -51,7 +51,7 @@ async def test_expired_token_prunes_session_after_lease_was_reaped(running_gatew
 
     app, web, url, token, _ = running_gateway
     token_id = (await web.get("/api/v1/tokens")).json()["items"][0]["id"]
-    async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + token}, trust_env=False) as http:
+    async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + token}, trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
         async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None, mode="legacy") as client:
             await client.list_tools()
             sid = next(iter(app.state.gateway.sessions))

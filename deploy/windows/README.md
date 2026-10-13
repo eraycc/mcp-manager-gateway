@@ -66,7 +66,9 @@ PUBLIC_URL=http://127.0.0.1:8765
 | `DATABASE_URL` | （无） | 数据库连接串，默认 SQLite |
 | `COOKIE_SECURE` | （无） | cookie 是否强制 HTTPS |
 
-守护脚本启动时读取 `.env`，把非注释的键映射成 `MCP_MANAGER_*` 环境变量（HOST/PORT 走 `--host/--port`，其余走 env），所以**改 `.env` 后重启服务/程序才生效**。
+守护脚本启动时读取 `.env`，把非注释的键映射成 MMG 标准环境变量 `HOST`、`PORT`、`PUBLIC_URL`、`DATA_DIR`、`DATABASE_URL` 和 `COOKIE_SECURE`，所以**改 `.env` 后重启服务/程序才生效**。管理器显示配置时会把数据库连接串、密码、Token、API Key 和密钥替换为 `[REDACTED]`。
+
+每次启动会原子写入脚本目录下的 `.mmg-instance.json`，记录守护/子进程 PID、启动时间、可执行文件、脚本路径、home 和端口。停止、重启、升级和卸载只处理这些字段全部复核通过的实例；同机其他 MMG 进程不会按名称被批量结束。无法验证记录时，管理器会保持 fail closed 并提示人工检查。
 
 ## 2. 服务管理（常驻）
 

@@ -2,14 +2,14 @@ import json
 from types import SimpleNamespace
 
 import pytest
-
-from mcp_manager.runtime import GatewayError
 from test_bug1_catalog import console
 from test_discovery_failure_policy import Upstream
 
+from mcp_manager.runtime import GatewayError
+
 
 async def test_start_failures_keep_policy_until_threshold_then_mark_failed(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
         row = await app.state.catalog.create(
@@ -41,7 +41,7 @@ async def test_start_failures_keep_policy_until_threshold_then_mark_failed(tmp_p
 
 
 async def test_successful_start_clears_failure_count_without_implicit_discovery(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
         row = await app.state.catalog.create(
@@ -74,7 +74,7 @@ async def test_successful_start_clears_failure_count_without_implicit_discovery(
 
 
 async def test_refresh_discovery_failure_preserves_ready_cache_and_status(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
         row = await app.state.catalog.create(
@@ -94,7 +94,7 @@ async def test_refresh_discovery_failure_preserves_ready_cache_and_status(tmp_pa
 
 
 async def test_first_discovery_failure_without_ready_cache_counts_as_start_failure(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, actor):
         peer = Upstream()
         peer.discovery_failure = RuntimeError("first tools/list failed")
         app.state.runtime.connector = peer.connect
@@ -114,7 +114,7 @@ async def test_first_discovery_failure_without_ready_cache_counts_as_start_failu
 
 
 async def test_ready_empty_cache_is_preserved_on_refresh_failure(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
         row = await app.state.catalog.create(
@@ -208,7 +208,7 @@ async def test_status_filter_and_failed_agent_summary(tmp_path):
 
 
 async def test_personal_start_failure_counter_is_user_scoped(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, actor):
         row = await app.state.catalog.create(
             {
                 "name": "personal",

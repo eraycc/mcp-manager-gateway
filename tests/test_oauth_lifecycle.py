@@ -13,7 +13,7 @@ from mcp_manager.runtime import GatewayError
 
 async def test_personal_oauth_pkce_refresh_and_disconnect_race(tmp_path, monkeypatch):
     app = create_app(Settings(data_dir=tmp_path, secret_key="oauth-test-key"))
-    async with app.router.lifespan_context(app):
+    async with app.router.lifespan_context(app):  # noqa: SIM117 - client depends on app lifespan
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as web:
             await web.post("/api/v1/auth/register", json={"username": "admin", "password": "password12345"})
             user = (await web.post("/api/v1/auth/login", json={"username": "admin", "password": "password12345"})).json()

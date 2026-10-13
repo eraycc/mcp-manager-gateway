@@ -3,13 +3,12 @@ from pathlib import Path
 
 import pytest
 from playwright.async_api import async_playwright, expect
-
-from test_gateway import running_gateway  # noqa: F401, F811
+from test_gateway import running_gateway  # noqa: F401
 
 
 @pytest.mark.asyncio
 async def test_console_seven_routes_and_zero_jwt(running_gateway, tmp_path):  # noqa: F811
-    app, web, url, token, row = running_gateway
+    _app, web, url, _token, _row = running_gateway
     async with async_playwright() as pw:
         executable = "C:/Program Files/Google/Chrome/Application/chrome.exe"
         browser = await pw.chromium.launch(headless=True, executable_path=executable if os.path.exists(executable) else None)

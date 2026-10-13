@@ -1,0 +1,95 @@
+name: Test
+
+on:
+  workflow_call:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - run: uv sync --frozen --group dev
+      - run: uv run --no-sync ruff check src tests
+      - run: node --test tests/frontend/core.test.mjs tests/frontend/translation.test.mjs
+
+  database-matrix:
+    runs-on: ubuntu-latest
+    services:
+      mysql80:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: mmg
+          MYSQL_USER: mmg
+          MYSQL_PASSWORD: mmg-test-password
+          MYSQL_ROOT_PASSWORD: mmg-test-root
+        ports:
+          - 33080:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pmmg-test-root --silent"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+      mysql84:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: mmg
+          MYSQL_USER: mmg
+          MYSQL_PASSWORD: mmg-test-password
+          MYSQL_ROOT_PASSWORD: mmg-test-root
+        ports:
+          - 33084:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pmmg-test-root --silent"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      MCP_TEST_MYSQL80_URL: mysql+asyncmy://mmg:mmg-test-password@127.0.0.1:33080/mmg
+      MCP_TEST_MYSQL84_URL: mysql+asyncmy://mmg:mmg-test-password@127.0.0.1:33084/mmg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - run: uv sync --frozen --group dev
+      - name: Required SQLite and MySQL matrix
+        run: >-
+          uv run --no-sync pytest -q
+          --ignore-glob=tests/test_browser*.py
+          --ignore=tests/performance
+          --db-backend=sqlite
+          --db-backend=mysql80
+          --db-backend=mysql84
+          --require-mysql
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - run: uv sync --frozen --group dev
+      - run: uv run --no-sync playwright install --with-deps chromium
+      - run: uv run --no-sync pytest -q tests/test_browser*.py
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.12
+      - run: uv sync --frozen --group dev
+      - run: uv build
+      - run: uv run --no-sync pytest tests/test_packaged_assets.py -q
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: production
+          push: false

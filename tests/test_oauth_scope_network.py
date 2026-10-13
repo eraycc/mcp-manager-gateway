@@ -46,7 +46,7 @@ async def test_oauth_scope_refresh_and_call_over_http(tmp_path):
                     await task
                 await asyncio.sleep(.01)
         app = create_app(Settings(data_dir=tmp_path, secret_key="network-scope"))
-        async with app.router.lifespan_context(app):
+        async with app.router.lifespan_context(app):  # noqa: SIM117 - client depends on app lifespan
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as web:
                 await web.post("/api/v1/auth/register", json={"username": "admin", "password": "password12345"})
                 user = (await web.post("/api/v1/auth/login",

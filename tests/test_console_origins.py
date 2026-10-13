@@ -12,7 +12,7 @@ async def test_console_register_login_and_write_on_deployment_origin(tmp_path, u
     app = create_app(Settings(data_dir=tmp_path, secret_key="origin-test",
                               public_url="http://127.0.0.1:8765"))
     del app.state.protocol
-    async with app.router.lifespan_context(app):
+    async with app.router.lifespan_context(app):  # noqa: SIM117 - web client depends on app lifespan
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=url,
                                      headers={"Origin": url}) as web:
             credentials = {"username": "admin", "password": "password12345"}

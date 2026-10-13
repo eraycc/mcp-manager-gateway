@@ -2,11 +2,11 @@ import time
 
 import httpx
 import pytest
+from test_identity import login, signup
 
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
 from mcp_manager.database import set_setting
-from test_identity import signup, login
 
 
 @pytest.fixture

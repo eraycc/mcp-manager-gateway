@@ -1,10 +1,10 @@
 import asyncio
 
 import pytest
+from test_runtime import Fake, spec
 
 from mcp_manager.logs import LogStore
 from mcp_manager.runtime import GatewayError, Runtime
-from test_runtime import Fake, spec
 
 
 async def test_stop_rejects_queued_dispatch():

@@ -98,3 +98,101 @@ def migrate_home(source, destination, source_env=None):
             if staging.exists() and staging.parent == destination.parent and staging.name.startswith(
                     "." + destination.name + "-migration-"):
                 shutil.rmtree(staging)
+
+
+async def reconcile_data(config, *, batch_size=250):
+    """Idempotently backfill searchable metadata and import legacy local indexes."""
+    if type(batch_size) is not int or not 1 <= batch_size <= 250:
+        raise ValueError("Reconciliation batch_size must be between 1 and 250")
+    from sqlalchemy import select
+
+    from .database import Database, McpProposal, now
+    from .job_models import JobRecord
+    from .jsonl_store import JsonlStore
+    from .logs import redact
+
+    # Keep local snapshot conversion outside database transactions. JsonlStore
+    # appends durably before removing each successfully converted source file.
+    cache_dir = Path(config.data_dir) / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_sources = set(cache_dir.glob("*.json"))
+    catalog_store = JsonlStore(cache_dir / "catalog.jsonl", fail_closed=True)
+
+    def catalog_value(path, value):
+        server_id, revision, owner = path.stem.rsplit("-", 2)
+        if not isinstance(value, dict):
+            raise TypeError("Invalid legacy cache")
+        return server_id + "-" + owner, {"revision": int(revision), "data": value}
+
+    catalog_store.migrate_json(catalog_value)
+    catalog_imported = len(cache_sources - set(cache_dir.glob("*.json")))
+
+    jobs_dir = Path(config.data_dir) / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    legacy_jobs = JsonlStore(jobs_dir / "jobs.jsonl", fail_closed=True)
+
+    def job_value(path, value):
+        if not isinstance(value, dict):
+            raise TypeError("Invalid legacy job")
+        safe = redact(value)
+        identity = str(safe.get("id") or path.stem)[:36]
+        safe["id"] = identity
+        if safe.get("status") in {"queued", "running"}:
+            safe["status"] = "interrupted"
+        return identity, safe
+
+    legacy_jobs.migrate_json(job_value)
+    db = Database(config)
+    proposal_count = 0
+    job_count = 0
+    valid_statuses = {"completed", "completed_with_errors", "cancelled", "interrupted", "failed"}
+    try:
+        await db.initialize()
+        while True:
+            async with db.locked() as session:
+                rows = list((await session.scalars(
+                    select(McpProposal).where(McpProposal.public_name.is_(None)).limit(batch_size)
+                )).all())
+                if not rows:
+                    break
+                for row in rows:
+                    name = row.payload.get("name") if isinstance(row.payload, dict) else None
+                    row.public_name = str(name).strip()[:128] if name else "(unnamed proposal)"
+                proposal_count += len(rows)
+        values = list(legacy_jobs.items.values())
+        for offset in range(0, len(values), batch_size):
+            async with db.locked() as session:
+                for value in values[offset:offset + batch_size]:
+                    identity = str(value.get("id", ""))[:36]
+                    if not identity or await session.get(JobRecord, identity) is not None:
+                        continue
+                    status = value.get("status")
+                    status = status if status in valid_statuses else "interrupted"
+                    total = max(0, int(value.get("total", 0) or 0))
+                    completed = max(0, min(total, int(value.get("completed", 0) or 0)))
+                    session.add(JobRecord(
+                        id=identity,
+                        user_id=None,
+                        action=str(value.get("action") or "legacy.import")[:128],
+                        status=status,
+                        total=total,
+                        completed=completed,
+                        succeeded=max(0, min(completed, int(value.get("succeeded", 0) or 0))),
+                        failed=max(0, min(completed, int(value.get("failed", 0) or 0))),
+                        cancelled=max(0, min(completed, int(value.get("cancelled", 0) or 0))),
+                        version=1,
+                        error=(
+                            "Runtime restarted; legacy operations were not replayed"
+                            if status == "interrupted" else "Imported legacy job status"
+                        ),
+                        created_at=now(),
+                        updated_at=now(),
+                    ))
+                    job_count += 1
+    finally:
+        await db.close()
+    return {
+        "proposals": proposal_count,
+        "catalog_snapshots": catalog_imported,
+        "jobs": job_count,
+    }

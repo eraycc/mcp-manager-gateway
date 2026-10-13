@@ -1,7 +1,9 @@
 import httpx
 import pytest
+
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
+
 
 @pytest.mark.asyncio
 async def test_mcp_crud_rest_cache_and_user_grants(tmp_path):

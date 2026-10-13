@@ -24,9 +24,7 @@ def alive(pid):
     try:
         os.kill(pid, 0)
         stat = Path("/proc") / str(pid) / "stat"
-        if stat.exists() and stat.read_text().split(") ", 1)[1].startswith("Z "):
-            return False
-        return True
+        return not (stat.exists() and stat.read_text().split(") ", 1)[1].startswith("Z "))
     except ProcessLookupError:
         return False
 

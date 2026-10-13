@@ -3,7 +3,6 @@ import asyncio
 
 import pytest
 from playwright.async_api import async_playwright, expect
-
 from test_gateway import running_gateway  # noqa: F401
 
 

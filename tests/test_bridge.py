@@ -3,12 +3,11 @@ import sys
 
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
-
-from test_gateway import running_gateway  # noqa: F401, F811
+from test_gateway import running_gateway  # noqa: F401
 
 
 async def test_stdio_bridge_releases_lease_and_shared_process(running_gateway):  # noqa: F811
-    app, web, url, token, row = running_gateway
+    app, _web, url, token, _row = running_gateway
     source = StdioServerParameters(command=sys.executable,
         args=["-m", "mcp_manager.cli", "stdio", "--url", url],
         env={"MCP_MANAGER_TOKEN": token})

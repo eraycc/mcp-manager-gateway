@@ -266,7 +266,7 @@ docker compose up --build -d
 
 默认仅绑定 `127.0.0.1:8765`，数据保存到命名卷 `mcp-manager-data`。远程或生产环境建议使用 HTTPS 反向代理，并设置正确的 `PUBLIC_URL` 与 `COOKIE_SECURE=true`。
 
-MMG 当前按单节点、单网关运行时设计。不要用多个 worker 或多个副本共享同一套下游进程调度。
+MMG 当前按单节点、单网关运行时设计。不要用多个 worker 或多个副本共享同一套下游进程调度。SQLite、MySQL 8.4 Compose、数据库互转与完整备份说明见 [SQLite 与 MySQL 部署](wiki/database-deployment.md)。
 
 ## 升级与维护
 
@@ -311,6 +311,7 @@ uv build
 - 运行时设计：[运行时与生命周期](wiki/concepts/runtime-and-lifecycle.md)
 - 开发与验证：[参与开发](wiki/development/contributing.md)
 - CLI 参考：[命令行参考](wiki/reference/cli.md)
+- 数据库部署：[SQLite 与 MySQL 部署、迁移和备份](wiki/database-deployment.md)
 
 完整公开文档见 [Wiki 首页](wiki/README.md)。运行实例的 OpenAPI 页面位于 `http://<MMG_HOST>:<PORT>/docs`。
 

@@ -2,10 +2,11 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from mcp_manager.jsonl_store import JsonlStore
-from mcp_manager.jobs import Jobs
 from test_bug1_catalog import console
 from test_discovery_failure_policy import Upstream
+
+from mcp_manager.jobs import Jobs
+from mcp_manager.jsonl_store import JsonlStore
 
 
 def test_compaction_and_restart_preserve_latest_values_in_one_file(tmp_path):
@@ -50,7 +51,7 @@ def test_compaction_lock_keeps_durable_append_and_cleans_staging(tmp_path, monke
 
 
 async def test_legacy_caches_consolidate_latest_revision_and_remove_json(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, _actor):
         app.state.runtime.connector = Upstream().connect
         row = await app.state.catalog.create({"name": "service", "config": {"command": "fake"}})
         server_id, revision = row.id, row.revision
@@ -61,7 +62,7 @@ async def test_legacy_caches_consolidate_latest_revision_and_remove_json(tmp_pat
     for version, name in [(revision, "current"), (0, "obsolete")]:
         (cache / f"{server_id}-{version}-{owner}.json").write_text(json.dumps({
             "tools": [{"name": name}], "cache_status": "ready"}), encoding="utf-8")
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, _actor):
         current = await app.state.catalog.get(server_id)
         assert app.state.catalog.cached(current)["tools"] == [{"name": "current"}]
         assert list(cache.glob("*.json")) == []
@@ -92,9 +93,10 @@ def test_unreadable_legacy_snapshot_is_preserved(tmp_path):
 
 async def test_missing_lazy_cache_is_rebuilt_on_restart_without_keeping_process(tmp_path, monkeypatch):
     import asyncio
+
     from mcp_manager.app import create_app
     from mcp_manager.config import Settings
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, _actor):
         app.state.runtime.connector = Upstream().connect
         row = await app.state.catalog.create({"name": "service", "config": {"command": "fake"}})
     (tmp_path / "cache/catalog.jsonl").unlink()

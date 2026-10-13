@@ -2,11 +2,11 @@
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from test_bug1_catalog import console
+from test_discovery_failure_policy import Upstream
 
 from mcp_manager.jsonl_store import JsonlStore
 from mcp_manager.runtime import GatewayError
-from test_bug1_catalog import console
-from test_discovery_failure_policy import Upstream
 
 
 def deny_cache_replace(monkeypatch, *, transient=False):
@@ -27,7 +27,7 @@ def deny_cache_replace(monkeypatch, *, transient=False):
 
 
 async def test_transient_windows_cache_lock_retries_without_failing(tmp_path, monkeypatch):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, web, _actor):
         app.state.runtime.connector = Upstream().connect
         attempts = deny_cache_replace(monkeypatch, transient=True)
         response = await web.post(
@@ -43,7 +43,7 @@ async def test_transient_windows_cache_lock_retries_without_failing(tmp_path, mo
 
 
 async def test_permanent_cache_failure_preserves_mode_and_reason(tmp_path, monkeypatch):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, _actor):
         app.state.runtime.connector = Upstream().connect
         row = await app.state.catalog.create(
             {"name": "healthy", "config": {"command": "fake"}}
@@ -93,7 +93,7 @@ async def test_explicit_admin_retry_recovers_failed_service(tmp_path, action):
 
 @pytest.mark.parametrize("action", ["refresh", "start"])
 async def test_explicit_retry_failure_preserves_latest_reason(tmp_path, action):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, web, _actor):
         peer = Upstream()
         peer.failure = OSError("old failure")
         app.state.runtime.connector = peer.connect
@@ -111,7 +111,7 @@ async def test_explicit_retry_failure_preserves_latest_reason(tmp_path, action):
 
 
 async def test_manual_disable_is_not_undone_by_refresh(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, web, _actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
         row = await app.state.catalog.create(

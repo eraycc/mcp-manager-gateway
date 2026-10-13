@@ -1,4 +1,5 @@
 from sqlalchemy import text
+
 from mcp_manager.config import Settings
 from mcp_manager.database import Database, get_setting, set_setting
 
@@ -19,8 +20,10 @@ async def test_migration_and_setting_restart(tmp_path):
 
 def test_migration_offline_sql_for_sqlite_and_mysql(tmp_path, monkeypatch):
     from io import StringIO
+
     from alembic import command
     from alembic.config import Config
+
     from mcp_manager.config import PACKAGE_ROOT
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     for url in ("sqlite:///example.db", "mysql://user:password@localhost/mcp"):

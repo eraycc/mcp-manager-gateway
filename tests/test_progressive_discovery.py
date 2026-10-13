@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 from mcp import types
 from starlette.requests import Request
-
 from test_bug1_catalog import console
 
 SCHEMA = {
@@ -23,7 +22,7 @@ SCHEMA = {
 
 @asynccontextmanager
 async def discovery_context(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, web, _actor):
         calls = []
         class Connection:
             def __init__(self, slug):
@@ -98,7 +97,7 @@ def payload(result):
 
 
 async def test_services_are_separate_from_tools_and_wildcard_is_complete(discovery_env):
-    app, rows, calls, ctx, invoke, web = discovery_env
+    app, rows, calls, ctx, invoke, _web = discovery_env
     initial = await app.state.gateway.list_tools(ctx, None)
     assert {t.name for t in initial.tools} == {
         "gateway_search_mcps", "gateway_search_tools", "gateway_call"}
@@ -140,7 +139,7 @@ async def test_search_tools_declares_exact_multi_selector(discovery_env):
 
 
 async def test_generated_service_description_and_tool_names_support_l1_search(discovery_env):
-    *_, invoke, web = discovery_env
+    *_, invoke, _web = discovery_env
     body = payload(await invoke("gateway_search_mcps", {"query": "notification"}))
     assert "archive" in {item["slug"] for item in body["items"]}
     serialized = json.dumps(body["items"], ensure_ascii=False)
@@ -158,7 +157,7 @@ async def test_generated_service_description_and_tool_names_support_l1_search(di
     ("missing_service", "", set()),
 ])
 async def test_tool_scope_combinations(discovery_env, mcp, tool, want):
-    *_, invoke, web = discovery_env
+    *_, invoke, _web = discovery_env
     body = payload(await invoke("gateway_search_tools", {"mcp": mcp, "tool": tool}))
     assert {x["gateway_name"] for x in body["tools"]} == want
 
@@ -330,7 +329,7 @@ async def test_conditional_schema_gets_a_required_branch_template(discovery_env)
 
 
 async def test_full_schema_examples_and_exact_execution(discovery_env):
-    app, rows, calls, ctx, invoke, web = discovery_env
+    _app, rows, calls, _ctx, invoke, _web = discovery_env
     body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
     item = body["tools"][0]
     assert item["inputSchema"] == SCHEMA
@@ -342,7 +341,7 @@ async def test_full_schema_examples_and_exact_execution(discovery_env):
 
 
 async def test_invalid_nested_arguments_report_path_without_execution(discovery_env):
-    app, rows, calls, ctx, invoke, web = discovery_env
+    _app, _rows, calls, _ctx, invoke, _web = discovery_env
     result = await invoke("gateway_call", {"name": "files__read_file",
                                            "arguments": {"path": "x", "options": {"limit": "wrong"}}})
     assert result.is_error
@@ -356,7 +355,7 @@ async def test_invalid_nested_arguments_report_path_without_execution(discovery_
 
 
 async def test_field_search_typos_and_unknown_scope_do_not_expand(discovery_env):
-    *_, invoke, web = discovery_env
+    *_, invoke, _web = discovery_env
     assert payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "recipent"}))["tools"][0][
         "gateway_name"] == "files__send_message"
     assert payload(await invoke("gateway_search_tools", {"mcp": "private", "tool": "*"}))["tools"] == []
@@ -366,7 +365,7 @@ async def test_field_search_typos_and_unknown_scope_do_not_expand(discovery_env)
 
 
 async def test_pagination_has_no_duplicates_and_rejects_changed_catalog(discovery_env):
-    app, rows, calls, ctx, invoke, web = discovery_env
+    app, rows, _calls, _ctx, invoke, _web = discovery_env
     first = payload(await invoke("gateway_search_tools", {"limit": 1}))
     assert first["truncated"] is True
     assert first["next_cursor"]
@@ -402,13 +401,13 @@ async def test_pagination_has_no_duplicates_and_rejects_changed_catalog(discover
     {"unknown": "*"},
 ])
 async def test_bad_discovery_parameters_are_tool_errors(discovery_env, arguments):
-    *_, invoke, web = discovery_env
+    *_, invoke, _web = discovery_env
     result = await invoke("gateway_search_tools", arguments)
     assert result.is_error
 
 
 async def test_legacy_discovery_entry_points_remain_callable(discovery_env):
-    *_, invoke, web = discovery_env
+    *_, invoke, _web = discovery_env
     result = await invoke("gateway_search", {"query": "*"})
     assert not result.is_error
     assert len(json.loads(result.content[0].text)) == 4

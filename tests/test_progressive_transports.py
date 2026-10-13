@@ -13,7 +13,7 @@ from mcp.client.stdio import StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.lowlevel import Server
 
-from test_gateway import running_gateway  # noqa: F401
+pytest_plugins = ("test_gateway",)
 
 
 @asynccontextmanager
@@ -57,7 +57,7 @@ async def gateway_client(transport, url, token):
         async with Client(source, cache=None) as client:
             yield client
     else:
-        async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + token}, trust_env=False) as http:
+        async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + token}, trust_env=False) as http:  # noqa: SIM117 - client depends on HTTP context
             async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None) as client:
                 yield client
 
@@ -65,7 +65,7 @@ async def gateway_client(transport, url, token):
 @pytest.mark.parametrize("transport", ["http", "stdio"])
 @pytest.mark.parametrize("mode", ["native", "discovery"])
 async def test_full_matrix_with_two_downstream_transports(running_gateway, transport, mode):
-    app, web, url, _, local = running_gateway
+    app, web, url, _, _local = running_gateway
     async with remote_fixture() as (remote_url, calls):
         response = await web.post("/api/v1/mcps", json={"name": "Remote", "slug": "remote",
             "transport": "streamable-http", "config": {"url": remote_url + "/mcp"}})

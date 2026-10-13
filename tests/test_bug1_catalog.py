@@ -11,7 +11,7 @@ from mcp_manager.runtime import GatewayError
 @asynccontextmanager
 async def console(tmp_path):
     app = create_app(Settings(data_dir=tmp_path, secret_key="bug1"))
-    async with app.router.lifespan_context(app):
+    async with app.router.lifespan_context(app):  # noqa: SIM117 - web client depends on app lifespan
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as web:
             await web.post("/api/v1/auth/register", json={"username": "admin", "password": "password12345"})
             actor = (await web.post("/api/v1/auth/login", json={"username": "admin", "password": "password12345"})).json()
@@ -32,7 +32,7 @@ class Connection:
 
 
 async def test_create_edit_disable_refreshes_directory_without_kept_lazy_lease(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, web, _actor):
         @asynccontextmanager
         async def connect(spec):
             yield Connection(spec.config["command"])
@@ -74,7 +74,7 @@ async def test_admin_uses_own_personal_oauth_cache(tmp_path):
 
 
 async def test_personal_auth_failure_preserves_policy_and_authorization_reason(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, _actor):
         row = await app.state.catalog.create({"name": "oauth", "transport": "streamable-http",
             "config": {"url": "https://mcp.test", "auth": {"type": "oauth",
                 "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"}}})
@@ -89,7 +89,7 @@ async def test_personal_auth_failure_preserves_policy_and_authorization_reason(t
 
 
 async def test_missing_cached_tool_cannot_bypass_validation(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, _actor):
         @asynccontextmanager
         async def connect(spec):
             yield Connection()
@@ -110,7 +110,7 @@ async def test_missing_cached_tool_cannot_bypass_validation(tmp_path):
 
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
 async def test_eager_start_and_call_keeps_refresh_warning_without_implicit_discovery(tmp_path, transport):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, _actor):
         @asynccontextmanager
         async def connect(spec):
             yield Connection("current")
@@ -136,7 +136,7 @@ async def test_eager_start_and_call_keeps_refresh_warning_without_implicit_disco
 
 
 async def test_revoked_credential_discovery_does_not_restore_cache(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, actor):
         row = await app.state.catalog.create({"name": "personal", "transport": "streamable-http",
             "config": {"url": "https://mcp.test", "auth": {"type": "oauth", "scope": "user",
                 "authorization_url": "https://auth.test/authorize", "token_url": "https://auth.test/token"}}})
@@ -154,7 +154,7 @@ async def test_revoked_credential_discovery_does_not_restore_cache(tmp_path):
 
 
 async def test_failed_write_does_not_leave_a_runtime_hold(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, _web, _actor):
         row = await app.state.catalog.create({"name": "service", "mode": "disabled", "config": {"command": "fake"}})
         async def reject_transaction(session=None):
             if session is not None:
@@ -170,7 +170,7 @@ async def test_failed_write_does_not_leave_a_runtime_hold(tmp_path):
 
 
 async def test_browser_gateway_cors_and_management_origin_are_separate(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (_app, web, _actor):
         preflight = {"Origin": "https://client.test", "Access-Control-Request-Method": "POST",
                      "Access-Control-Request-Headers": "authorization,content-type,mcp-protocol-version"}
         response = await web.options("/mcp", headers=preflight)

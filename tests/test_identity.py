@@ -1,11 +1,13 @@
 import asyncio
+from datetime import UTC
 
 import httpx
 import pytest
 from fastapi import FastAPI
+
 from mcp_manager.config import Settings
 from mcp_manager.database import Database, McpServer, get_setting, set_setting
-from mcp_manager.identity import router, authenticate_token
+from mcp_manager.identity import authenticate_token, router
 
 
 @pytest.fixture
@@ -19,10 +21,10 @@ async def clients(tmp_path):
 
     @app.get("/probe")
     async def probe(request: __import__("fastapi").Request):
-        user, token, ids = await authenticate_token(request)
+        _user, _token, ids = await authenticate_token(request)
         return {"ids": sorted(ids)}
 
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as a:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as a:  # noqa: SIM117 - clients have independent lifetimes
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as b:
             yield a, b, db
     await db.close()
@@ -134,7 +136,7 @@ async def test_token_scope_revocation_and_object_access(clients):
 
 
 async def test_rotation_owner_isolation_and_live_permission_reduction(clients):
-    a,b,db=clients
+    a,b,_db=clients
     admin=await signup(a,"admin")
     await signup(b,"other")
     await login(a,"admin")
@@ -158,7 +160,7 @@ async def test_rotation_owner_isolation_and_live_permission_reduction(clients):
 
 
 async def test_origin_validation_and_last_admin_batch_rollback(clients):
-    a,b,db=clients
+    a,b,_db=clients
     assert (await a.post("/api/v1/auth/register",headers={"Origin":"https://evil.example"},
                         json={"username":"admin","password":"password123"})).status_code == 403
     admin=await signup(a,"admin")
@@ -173,10 +175,10 @@ async def test_origin_validation_and_last_admin_batch_rollback(clients):
 
 async def test_expiry_honors_explicit_timezone_offset(clients):
     from datetime import datetime, timedelta, timezone
-    a,b,db=clients
+    a,_b,_db=clients
     await signup(a,"admin")
     await login(a,"admin")
-    past=(datetime.now(timezone.utc)-timedelta(minutes=1)).astimezone(timezone(timedelta(hours=8)))
+    past=(datetime.now(UTC)-timedelta(minutes=1)).astimezone(timezone(timedelta(hours=8)))
     r=await a.post("/api/v1/tokens",json={"name":"expired","expires_at":past.isoformat()})
     assert r.status_code == 200,r.text
     assert (await a.get("/probe",headers={"Authorization":"Bearer "+r.json()["token"]})).status_code == 401
@@ -188,7 +190,9 @@ async def test_expiry_honors_explicit_timezone_offset(clients):
 ])
 async def test_writes_revalidate_revoked_session_after_lock_wait(clients, monkeypatch, operation):
     from contextlib import asynccontextmanager
+
     from sqlalchemy import select
+
     from mcp_manager.database import ApiToken, AuthSession, User
 
     a, b, db = clients
@@ -242,9 +246,10 @@ async def test_writes_revalidate_revoked_session_after_lock_wait(clients, monkey
 @pytest.mark.parametrize("change", ["demote", "disable", "auth_version"])
 async def test_admin_role_and_state_revalidated_under_lock(clients, monkeypatch, change):
     from contextlib import asynccontextmanager
+
     from mcp_manager.database import User
 
-    a, b, db = clients
+    a, _b, db = clients
     actor = await signup(a, "admin")
     await login(a, "admin")
     original_lock = db.locked
@@ -300,6 +305,7 @@ async def test_token_patch_metadata_survives_revoked_grants(clients):
 @pytest.mark.parametrize("operation", ["create", "patch", "delete", "rotate"])
 async def test_token_ownership_uses_fresh_role_after_lock_wait(clients, monkeypatch, operation):
     from contextlib import asynccontextmanager
+
     from mcp_manager.database import User
 
     a, b, db = clients

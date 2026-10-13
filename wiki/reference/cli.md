@@ -66,7 +66,16 @@ mmg rebuild-logs
 mmg migrate-db --target-database-url "<DATABASE_URL>"
 ~~~
 
-把配置数据复制到空的 SQLite 或 MySQL 目标。执行前停止网关。
+把配置数据按最多 250 行的批次复制到空的 SQLite 或 MySQL 目标，并在提交前校验逐表计数与规范化内容哈希。执行前停止网关；切换后仍需同时保留原 `DATA_DIR` 与 `SECRET_KEY`。详见 [SQLite 与 MySQL 部署](../database-deployment.md)。
+
+## `reconcile-data`
+
+~~~console
+mmg reconcile-data
+mmg reconcile-data --batch-size 100
+~~~
+
+幂等回填旧审批的公开名称，并导入旧目录和任务索引。运行中的旧任务只标记为 `interrupted`，不会自动重放。
 
 ## `migrate-home`
 

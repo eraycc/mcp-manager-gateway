@@ -2,9 +2,9 @@ import asyncio
 
 import pytest
 from fastapi import HTTPException
+from test_runtime import Fake, spec
 
 from mcp_manager.runtime import Runtime
-from test_runtime import Fake, spec
 
 
 async def test_revoked_queued_caller_does_not_close_other_users_instance():

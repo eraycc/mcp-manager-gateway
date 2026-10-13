@@ -215,7 +215,7 @@ docker compose up --build -d
 
 The default bind address is local-only. For remote or production use, place MMG behind an HTTPS reverse proxy and set `PUBLIC_URL` and `COOKIE_SECURE=true` correctly. MMG is currently designed as a single gateway runtime; do not share one downstream process scheduler across multiple workers or replicas.
 
-Read [Configuration](wiki/operations/configuration.md), [Deployment and upgrades](wiki/operations/deployment-and-upgrades.md), and [Backup and migration](wiki/operations/backup-and-migration.md).
+Read [Database deployment, migration, and backup](wiki/database-deployment.md), [Configuration](wiki/operations/configuration.md), [Deployment and upgrades](wiki/operations/deployment-and-upgrades.md), and [Backup and migration](wiki/operations/backup-and-migration.md).
 
 ## Upgrades
 
@@ -250,7 +250,7 @@ Contributor guidance is in [Contributing](wiki/development/contributing.md); tra
 - [Installation](wiki/getting-started/installation.md) and [Quick start](wiki/getting-started/quick-start.md)
 - [Client connections](wiki/guides/connect-clients.md) and [MCP migration](wiki/guides/migrate-mcps.md)
 - [Progressive discovery](wiki/concepts/progressive-discovery.md) and [Runtime lifecycle](wiki/concepts/runtime-and-lifecycle.md)
-- [Configuration](wiki/operations/configuration.md), [Deployment](wiki/operations/deployment-and-upgrades.md), and [Troubleshooting](wiki/troubleshooting/common-issues.md)
+- [Database deployment](wiki/database-deployment.md), [Configuration](wiki/operations/configuration.md), [Deployment](wiki/operations/deployment-and-upgrades.md), and [Troubleshooting](wiki/troubleshooting/common-issues.md)
 - [CLI reference](wiki/reference/cli.md) and [Gateway tool reference](wiki/reference/gateway-tools.md)
 - [Agent instructions](AGENTS.md)
 - [简体中文 README](README.zh-CN.md)

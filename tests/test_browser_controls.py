@@ -1,5 +1,6 @@
 """Sidebar, drag, authorization and job regressions in temporary Chrome."""
 from pathlib import Path
+
 import pytest
 from playwright.async_api import async_playwright, expect
 from test_gateway import running_gateway  # noqa: F401

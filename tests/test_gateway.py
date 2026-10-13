@@ -58,12 +58,12 @@ async def running_gateway(tmp_path):
 
 @pytest.mark.asyncio
 async def test_http_cached_directory_call_and_explicit_release(running_gateway):
-    app, web, url, token, row = running_gateway
+    app, web, url, token, _row = running_gateway
     headers = {"Authorization": "Bearer " + token}
     lease = (await web.post("/gateway/v1/leases", headers=headers)).json()["id"]
     headers["X-MCP-Manager-Lease"] = lease
     assert not any(r["phase"] == "ready" for r in app.state.runtime.status())
-    async with httpx2.AsyncClient(headers=headers, trust_env=False) as http:
+    async with httpx2.AsyncClient(headers=headers, trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
         async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None) as client:
             tools = await client.list_tools()
             assert "echo__echo" in [t.name for t in tools.tools]
@@ -80,7 +80,7 @@ async def test_http_cached_directory_call_and_explicit_release(running_gateway):
 
 @pytest.mark.asyncio
 async def test_token_revocation_and_anonymous_range(running_gateway):
-    app, web, url, token, row = running_gateway
+    _app, web, url, token, _row = running_gateway
     response = await web.post("/mcp", json={"jsonrpc": "2.0", "method": "ping", "id": 1})
     assert response.status_code == 401
     listed = (await web.get("/api/v1/tokens")).json()["items"]
@@ -89,7 +89,7 @@ async def test_token_revocation_and_anonymous_range(running_gateway):
     assert response.status_code == 401
     response = await web.patch("/api/v1/settings", json={"token_auth_enabled": False})
     assert response.status_code == 200, response.text
-    async with httpx2.AsyncClient(trust_env=False) as http:
+    async with httpx2.AsyncClient(trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
         async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None) as client:
             assert (await client.list_tools()).tools == []
 

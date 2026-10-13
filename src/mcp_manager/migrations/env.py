@@ -1,9 +1,10 @@
 import asyncio
 
 from alembic import context
+from sqlalchemy.ext.asyncio import create_async_engine
+
 from mcp_manager.config import Settings
 from mcp_manager.database import Base
-from sqlalchemy.ext.asyncio import create_async_engine
 
 config = context.config
 

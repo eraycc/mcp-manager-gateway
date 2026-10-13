@@ -1,7 +1,7 @@
 """Frontend workflows against a temporary gateway and real installed Chrome."""
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
-import json
 
 import httpx
 import pytest

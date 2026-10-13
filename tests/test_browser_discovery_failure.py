@@ -1,7 +1,8 @@
 """Browser must replace stale success indicators after discovery fails."""
+
 from playwright.async_api import expect
 
-from test_browser_bug1 import bug1_browser  # noqa: F401
+pytest_plugins = ("test_browser_bug1",)
 
 
 async def test_failed_saved_service_shows_warning(bug1_browser):
@@ -20,7 +21,7 @@ async def test_failed_saved_service_shows_warning(bug1_browser):
 
 
 async def test_refresh_failure_replaces_open_cached_tool_list(bug1_browser):
-    page, url = bug1_browser
+    page, _url = bug1_browser
     stale = {"tools": [{"name": "old_tool", "inputSchema": {"type": "object"}}],
              "cache_status": "ready", "cache_at": "2026-09-12T00:00:00Z"}
     failure = {**stale, "last_refresh_error": "upstream offline",
@@ -44,7 +45,7 @@ async def test_refresh_failure_replaces_open_cached_tool_list(bug1_browser):
 
 
 async def test_personal_oauth_recheck_and_explicit_recovery(bug1_browser):
-    page, url = bug1_browser
+    page, _url = bug1_browser
     state = {"authorized": False, "starts": 0}
     await page.route("**/api/v1/mcps/personal/oauth/status",
         lambda r: r.fulfill(json={"scope": "user", "authorized": state["authorized"]}))

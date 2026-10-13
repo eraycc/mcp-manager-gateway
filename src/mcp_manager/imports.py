@@ -79,7 +79,7 @@ def slug_for(name):
 
 def _mapping(value):
     if not isinstance(value, dict):
-        raise ValueError("MCP server collection must be an object")
+        raise TypeError("MCP server collection must be an object")
     return [(str(name), raw) for name, raw in value.items()]
 
 
@@ -130,7 +130,7 @@ def _source(data, channel):
     if isinstance(data, list):
         return [(str(x.get("name", "")) if isinstance(x, dict) else "", x) for x in data]
     if not isinstance(data, dict):
-        raise ValueError("Import must be an object or array")
+        raise TypeError("Import must be an object or array")
     if any(k in data for k in ("config", "command", "url")):
         return [(str(data.get("name", "")), data)]
     if channel == "claude" and "projects" in data:
@@ -163,7 +163,7 @@ def normalize_import(data, channel="generic"):
     for name, raw in source:
         try:
             if not isinstance(raw, dict):
-                raise ValueError("Service entry must be an object")
+                raise TypeError("Service entry must be an object")
             script = _script_path(raw)
             if script:
                 raise ValueError(script + " 使用 Cordis !js 表达式，请改为静态值或环境变量引用后导入")
@@ -279,7 +279,7 @@ def _read_source(path):
 if(fs.statSync(p).size>67108864)process.exit(2);
 const s=fs.readFileSync(p,'utf8');if(Buffer.byteLength(s)>4194304)process.exit(2);
 process.stdout.write(s);"""
-        result = subprocess.run([node, "-e", script, str(path)], capture_output=True, timeout=10,
+        result = subprocess.run([node, "-e", script, str(path)], capture_output=True, timeout=10, check=False,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if result.returncode:
             raise ValueError("无法读取配置文件；请使用文件上传或粘贴")

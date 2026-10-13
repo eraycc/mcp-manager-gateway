@@ -32,9 +32,8 @@ def test_migration_refuses_running_source_and_missing_key(tmp_path):
     source, target = tmp_path / "old", tmp_path / "new"
     source.mkdir()
     (source / "secret.key").write_text("key")
-    with FileLock(str(source / "runtime.lock")):
-        with pytest.raises(Exception):
-            migrate_home(source, target)
+    with FileLock(str(source / "runtime.lock")), pytest.raises(Exception):  # noqa: B017 - lock backend exception varies
+        migrate_home(source, target)
     assert not target.exists()
     (source / "secret.key").unlink()
     with pytest.raises(ValueError, match="secret.key"):
