@@ -1,6 +1,7 @@
 """Reproduce two approvals passing the old pre-commit creation boundary."""
 import asyncio
 
+import pytest
 from sqlalchemy import select
 
 from mcp_manager.database import ApiToken, McpProposal, McpServer, User
@@ -69,3 +70,32 @@ async def test_refresh_observes_committed_approval(db_app, monkeypatch):
     monkeypatch.setattr(db_app.app.state.catalog, "refresh_after_change", observe)
     response = await db_app.web.post(f"/api/v1/mcp-proposals/{identity}/approve", json={})
     assert response.status_code == 200
+
+
+async def test_queued_submission_rechecks_token_in_its_write_transaction(db_app, monkeypatch):
+    from fastapi import HTTPException
+
+    import mcp_manager.proposals as proposals_module
+
+    created = await db_app.web.post("/api/v1/tokens", json={"name": "queued", "enable_mcp_proposal": True})
+    async with db_app.db.session() as session:
+        actor = await session.scalar(select(User).where(User.username == "admin"))
+        token = await session.get(ApiToken, created.json()["id"])
+    normalized = asyncio.Event()
+    original = proposals_module.normalize_proposals
+    def normalize(value):
+        result = original(value)
+        normalized.set()
+        return result
+    monkeypatch.setattr(proposals_module, "normalize_proposals", normalize)
+    async with db_app.db.locked() as session:
+        (await session.get(ApiToken, token.id)).disabled = True
+        task = asyncio.create_task(submit_proposals(db_app.app, actor, token, {
+            "name": "Must not persist", "transport": "stdio", "config": {"command": "synthetic"},
+        }))
+        await asyncio.wait_for(normalized.wait(), 5)
+    with pytest.raises(HTTPException) as caught:
+        await asyncio.wait_for(task, 5)
+    assert caught.value.status_code == 403
+    async with db_app.db.session() as session:
+        assert list((await session.scalars(select(McpProposal))).all()) == []

@@ -12,9 +12,9 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import func, or_, select
 
 from .catalog import masked, restore, validate_slug, web_authorizer
-from .database import McpProposal, McpServer, now
+from .database import ApiToken, McpProposal, McpServer, User, now
 from .diagnostics import safe_gateway_error
-from .identity import admin_user
+from .identity import admin_user, expired
 from .runtime import GatewayError, ServerSpec
 from .transports import validate_service_config
 
@@ -195,6 +195,12 @@ async def submit_proposals(app, user, token, value):
     items = normalize_proposals(value)
     rows = []
     async with app.state.db.locked() as session:
+        actor = await session.get(User, user.id, populate_existing=True)
+        current_token = await session.get(ApiToken, token.id, populate_existing=True)
+        if (not actor or actor.disabled or actor.role != "admin" or not current_token
+                or current_token.user_id != actor.id or current_token.disabled
+                or expired(current_token.expires_at) or not current_token.enable_mcp_proposal):
+            raise HTTPException(403, "This administrator token can no longer propose MCP services")
         for item in items:
             payload = {key: item[key] for key in ("name", "slug", "description", "tags", "transport", "config")}
             row = McpProposal(

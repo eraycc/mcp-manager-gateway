@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -21,15 +22,16 @@ from .artifact_store import ArtifactStore
 from .catalog_store import CatalogStore
 from .catalog_types import CatalogScope
 from .credentials import catalog_owner, credential_owner
+from .database import ApiToken, McpServer, SystemSetting, User, invalidate_setting_cache, now
 from .db_types import strict_json_dumps
 from .diagnostics import SECRET_KEYS, safe_gateway_error
 from .diagnostics import diagnostic_cause as diagnostic_cause
 from .diagnostics import sanitize_diagnostic_error as sanitize_diagnostic_error
-from .database import ApiToken, McpServer, SystemSetting, User, invalidate_setting_cache, now
 from .identity import public as public_model
 from .identity import revalidate_user
 from .jsonl_store import JsonlStore
 from .runtime import GatewayError, ServerSpec
+from .schema_validation import LOCAL_SCHEMA_REGISTRY, validate_local
 from .transports import validate_service_config
 
 CAPABILITY_KEYS = ("tools", "resources", "prompts", "templates")
@@ -111,6 +113,8 @@ class Catalog:
         self.tasks = set()
         self.cache_store = JsonlStore(self.cache_dir / "catalog.jsonl", fail_closed=True)
         self._cache_failures = {}
+        self._validators = OrderedDict()
+        self._validator_bytes = 0
         self.artifacts = ArtifactStore(config.data_dir)
         self.index = CatalogStore(db, self.artifacts, signing_key=config.jwt_secret, scope_resolver=self._index_scope)
         self.startup_failure_threshold = 3
@@ -148,8 +152,12 @@ class Catalog:
             raise HTTPException(404, "MCP not found")
         return row
 
-    async def rows(self, ids=None):
+    async def rows(self, ids=None, *, metadata_only=False):
+        from sqlalchemy.orm import defer
+
         statement = select(McpServer).order_by(McpServer.created_at.desc())
+        if metadata_only:
+            statement = statement.options(defer(McpServer.config))
         if ids is not None:
             statement = statement.where(McpServer.id.in_(ids))
         async with self.db.session() as s:
@@ -213,10 +221,10 @@ class Catalog:
             return "running"
         if any(item["phase"] == "ready" for item in instances):
             return "ready"
-        return "failed" if self.cached(row, user_id)["runtime_status"] == "failed" else "stopped"
+        return "failed" if self.cached_view(row, user_id)["runtime_status"] == "failed" else "stopped"
 
     def failure_details(self, row, user_id=None):
-        cache = self.cached(row, user_id)
+        cache = self.cached_view(row, user_id)
         return {
             "mcp_id": row.id,
             "mcp_name": row.name,
@@ -238,8 +246,12 @@ class Catalog:
         )
 
     def cached(self, row, user_id=None):
+        return copy.deepcopy(self.cached_view(row, user_id))
+
+    def cached_view(self, row, user_id=None):
+        """Internal read-only view; callers must not mutate its nested collections."""
         def current(key):
-            saved = self._cache_failures.get(key) or self.cache_store.get(key)
+            saved = self._cache_failures.get(key) or self.cache_store.items.get(key)
             return saved["data"] if saved and saved["revision"] == row.revision else None
         saved = current(self.cache_key(row, user_id))
         empty = {
@@ -254,7 +266,7 @@ class Catalog:
         }
         if self.runtime.versions.get(row.id, row.revision) != row.revision:
             return empty | {"cache_status": "disabled"}
-        value = empty | copy.deepcopy(saved or {})
+        value = empty | (saved or {})
         value["failure_scope"] = self.failure_scope(row)
         if value["cache_status"] == "empty" and value["cache_at"]:
             value["cache_status"] = "error" if value["cache_error"] else "ready"
@@ -271,6 +283,7 @@ class Catalog:
         self._cache_failures.pop(key, None)
 
     def save_cache(self, row, value, user_id=None):
+        value = value | {"cache_generation": uuid4().hex}
         key = self.cache_key(row, user_id)
         try:
             self.cache_store.set(key, {"revision": row.revision, "data": value})
@@ -931,9 +944,55 @@ class Catalog:
                 raise HTTPException(409, "MCP has active calls; retry after completion") from exc
             raise
 
+    async def tool_definition(self, row, name, user_id=None):
+        scope = await self.index_scope(row, user_id)
+        if await self.index.has_scope(scope):
+            return await self.index.get_definition(scope, kind="tools", name=name)
+        # Temporary compatibility for pre-cutover caches; only this service is inspected.
+        tool = next((value for value in self.cached_view(row, user_id)["tools"] if value["name"] == name), None)
+        return await asyncio.to_thread(copy.deepcopy, tool) if tool is not None else None
+
+    async def validate_tool_arguments(self, tool, arguments):
+        schema = tool.get("inputSchema", {"type": "object"})
+        def identity_and_cost():
+            import sys
+
+            encoded = strict_json_dumps(schema).encode()
+            seen, pending, retained = set(), [schema], 8192
+            while pending:
+                value = pending.pop()
+                if id(value) in seen:
+                    continue
+                seen.add(id(value))
+                retained += sys.getsizeof(value)
+                if isinstance(value, dict):
+                    pending.extend(value.keys())
+                    pending.extend(value.values())
+                elif isinstance(value, list):
+                    pending.extend(value)
+            return hashlib.sha256(encoded).hexdigest(), retained
+        key, cost = await asyncio.to_thread(identity_and_cost)
+        cached = self._validators.get(key)
+        if cached is None:
+            validator = await asyncio.to_thread(Draft202012Validator, schema, registry=LOCAL_SCHEMA_REGISTRY)
+            while self._validators and (self._validator_bytes + cost > 32 * 1024 * 1024
+                                        or len(self._validators) >= 4096):
+                _old_key, (_old_validator, old_cost) = self._validators.popitem(last=False)
+                self._validator_bytes -= old_cost
+            if cost <= 32 * 1024 * 1024:
+                existing = self._validators.get(key)
+                if existing is None:
+                    self._validators[key] = (validator, cost)
+                    self._validator_bytes += cost
+                else:
+                    validator = existing[0]
+        else:
+            self._validators.move_to_end(key)
+            validator = cached[0]
+        await asyncio.to_thread(validate_local, validator, arguments)
+
     async def call(self, row, lease, name, arguments, *, user=None, token=None, authorize=None, source="gateway"):
-        cached = self.cached(row, user.id if user else None)
-        tool = next((x for x in cached["tools"] if x["name"] == name), None)
+        tool = await self.tool_definition(row, name, user.id if user else None)
         event = {"id": str(uuid4()), "user_id": user.id if user else None,
                  "username": user.username if user else "anonymous", "token_id": token.id if token else None,
                  "token_name": token.name if token else "", "mcp_id": row.id, "mcp_name": row.name,
@@ -944,7 +1003,7 @@ class Catalog:
         try:
             if tool is None:
                 raise GatewayError("tool_not_found", "Tool is absent from the current MCP directory")
-            Draft202012Validator(tool.get("inputSchema", {"type": "object"})).validate(arguments)
+            await self.validate_tool_arguments(tool, arguments)
             if authorize:
                 await authorize()
             spec = await self.spec(row, user.id if user else None)
@@ -952,11 +1011,12 @@ class Catalog:
                 if authorize:
                     await authorize()
                 # Startup may have replaced stale schemas before this queued call.
-                current_tool = next((x for x in self.cached(row, user.id if user else None)["tools"]
-                                     if x["name"] == name), None)
+                current_tool = await self.tool_definition(row, name, user.id if user else None)
                 if current_tool is None:
                     raise GatewayError("tool_not_found", "Tool is absent from the current MCP directory")
-                Draft202012Validator(current_tool.get("inputSchema", {"type": "object"})).validate(arguments)
+                await self.validate_tool_arguments(current_tool, arguments)
+                if authorize:
+                    await authorize()
             result = await self.runtime.call(spec, lease.id, name, arguments, authorize=before_dispatch)
             event.update(status="tool_error" if result.get("isError") else "success", result=result)
             return result

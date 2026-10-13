@@ -1,11 +1,14 @@
 """Progressive MCP discovery: service summaries, full tool contracts, exact execution."""
+import asyncio
 import copy
 import json
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from mcp import types
+from referencing.exceptions import Unresolvable
 
 from .runtime import GatewayError
+from .schema_validation import LOCAL_SCHEMA_REGISTRY
 from .tool_index import document, fingerprint, normalize, paginate, query_text, rank, schema_text
 
 PAGING = {
@@ -242,13 +245,13 @@ def tool_contract(row, original, exposed):
     schema = original.get("inputSchema", {})
     examples = []
     try:
-        validator = Draft202012Validator(schema)
-        for example in schema.get("examples", []):
+        validator = Draft202012Validator(schema, registry=LOCAL_SCHEMA_REGISTRY)
+        for example in schema.get("examples", []) if isinstance(schema, dict) else []:
             if isinstance(example, dict) and validator.is_valid(example):
                 examples.append({"name": exposed["name"], "arguments": copy.deepcopy(example)})
             if len(examples) == 3:
                 break
-    except (SchemaError, TypeError):
+    except (SchemaError, TypeError, Unresolvable):
         pass
     if examples:
         result["examples"] = examples
@@ -275,132 +278,211 @@ class Discovery:
     def __init__(self, gateway):
         self.gateway = gateway
 
-    async def snapshot(self, request):
-        user, token, rows, entries = await self.gateway.directory(request)
+
+    async def summary_snapshot(self, request):
+        user, token, allowed = await self.gateway.principal(request)
         catalog = self.gateway.app.state.catalog
-        summaries = []
+        rows = [row for row in await catalog.rows(ids=allowed, metadata_only=True) if row.mode != "disabled"]
+        expected = await self.gateway.search_scope(request, user, token, rows)
+        scopes = await catalog.index_scopes(rows, user.id if user else None)
+        indexed = await catalog.index.get_summaries(scopes.values(), preview=True)
+        services = []
         for row in rows:
-            if row.mode == "disabled":
-                continue
-            cache = catalog.cached(row, user.id if user else None)
-            service_tools = [original for service, original, _exposed in entries if service.id == row.id]
-            tools_list = sorted(tool["name"] for tool in service_tools)
-            description, description_source = service_description(row.description, service_tools)
+            cache = catalog.cached_view(row, user.id if user else None)
+            if row.id in indexed:
+                metadata = indexed[row.id]
+                names = metadata["tools_preview"]
+                description = row.description or metadata["generated_description"]
+                description_source = "configured" if row.description.strip() else "generated" if description else "missing"
+                count, status = metadata["tool_count"], metadata["cache_status"]
+            else:
+                preview = cache["tools"][:50]
+                names = sorted(tool["name"] for tool in preview)
+                description, description_source = service_description(row.description, preview)
+                count, status = len(cache["tools"]), cache["cache_status"]
             failure = catalog.failure_details(row, user.id if user else None)
-            summaries.append({
-                "id": row.id,
-                "mcp": row.id,
-                "name": row.name,
-                "slug": row.slug,
-                "description": description,
-                "description_source": description_source,
-                "tags": row.tags,
-                "tool_count": len(tools_list),
-                "tools_list": tools_list,
-                "catalog_status": cache["cache_status"],
-                "status": failure["status"],
+            item = {
+                "id": row.id, "mcp": row.id, "name": row.name, "slug": row.slug,
+                "description": description, "description_source": description_source,
+                "tags": row.tags, "tool_count": count, "tools_list": names,
+                "catalog_status": status, "status": failure["status"],
                 "startup_failure_count": failure["startup_failure_count"],
                 "failure_reason": failure["failure_reason"],
                 "last_startup_error": cache["last_startup_error"],
                 "last_startup_error_code": cache["last_startup_error_code"],
                 "last_startup_failure_at": cache["last_startup_failure_at"],
-                "failure_scope": failure["failure_scope"],
-                "revision": row.revision,
-            })
-        summaries.sort(key=lambda x: (x["slug"], x["id"]))
-        visible = {s["id"] for s in summaries}
-        entries = sorted((e for e in entries if e[0].id in visible), key=lambda e: (e[0].slug, e[2]["name"]))
-        tools = [tool_contract(*entry) for entry in entries]
-        for tool in tools:
-            tool["catalog_status"] = "ready"
-        # Scope includes user identity, token identity and visible content; private OAuth caches cannot cross.
-        scope = fingerprint([user.id if user else "anonymous", token.id if token else "", summaries, tools])
-        return summaries, tools, scope
+                "failure_scope": failure["failure_scope"], "revision": row.revision,
+            }
+            if len(names) < count:
+                item["tools_list_truncated"] = True
+            services.append(item)
+        services.sort(key=lambda value: (value["slug"], value["id"]))
+        return user, token, rows, services, scopes, indexed, expected
 
     async def search(self, name, arguments, request):
-        arguments = validate_meta(name, arguments)
-        services, tools, scope = await self.snapshot(request)
         from .embedding_api import load_embedding_config
-        state = self.gateway.app.state
+
+        arguments = validate_meta(name, arguments)
+        user, token, rows, services, scopes, indexed, expected = await self.summary_snapshot(request)
+        state, catalog = self.gateway.app.state, self.gateway.app.state.catalog
         config = await load_embedding_config(state)
-        user, token, _ = await self.gateway.principal(request)
+        config_version = fingerprint(config)
+        async def authorize():
+            await self.gateway.revalidate_search_scope(request, expected)
+            if fingerprint(await load_embedding_config(state)) != config_version:
+                raise DiscoveryError("catalog_changed", "Retrieval settings changed during search")
         embedding_scope = fingerprint([user.id if user else "anonymous", token.id if token else ""])
-        async def authorize_embeddings():
-            _, _, latest_scope = await self.snapshot(request)
-            if latest_scope != scope:
-                raise DiscoveryError("catalog_changed", "Permissions or catalog changed; retry the search.")
-        service_docs = [document(s["id"], [s["id"], s["slug"], s["name"]], [
-            (s["name"] + " " + s["slug"], 5), (" ".join(s["tags"]), 3),
-            (" ".join(s["tools_list"]), 2), (s["description"], 1)])
-            for s in services]
+        docs = [document(item["id"], [item["id"], item["slug"], item["name"]], [
+            (item["name"] + " " + item["slug"], 5), (" ".join(item["tags"]), 3),
+            (" ".join(item["tools_list"]), 2), (item["description"], 1),
+        ]) for item in services]
         mcp_query = query_text(arguments.get("query" if name == "gateway_search_mcps" else "mcp", ""))
-        matched, service_search = await rank(service_docs, mcp_query, state.embeddings, config,
-                                             embedding_scope + ":mcps", authorize=authorize_embeddings)
-        matching_ids = {doc["id"] for doc, _ in matched}
-        service_by_id = {s["id"]: s for s in services}
-        selected = [service_by_id[doc["id"]] | {"match": match} for doc, match in matched]
-        search_status = {"services": service_search}
+        matched, service_search = await rank(
+            docs, mcp_query, state.embeddings, config, embedding_scope + ":mcps", authorize=authorize
+        )
+        by_id = {item["id"]: item for item in services}
+        selected = [by_id[doc["id"]] | {"match": match} for doc, match in matched]
+        await authorize()
+        query = {key: arguments.get(key) for key in ("query", "mcp", "tool", "tools", "limit") if key in arguments}
+        version = fingerprint([expected, name, query, config_version])
         if name == "gateway_search_mcps":
-            items = selected
-        else:
-            selected_tools = [t for t in tools if t["mcp_id"] in matching_ids]
-            requested_tools = arguments.get("tools")
-            missing_tools = []
-            if requested_tools is not None:
-                requested = [(value, normalize(value)) for value in requested_tools]
-                found = set()
-                items = []
-                for tool in selected_tools:
-                    names = {normalize(tool["gateway_name"]), normalize(tool["original_name"])}
-                    matches = {normalized for _value, normalized in requested if normalized in names}
-                    if matches:
-                        items.append(tool)
-                        found.update(matches)
-                missing_tools = [value for value, normalized in requested if normalized not in found]
-                search_status["tools"] = {"mode": "exact", "semantic_status": "not_needed"}
-            else:
-                docs = [document(t["gateway_name"], [t["gateway_name"], t["original_name"]], [
-                    (t["gateway_name"] + " " + t["original_name"] + " " + (t.get("title") or ""), 5),
-                    (t.get("description") or "", 2), (schema_text(t["inputSchema"]), 3),
-                    (t["mcp_name"] + " " + t["mcp_slug"], .5)]) for t in selected_tools]
-                matched_tools, search_status["tools"] = await rank(
-                    docs, query_text(arguments.get("tool", "")), state.embeddings, config,
-                    embedding_scope + ":tools", authorize=authorize_embeddings)
-                by_name = {t["gateway_name"]: t for t in selected_tools}
-                items = [by_name[doc["id"]] | {"match": match} for doc, match in matched_tools]
-        # Recheck permission/cache after slow external embedding requests before disclosing results.
-        _, _, current_scope = await self.snapshot(request)
-        if current_scope != scope:
-            raise DiscoveryError("catalog_changed", "Permissions or catalog changed; retry the search.")
-        query = {k: normalize(query_text(arguments.get(k, "")))
-                 for k in ("query",) if name == "gateway_search_mcps"}
-        public_items = items
-        if name != "gateway_search_mcps":
-            query = {
-                "mcp": normalize(query_text(arguments.get("mcp", ""))),
-                "tool": normalize(query_text(arguments.get("tool", ""))),
-                "tools": [normalize(value) for value in arguments.get("tools", [])],
-            }
-            public_items = [compact_tool(item) for item in items]
-        version = fingerprint([scope, name, query, fingerprint(config), public_items, search_status])
-        page = paginate(public_items, cursor=arguments.get("cursor"), limit=arguments.get(
-            "limit", 50 if name == "gateway_search_mcps" else 20), version=version, key=state.config.jwt_secret)
-        if name == "gateway_search_mcps":
-            page["search"] = search_status
-            page["next_step"] = "Call gateway_search_tools with a returned mcp id."
+            page = paginate(selected, cursor=arguments.get("cursor"), limit=arguments.get("limit", 50),
+                            version=version, key=state.config.jwt_secret)
+            page.update(search={"services": service_search}, next_step="Call gateway_search_tools with a returned mcp id.")
+            await authorize()
             return result_json(page)
-        cursor = page["next_cursor"]
+        row_by_id = {row.id: row for row in rows}
+        selected_rows = [row_by_id[item["id"]] for item in selected]
+        legacy = [row for row in selected_rows if row.id not in indexed
+                  and catalog.cached_view(row, user.id if user else None)["tools"]]
+        if not legacy:
+            return await self.indexed_tool_search(
+                selected_rows, scopes, indexed, arguments, version, authorize
+            )
+        return await self.compatibility_tool_search(
+            selected_rows, scopes, indexed, arguments, version, embedding_scope, config, authorize
+        )
+
+    def tool_response(self, selected, tools, total, following, *, missing=None):
         response = {
             "instructions": "Use gateway_call with gateway_name and arguments matching inputSchema.",
-            "mcps": [{"id": item["id"], "name": item["name"], "slug": item["slug"]} for item in selected],
-            "tools": page["items"],
-            "truncated": bool(cursor),
-            "returned": page["returned"],
-            "total": page["total"],
+            "mcps": [{"id": row.id, "name": row.name, "slug": row.slug} for row in selected],
+            "tools": tools, "truncated": bool(following), "returned": len(tools), "total": total,
         }
-        if cursor:
-            response["next_cursor"] = cursor
-            response["hint"] = "Use a narrower tool/tools query or continue with next_cursor."
-        if missing_tools:
-            response["missing_tools"] = missing_tools
+        if following:
+            response.update(next_cursor=following, hint="Use a narrower tool/tools query or continue with next_cursor.")
+        if missing:
+            response["missing_tools"] = missing
         return result_json(response)
+
+    async def indexed_tool_search(self, selected, scopes, summaries, arguments, version, authorize):
+        catalog, state = self.gateway.app.state.catalog, self.gateway.app.state
+        generations = [summaries[row.id]["generation"] for row in selected if summaries[row.id].get("generation")]
+        offset = 0
+        if arguments.get("cursor"):
+            saved = catalog.index._decode_cursor(arguments["cursor"], version)
+            if type(saved[0]) is not int or saved[0] < 0:
+                raise DiscoveryError("invalid_cursor", "Invalid discovery cursor")
+            offset = saved[0]
+        requested = arguments.get("tools")
+        query = query_text(arguments.get("tool", ""))
+        exact_names = requested
+        if query:
+            exact_total, _entries = await catalog.index.query_tool_entries(generations, exact_names=[query], limit=0)
+            if exact_total:
+                exact_names, query = [query], ""
+        total, entries = await catalog.index.query_tool_entries(
+            generations, query=query, exact_names=exact_names, offset=offset, limit=arguments.get("limit", 20),
+        )
+        if arguments.get("cursor") and offset >= total:
+            raise DiscoveryError("invalid_cursor", "Discovery cursor is outside the result")
+        by_id = {row.id: row for row in selected}
+        contracts = []
+        for entry in entries:
+            row = by_id[entry.server_id]
+            original = await catalog.index.get_definition(scopes[row.id], kind="tools", name=entry.original_name)
+            if original is None:
+                raise DiscoveryError("catalog_changed", "Catalog changed while reading a page")
+            contract = await asyncio.to_thread(tool_contract, row, original, dict(original, name=entry.gateway_name))
+            contracts.append(compact_tool(contract))
+        page = paginate(contracts, cursor=None, limit=len(contracts), version=version, key=state.config.jwt_secret)
+        returned = page["returned"]
+        following = catalog.index._cursor({"binding": version, "key": [offset + returned, ""]}) if offset + returned < total else None
+        missing = []
+        if requested:
+            for value in requested:
+                found, _entries = await catalog.index.query_tool_entries(generations, exact_names=[value], limit=0)
+                if not found:
+                    missing.append(value)
+        await authorize()
+        return self.tool_response(selected, page["items"], total, following, missing=missing)
+
+    async def compatibility_tool_search(self, selected, scopes, indexed, arguments, version,
+                                        embedding_scope, config, authorize):
+        """Bounded pre-cutover adapter; never build contracts except for the returned page."""
+        from .catalog import alias
+
+        catalog, state = self.gateway.app.state.catalog, self.gateway.app.state
+        records = {}
+        for row in selected:
+            if row.id in indexed:
+                generations = [indexed[row.id]["generation"]] if indexed[row.id].get("generation") else []
+                total, entries = await catalog.index.query_tool_entries(generations, limit=1001)
+                if total > 1000:
+                    raise DiscoveryError("catalog_migration_required", "Mixed legacy catalogs need explicit upgrade before large searches")
+                for entry in entries:
+                    records[entry.gateway_name] = (row, entry)
+            else:
+                for tool in catalog.cached_view(row, scopes[row.id].owner if row.isolation == "user" else None)["tools"]:
+                    records[alias(row.slug, tool["name"])] = (row, tool)
+            if len(records) > 1000:
+                raise DiscoveryError("catalog_migration_required", "Legacy catalogs need explicit upgrade before large searches")
+        requested = arguments.get("tools")
+        missing = []
+        if requested:
+            found, candidates = set(), []
+            for gateway_name, (row, value) in records.items():
+                original_name = value["name"] if isinstance(value, dict) else value.original_name
+                aliases = {normalize(gateway_name), normalize(original_name)}
+                matches = {normalize(name) for name in requested} & aliases
+                if matches:
+                    candidates.append({"gateway_name": gateway_name})
+                    found.update(matches)
+            missing = [name for name in requested if normalize(name) not in found]
+        else:
+            docs = []
+            for gateway_name, (row, value) in records.items():
+                if isinstance(value, dict):
+                    tool = value
+                    descriptive_schema = schema_text(tool.get("inputSchema", {}))
+                    original_name = tool["name"]
+                else:
+                    tool = value.summary
+                    descriptive_schema, original_name = value.search_text, value.original_name
+                docs.append(document(gateway_name, [gateway_name, original_name], [
+                    (gateway_name + " " + original_name + " " + (tool.get("title") or ""), 5),
+                    (tool.get("description") or "", 2), (descriptive_schema, 3),
+                    (row.name + " " + row.slug, .5),
+                ]))
+            matched, _status = await rank(
+                docs, query_text(arguments.get("tool", "")), state.embeddings, config,
+                embedding_scope + ":tools", authorize=authorize
+            )
+            candidates = [{"gateway_name": doc["id"]} for doc, _match in matched]
+        if requested or not query_text(arguments.get("tool", "")):
+            candidates.sort(key=lambda value: (records[value["gateway_name"]][0].slug, value["gateway_name"]))
+        page = paginate(candidates, cursor=arguments.get("cursor"), limit=arguments.get("limit", 20),
+                        version=version, key=state.config.jwt_secret)
+        contracts = []
+        for item in page["items"]:
+            row, value = records[item["gateway_name"]]
+            original = value if isinstance(value, dict) else await catalog.index.get_definition(
+                scopes[row.id], kind="tools", name=value.original_name
+            )
+            contract = await asyncio.to_thread(tool_contract, row, original, dict(original, name=item["gateway_name"]))
+            contracts.append(compact_tool(contract))
+        bounded = paginate(contracts, cursor=None, limit=len(contracts), version=version, key=state.config.jwt_secret)
+        page = paginate(candidates, cursor=arguments.get("cursor"), limit=bounded["returned"],
+                        version=version, key=state.config.jwt_secret)
+        await authorize()
+        return self.tool_response(selected, bounded["items"], page["total"], page["next_cursor"], missing=missing)

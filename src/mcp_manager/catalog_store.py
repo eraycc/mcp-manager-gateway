@@ -20,6 +20,14 @@ KINDS = {"tools", "resources", "prompts", "templates"}
 MAX_DEFINITION_BYTES = 8 * 1024 * 1024
 
 
+def searchable_text(entry):
+    from .tool_index import normalize, schema_text
+
+    text = " ".join(str(entry.get(key, "")) for key in ("name", "title", "description"))
+    text += " " + schema_text(entry.get("inputSchema", {}))
+    return normalize(text).encode("utf-8")[:32768].decode("utf-8", errors="ignore")
+
+
 def digest(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -152,7 +160,7 @@ class CatalogStore:
                 "gateway_name": gateway_name, "gateway_hash": digest(gateway_name) if gateway_name else None,
                 "legacy_gateway_hash": digest(server_id + "__" + name) if gateway_name else None,
                 "schema_hash": schema_hash, "summary": summary,
-                "search_text": " ".join(str(entry.get(key, "")) for key in ("name", "title", "description")).casefold(),
+                "search_text": await asyncio.to_thread(searchable_text, entry),
                 "artifact_id": ref.id, "artifact_bytes": ref.size_bytes,
             }))
         try:
@@ -169,7 +177,7 @@ class CatalogStore:
 
     async def set_metadata(self, identity, metadata):
         size = await asyncio.to_thread(lambda: len(strict_json_dumps(metadata).encode()))
-        if size > 16384:
+        if size > 8192:
             raise GatewayError("catalog_metadata_too_large", "Capability metadata exceeds the summary budget")
         async with self.db.locked() as session:
             generation, _, _ = await self._staging(session, identity)
@@ -196,15 +204,28 @@ class CatalogStore:
             generation.status = "publishing"
         counts = dict.fromkeys(sorted(KINDS), 0)
         accumulator = hashlib.sha256()
+        preview, preview_bytes, descriptions = [], 0, []
         async with self.db.session() as session:
             stream = await session.stream(select(
-                CatalogEntry.kind, CatalogEntry.name_hash, CatalogEntry.artifact_id
+                CatalogEntry.kind, CatalogEntry.name_hash, CatalogEntry.artifact_id, CatalogEntry.summary
             ).where(CatalogEntry.generation_id == identity).order_by(
                 CatalogEntry.kind, CatalogEntry.name_hash
             ).execution_options(yield_per=250))
-            async for kind, name_hash, artifact_id in stream:
+            async for kind, name_hash, artifact_id, summary in stream:
                 counts[kind] += 1
                 accumulator.update(strict_json_dumps([kind, name_hash, artifact_id]).encode())
+                if kind == "tools":
+                    name = summary["name"]
+                    cost = len(strict_json_dumps(name).encode()) + 1
+                    if len(preview) < 50 and preview_bytes + cost <= 4096:
+                        preview.append(name)
+                        preview_bytes += cost
+                    description = summary.get("description", "").strip()
+                    if description and len(descriptions) < 3 and description not in descriptions:
+                        descriptions.append(description)
+            generated = ("Provides " + str(counts["tools"]) + " tools: " + (
+                "; ".join(descriptions) if descriptions else ", ".join(sorted(preview)[:6])
+            ))[:480] if preview or descriptions else ""
         async with self.db.locked() as session:
             generation = await session.get(CatalogGeneration, identity, populate_existing=True)
             head = await session.get(CatalogHead, scope_key(expected_scope), populate_existing=True)
@@ -215,6 +236,8 @@ class CatalogStore:
             ):
                 raise GatewayError("generation_superseded", "Catalog changed before publication")
             generation.counts, generation.digest = counts, accumulator.hexdigest()
+            generation.details = dict(generation.details or {}, tools_preview=sorted(preview),
+                                      generated_description=generated)
             generation.status, generation.published_at = "ready", now()
             head.generation_id, head.status = identity, "ready"
             await session.flush()
@@ -237,6 +260,35 @@ class CatalogStore:
             return None
         return generation
 
+    async def query_tool_entries(self, generations, *, query="", exact_names=None, offset=0, limit=20):
+        """Filter/count/page lightweight rows in SQL before any contract or artifact read."""
+        filters = [CatalogEntry.generation_id.in_(generations), CatalogEntry.kind == "tools"]
+        if exact_names is not None:
+            hashes = [digest(name) for name in exact_names]
+            filters.append(or_(
+                CatalogEntry.name_hash.in_(hashes), CatalogEntry.gateway_hash.in_(hashes),
+                CatalogEntry.legacy_gateway_hash.in_(hashes),
+            ))
+        elif query:
+            pattern = "%" + query.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            filters.append(CatalogEntry.search_text.like(pattern, escape="\\"))
+        async with self.db.session() as session:
+            total = await session.scalar(select(func.count()).select_from(CatalogEntry).where(*filters))
+            rows = (await session.execute(select(
+                CatalogEntry.generation_id, CatalogGeneration.server_id, CatalogEntry.original_name,
+                CatalogEntry.gateway_name, CatalogEntry.schema_hash, CatalogEntry.artifact_id,
+                CatalogEntry.artifact_bytes, CatalogEntry.summary, CatalogEntry.search_text,
+            ).join(CatalogGeneration, CatalogGeneration.id == CatalogEntry.generation_id).join(
+                McpServer, McpServer.id == CatalogGeneration.server_id
+            ).where(*filters).order_by(
+                McpServer.slug, CatalogEntry.sort_key, CatalogEntry.name_hash
+            ).offset(offset).limit(limit))).all()
+            return total, rows
+
+    async def has_scope(self, scope):
+        async with self.db.session() as session:
+            return await session.get(CatalogHead, scope_key(scope)) is not None
+
     async def get_summary(self, scope):
         async with self.db.session() as session:
             generation = await self._current(session, scope)
@@ -250,28 +302,42 @@ class CatalogStore:
                 **(generation.details if generation else {}),
             }
 
-    async def get_summaries(self, scopes):
-        """One metadata query for a bounded service page, without capability or Schema rows."""
+    async def get_summaries(self, scopes, *, preview=False):
+        """One projected metadata query; failed/stale heads never fall back to old caches."""
         if not scopes:
             return {}
         expected = {scope_key(scope): scope for scope in scopes}
+        columns = [
+            CatalogHead.scope_key, CatalogHead.server_id, CatalogHead.owner, CatalogHead.status,
+            CatalogGeneration.id.label("generation_id"), CatalogGeneration.status.label("generation_status"),
+            CatalogGeneration.revision, CatalogGeneration.credential_generation,
+            CatalogGeneration.counts, CatalogGeneration.published_at,
+        ]
+        if preview:
+            columns.append(CatalogGeneration.details)
         async with self.db.session() as session:
-            rows = (await session.execute(select(CatalogGeneration).join(
-                CatalogHead, CatalogHead.generation_id == CatalogGeneration.id
-            ).where(
-                CatalogHead.scope_key.in_(expected), CatalogHead.status == "ready",
-                CatalogGeneration.status == "ready",
-            ))).scalars().all()
-            return {
-                row.server_id: {
-                    "generation": row.id, "cache_status": "ready", "cache_at": row.published_at,
-                    "tool_count": row.counts.get("tools", 0),
-                    "resource_count": row.counts.get("resources", 0),
-                    "prompt_count": row.counts.get("prompts", 0),
-                    "template_count": row.counts.get("templates", 0),
-                }
-                for row in rows if generation_scope(row) == expected.get(row.scope_key)
+            rows = (await session.execute(select(*columns).select_from(CatalogHead).outerjoin(
+                CatalogGeneration, CatalogHead.generation_id == CatalogGeneration.id
+            ).where(CatalogHead.scope_key.in_(expected)))).all()
+        result = {}
+        for row in rows:
+            scope = expected[row.scope_key]
+            ready = (row.status == "ready" and row.generation_status == "ready"
+                     and CatalogScope(row.server_id, row.owner, row.revision, row.credential_generation) == scope)
+            counts = (row.counts or {}) if ready else {}
+            item = {
+                "generation": row.generation_id if ready else None,
+                "cache_status": "ready" if ready else "error" if row.status == "error" else "empty",
+                "cache_at": row.published_at if ready else None,
+                "tool_count": counts.get("tools", 0), "resource_count": counts.get("resources", 0),
+                "prompt_count": counts.get("prompts", 0), "template_count": counts.get("templates", 0),
             }
+            if preview:
+                details = (row.details or {}) if ready else {}
+                item.update(tools_preview=details.get("tools_preview", []),
+                            generated_description=details.get("generated_description", ""))
+            result[row.server_id] = item
+        return result
 
     def _cursor(self, payload):
         raw = strict_json_dumps(payload).encode()

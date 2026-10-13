@@ -244,16 +244,20 @@ class Gateway:
             if lease_id not in runtime.leases:
                 self.retention.pop(key, None)
 
-    async def principal(self, request):
-        return await authenticate_token(request)
+    async def principal(self, request, *, target_id=None):
+        return await authenticate_token(request, target_id=target_id)
 
-    def search_scope(self, request, user, token, rows):
+    async def search_scope(self, request, user, token, rows):
         catalog = self.app.state.catalog
         user_id = user.id if user else None
         scopes = []
+        indexed_scopes = await catalog.index_scopes(rows, user_id)
+        indexed = await catalog.index.get_summaries(indexed_scopes.values())
         for row in rows:
-            cache = catalog.cached(row, user_id)
-            scopes.append((row.id, row.revision, row.mode, cache.get("cache_status"), cache.get("cache_at")))
+            cache = catalog.cached_view(row, user_id)
+            scopes.append((row.id, row.revision, row.mode, cache.get("cache_status"), cache.get("cache_at"),
+                           cache.get("cache_generation"), indexed_scopes[row.id].credential_generation,
+                           indexed.get(row.id, {}).get("generation")))
         return (
             owner(user, token, request), getattr(user, "auth_version", None), getattr(user, "role", None),
             getattr(token, "enable_resource_tools", None), getattr(token, "discovery_mode", None),
@@ -265,8 +269,9 @@ class Gateway:
             user, token, allowed = await self.principal(request)
         except HTTPException:
             raise GatewayError("permission_revoked", "Gateway authorization changed during search") from None
-        rows = await self.app.state.catalog.rows(ids=allowed)
-        if self.search_scope(request, user, token, rows) != expected_scope:
+        rows = [row for row in await self.app.state.catalog.rows(ids=allowed, metadata_only=True)
+                if row.mode != "disabled"]
+        if await self.search_scope(request, user, token, rows) != expected_scope:
             raise GatewayError("permission_revoked", "MCP permission or catalog changed during search")
 
     async def directory(self, request):
@@ -284,12 +289,8 @@ class Gateway:
                 raise GatewayError("permission_revoked", "MCP access revoked")
 
         for row in rows:
-            await cat.ensure_ready(
-                row,
-                user_id,
-                authorize=lambda row_id=row.id: authorize(row_id),
-            )
-            for tool in cat.cached(row, user_id)["tools"]:
+            await authorize(row.id)
+            for tool in cat.cached_view(row, user_id)["tools"]:
                 entries.append((row, tool, dict(tool, name=alias(row.slug, tool["name"]))))
         return user, token, rows, entries
 
@@ -357,20 +358,39 @@ class Gateway:
         name, arguments = params.name, params.arguments or {}
         discovery = token and token.discovery_mode == "discovery"
         if discovery and name == "gateway_mcp_proposals":
+            if not token.enable_mcp_proposal or not user or user.role != "admin":
+                raise GatewayError("forbidden", "This administrator token cannot access MCP proposals")
             if isinstance(arguments, dict) and arguments.get("action") == "list":
-                return result_json(await list_proposals(
+                result = await list_proposals(
                     self.app, user,
                     q=str(arguments.get("q", "")),
                     status=str(arguments.get("status", "")),
                     page=int(arguments.get("page", 1)),
                     page_size=int(arguments.get("page_size", 20)),
-                ))
-            return result_json(await submit_proposals(self.app, user, token, arguments))
+                )
+            else:
+                result = await submit_proposals(self.app, user, token, arguments)
+            try:
+                fresh_user, fresh_token, _allowed = await self.principal(request)
+            except HTTPException:
+                raise GatewayError("permission_revoked", "Gateway authorization changed during proposal operation") from None
+            if (owner(fresh_user, fresh_token, request) != owner(user, token, request)
+                    or not fresh_user or fresh_user.role != "admin"
+                    or not fresh_token or not fresh_token.enable_mcp_proposal):
+                raise GatewayError("permission_revoked", "MCP proposal permission changed")
+            return result_json(result)
+        if discovery and name in {"gateway_search_mcps", "gateway_search_tools"}:
+            return await self.discovery.search(name, arguments, request)
+        if not discovery or name == "gateway_call":
+            if discovery:
+                arguments = validate_meta("gateway_call", arguments)
+                name, arguments = arguments["name"], arguments["arguments"]
+            return await self.execute_exact(request, user, token, name, arguments, discovery=discovery)
         user, token, rows, entries = await self.directory(request)
         if discovery and token.enable_resource_tools and name == "gateway_list_resources":
             if not isinstance(arguments, dict) or set(arguments) - {"mcp", "keyword"}:
                 raise ValueError("gateway_list_resources accepts only mcp and keyword")
-            expected_scope = self.search_scope(request, user, token, rows)
+            expected_scope = await self.search_scope(request, user, token, rows)
             authorize_search = lambda: self.revalidate_search_scope(request, expected_scope)
             await authorize_search()
             mcp_query = str(arguments.get("mcp", ""))
@@ -453,6 +473,68 @@ class Gateway:
         try:
             result = await self.app.state.catalog.call(row, self.lease(request, user, token), tool["name"],
                                                        arguments, user=user, token=token, authorize=authorize)
+        except ValidationError as exc:
+            if discovery:
+                raise validation_error(exc, name=name) from None
+            raise
+        return types.CallToolResult.model_validate(result)
+
+    async def resolve_authorized_tool(self, request, gateway_name):
+        """Return the exact persisted reference; never build an unrelated tool contract."""
+        user, _token, allowed = await self.principal(request)
+        return await self.app.state.catalog.index.resolve_gateway_name(
+            gateway_name, allowed, owner=user.id if user else "anonymous"
+        )
+
+    async def execute_exact(self, request, user, token, name, arguments, *, discovery=False):
+        catalog = self.app.state.catalog
+        identity = owner(user, token, request)
+        ref = await self.resolve_authorized_tool(request, name)
+        expected_scope = None
+        if ref:
+            expected_scope = await catalog.index.get_generation_scope(ref.generation)
+            row = await catalog.get(expected_scope.server_id)
+            original_name = ref.original_name
+        else:
+            # Compatibility only: old aliases select candidate service metadata, never all schemas.
+            _fresh_user, _fresh_token, allowed = await self.principal(request)
+            candidates = [row for row in await catalog.rows(ids=allowed, metadata_only=True)
+                          if name.startswith((row.id + "__", (row.slug + "__")[:47]))]
+            row, original_name = None, None
+            for candidate in candidates:
+                scope = await catalog.index_scope(candidate, user.id if user else None)
+                if await catalog.index.has_scope(scope):
+                    continue  # Failed/stale new heads cannot fall back to a legacy ready cache.
+                for tool in catalog.cached_view(candidate, user.id if user else None)["tools"]:
+                    if name in {alias(candidate.slug, tool["name"]), candidate.id + "__" + tool["name"]}:
+                        if row is not None:
+                            raise GatewayError("catalog_route_conflict", "Gateway name has multiple authorized routes")
+                        row, original_name = candidate, tool["name"]
+            if row is None:
+                failure = self.failed_target(candidates, name, user.id if user else None)
+                if failure is not None:
+                    raise failure
+                raise GatewayError("tool_not_found", "Tool not found in authorized cache; ask an administrator to refresh")
+            row = await catalog.get(row.id)
+
+        async def authorize():
+            try:
+                fresh_user, fresh_token, allowed = await self.principal(request, target_id=row.id)
+            except HTTPException:
+                raise GatewayError("permission_revoked", "Gateway authorization changed") from None
+            fresh = await catalog.get(row.id)
+            if (owner(fresh_user, fresh_token, request) != identity or row.id not in allowed
+                    or fresh.revision != row.revision):
+                raise GatewayError("permission_revoked", "MCP permission or configuration changed")
+            if expected_scope and await catalog.index_scope(fresh, fresh_user.id if fresh_user else None) != expected_scope:
+                raise GatewayError("credential_changed", "MCP credentials changed during exact call")
+
+        await authorize()
+        try:
+            result = await catalog.call(
+                row, self.lease(request, user, token), original_name, arguments,
+                user=user, token=token, authorize=authorize,
+            )
         except ValidationError as exc:
             if discovery:
                 raise validation_error(exc, name=name) from None

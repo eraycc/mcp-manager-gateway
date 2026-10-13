@@ -105,10 +105,13 @@ async def admin_user(request: Request) -> User:
     return user
 
 
-async def effective_mcp_ids(db: Database, user: User, token: ApiToken | None = None) -> set[str]:
+async def effective_mcp_ids(db: Database, user: User, token: ApiToken | None = None,
+                            *, target_id: str | None = None) -> set[str]:
     if user.disabled:
         return set()
     statement = select(McpServer.id).where(McpServer.mode != "disabled")
+    if target_id is not None:
+        statement = statement.where(McpServer.id == target_id)
     if user.role != "admin" and user.scope_mode != "all":
         statement = statement.where(McpServer.id.in_(user.mcp_ids))
     if token and token.scope_mode != "all":
@@ -117,14 +120,17 @@ async def effective_mcp_ids(db: Database, user: User, token: ApiToken | None = N
         return set((await s.scalars(statement)).all())
 
 
-async def authenticate_token(request: Request):
+async def authenticate_token(request: Request, *, target_id: str | None = None):
     db = request.app.state.db
     header = request.headers.get("Authorization")
     if not header:
         if await get_setting(db, "token_auth_enabled", True):
             raise HTTPException(401, "Bearer token required", headers={"WWW-Authenticate": "Bearer"})
+        statement = select(McpServer.id).where(McpServer.mode != "disabled")
+        if target_id is not None:
+            statement = statement.where(McpServer.id == target_id)
         async with db.session() as s:
-            ids = set((await s.scalars(select(McpServer.id).where(McpServer.mode != "disabled"))).all())
+            ids = set((await s.scalars(statement)).all())
         if await get_setting(db, "anonymous_scope_mode", "selected") != "all":
             ids &= set(await get_setting(db, "anonymous_mcp_ids", []))
         return None, None, ids
@@ -137,7 +143,7 @@ async def authenticate_token(request: Request):
         user = await s.get(User, token.user_id) if token else None
         if not token or token.disabled or expired(token.expires_at) or not user or user.disabled:
             raise HTTPException(401, "Token revoked or expired")
-    return user, token, await effective_mcp_ids(db, user, token)
+    return user, token, await effective_mcp_ids(db, user, token, target_id=target_id)
 
 
 class Input(BaseModel):

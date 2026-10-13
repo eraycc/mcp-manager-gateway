@@ -90,3 +90,28 @@ async def test_configuration_change_during_embedding_discloses_no_resource(db_ap
     with pytest.raises(GatewayError) as caught:
         await asyncio.wait_for(task, 5)
     assert caught.value.code == "permission_revoked"
+
+
+async def test_credential_slot_change_during_embedding_discloses_no_resource(db_app, monkeypatch):
+    from mcp_manager.database import SystemSetting
+
+    row, _token, ctx = await resource_fixture(db_app)
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def scores(scope, documents, query, config, **kwargs):
+        entered.set()
+        await release.wait()
+        return {item["id"]: 0.9 for item in documents}, {"mode": "hybrid"}
+    monkeypatch.setattr(db_app.app.state.embeddings, "scores", scores)
+    task = asyncio.create_task(db_app.app.state.gateway._call_tool(ctx, SimpleNamespace(
+        name="gateway_list_resources", arguments={"keyword": "fixture"}
+    )))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        async with db_app.db.locked() as session:
+            key = db_app.app.state.catalog.credentials.key(row.id, "service")
+            session.add(SystemSetting(key=key, value=db_app.app.state.catalog.seal({"synthetic": "changed"})))
+    finally:
+        release.set()
+    with pytest.raises(GatewayError) as caught:
+        await asyncio.wait_for(task, 5)
+    assert caught.value.code == "permission_revoked"
