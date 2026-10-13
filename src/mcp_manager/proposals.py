@@ -203,6 +203,9 @@ def proposal_public(row, catalog, *, detail=False, reveal=False):
         "config_isolation": row.config_isolation,
         "rejection_reason": row.rejection_reason,
         "approved_mcp_id": row.approved_mcp_id,
+        "revision": row.revision,
+        "test_run_id": row.test_run_id,
+        "tested_revision": row.tested_revision,
         "test_status": row.test_status,
         "test_result": row.test_result or {},
         "test_error": row.test_error or "",
@@ -231,6 +234,7 @@ async def submit_proposals(app, user, token, value):
                 declared_capabilities=item["declared_capabilities"],
                 requested_permissions=item["requested_permissions"],
                 payload=app.state.catalog.seal(payload),
+                public_name=payload["name"],
                 status="pending",
             )
             session.add(row)
@@ -333,6 +337,14 @@ async def _configure(row, values, catalog, session=None):
             auth.pop("config_isolation", None)
     validate_service_config(payload["transport"], isolation or "service", payload["config"])
     row.payload = catalog.seal(payload)
+    row.public_name = payload["name"]
+    row.revision += 1
+    row.test_run_id = None
+    row.tested_revision = None
+    row.test_status = "pending"
+    row.test_result = {}
+    row.test_error = ""
+    row.tested_at = None
     row.status = "pending" if mode and isolation else "incomplete"
     row.updated_at = now()
 
@@ -351,31 +363,42 @@ async def configure(proposal_id: str, data: dict, request: Request, user=ADMIN):
         return proposal_public(row, request.app.state.catalog, detail=True)
 
 
-async def _persist_test_result(request, proposal_id, status, *, result=None, error=""):
+async def _persist_test_result(
+    request, proposal_id, status, *, result=None, error="", run_id=None, tested_revision=None
+):
+    from .proposal_service import finish_test
+
     async with request.app.state.db.locked() as session:
-        row = await session.get(McpProposal, proposal_id)
-        if not row:
-            raise HTTPException(404, "Proposal not found")
-        row.test_status = status
-        row.test_result = result or {}
-        row.test_error = error[:4000]
-        if status != "pending":
+        if run_id is None:
+            # Only a queued operation with no active/newer test may be cancelled here.
+            row = await session.get(McpProposal, proposal_id)
+            if not row or row.status in {"approved", "rejected"} or row.test_run_id is not None:
+                return False
+            row.test_status = status
+            row.test_error = error[:4000]
             row.tested_at = now()
-        row.updated_at = now()
+            row.updated_at = now()
+            return True
+        return await finish_test(
+            session, proposal_id, run_id=run_id, tested_revision=tested_revision,
+            result=result, status=status, error=error,
+        )
 
 
 async def run_proposal_test(request, proposal_id, user):
-    actor = await web_authorizer(request)()
+    from .proposal_service import begin_test
+
     catalog = request.app.state.catalog
-    async with request.app.state.db.session() as session:
+    async with request.app.state.db.locked() as session:
+        actor = await web_authorizer(request)(session)
         row = await session.get(McpProposal, proposal_id)
-    if not row:
-        raise HTTPException(404, "Proposal not found")
-    payload = catalog.unseal(row.payload)
-    isolation = row.isolation or "service"
-    if payload["config"].get("auth", {}).get("type") == "oauth":
-        raise HTTPException(409, OAUTH_TEST_MESSAGE)
-    await _persist_test_result(request, proposal_id, "pending")
+        if not row:
+            raise HTTPException(404, "Proposal not found")
+        payload = catalog.unseal(row.payload)
+        isolation = row.isolation or "service"
+        if payload["config"].get("auth", {}).get("type") == "oauth":
+            raise HTTPException(409, OAUTH_TEST_MESSAGE)
+        run_id, tested_revision = await begin_test(session, proposal_id)
     runtime = request.app.state.runtime
     lease = None
     try:
@@ -383,10 +406,7 @@ async def run_proposal_test(request, proposal_id, user):
         lease = runtime.create_lease(actor.id, "diagnostic", kind="maintenance")
         spec = ServerSpec(
             "diagnose-proposal-" + uuid4().hex,
-            payload["transport"],
-            payload["config"],
-            "lazy",
-            isolation,
+            payload["transport"], payload["config"], "lazy", isolation,
         )
         discovered = await runtime.discover(spec, lease.id)
         result = {
@@ -396,16 +416,25 @@ async def run_proposal_test(request, proposal_id, user):
             "template_count": len(discovered.get("templates", [])),
             "capability_errors": discovered.get("capability_errors", []),
         }
-        await _persist_test_result(request, proposal_id, "success", result=result)
-        return {"ok": True, **result, "capabilities": discovered}
+        await web_authorizer(request)()
+        published = await _persist_test_result(
+            request, proposal_id, "success", result=result, run_id=run_id, tested_revision=tested_revision
+        )
+        if not published:
+            return {"ok": False, "status": "superseded", "run_id": run_id, "tested_revision": tested_revision}
+        return {"ok": True, **result, "capabilities": discovered,
+                "run_id": run_id, "tested_revision": tested_revision}
     except asyncio.CancelledError:
         await asyncio.shield(_persist_test_result(
-            request, proposal_id, "cancelled", error="Operation cancelled"
+            request, proposal_id, "cancelled", error="Operation cancelled",
+            run_id=run_id, tested_revision=tested_revision,
         ))
         raise
     except Exception as exc:
         error = str(getattr(exc, "detail", exc)) or type(exc).__name__
-        await _persist_test_result(request, proposal_id, "failed", error=error)
+        await _persist_test_result(
+            request, proposal_id, "failed", error=error, run_id=run_id, tested_revision=tested_revision
+        )
         raise
     finally:
         if lease:
@@ -505,6 +534,7 @@ async def reject(proposal_id: str, data: dict, request: Request, user=ADMIN):
         if row.status == "approved":
             raise HTTPException(409, "Approved proposal cannot be rejected")
         row.status = "rejected"
+        row.test_run_id = None
         row.rejection_reason = reason[:4000]
         row.updated_at = now()
         await session.flush()

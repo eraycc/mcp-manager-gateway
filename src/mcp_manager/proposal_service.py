@@ -61,3 +61,40 @@ async def approve_proposal(session, proposal_id, *, actor, expected_revision, ca
     row.updated_at = now()
     await session.flush()
     return created
+
+
+async def begin_test(session, proposal_id):
+    from uuid import uuid4
+
+    row = await session.get(McpProposal, proposal_id, populate_existing=True)
+    if not row:
+        raise HTTPException(404, "Proposal not found")
+    if row.status in {"approved", "rejected"}:
+        raise HTTPException(409, "Finalized proposal cannot be tested")
+    run_id = str(uuid4())
+    row.test_run_id = run_id
+    row.tested_revision = None
+    row.test_status = "pending"
+    row.test_result = {}
+    row.test_error = ""
+    row.tested_at = None
+    row.updated_at = now()
+    await session.flush()
+    return run_id, row.revision
+
+
+async def finish_test(session, proposal_id, *, run_id, tested_revision, result=None, status, error=""):
+    row = await session.get(McpProposal, proposal_id, populate_existing=True)
+    if (
+        not row or row.status in {"approved", "rejected"}
+        or row.revision != tested_revision or row.test_run_id != run_id
+    ):
+        return False
+    row.test_status = status
+    row.tested_revision = tested_revision
+    row.test_result = result or {}
+    row.test_error = error[:4000]
+    row.tested_at = now()
+    row.updated_at = now()
+    await session.flush()
+    return True
