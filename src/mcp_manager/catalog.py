@@ -861,6 +861,7 @@ class Catalog:
             await authorize()
         row = await self.get(server_id)
         lease, spec = None, None
+        had_ready = self.cached(row, user_id)["cache_status"] == "ready"
         try:
             spec = await self.spec(row, user_id, allow_failed=True)
             scope = await self.index_scope(row, user_id)
@@ -871,11 +872,23 @@ class Catalog:
             )
             if authorize:
                 await authorize()
-            if await self.index_scope(await self.get(server_id), user_id) != scope:
+            current = await self.get(server_id)
+            if await self.index_scope(current, user_id) != scope:
                 raise GatewayError("credential_changed", "MCP scope changed while publishing capabilities")
+            cached = self.cached(current, user_id)
+            cached.update(
+                cache_status="ready", cache_at=now().isoformat(), cache_attempt_at=now().isoformat(),
+                cache_error=None, cache_error_code=None, runtime_status="stopped",
+                startup_failure_count=0, last_startup_error_code=None, last_startup_error=None,
+                last_startup_failure_at=None, last_refresh_error_code=None,
+                last_refresh_error=None, last_refresh_failure_at=None,
+            )
+            self.save_cache(current, cached, user_id)
             return result
         except Exception as exc:  # noqa: BLE001 - normalize third-party transport errors
-            raise safe_gateway_error(exc, config=spec.config if spec else self.unseal(row.config)) from None
+            exc = safe_gateway_error(exc, config=spec.config if spec else self.unseal(row.config))
+            failure = await self.record_refresh_failure(row, exc, user_id, had_ready=had_ready)
+            raise failure
         finally:
             if lease:
                 await self.runtime.release(lease.id)

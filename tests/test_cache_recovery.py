@@ -88,7 +88,12 @@ async def test_explicit_admin_retry_recovers_failed_service(tmp_path, action):
         assert public["status"] in {"ready", "stopped"}
         assert public["startup_failure_count"] == 0
         assert app.state.catalog.cached(current)["cache_status"] == "ready"
-        assert len(app.state.catalog.cached(current)["tools"]) == 1
+        if action == "refresh":
+            capabilities = await web.get(f"/api/v1/mcps/{row.id}/capabilities?kind=tools")
+            assert capabilities.status_code == 200
+            assert capabilities.json()["total"] == 1
+        else:
+            assert len(app.state.catalog.cached(current)["tools"]) == 1
 
 
 @pytest.mark.parametrize("action", ["refresh", "start"])

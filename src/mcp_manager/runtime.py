@@ -512,7 +512,18 @@ class Runtime:
             if business:
                 instance.last_activity = self.clock()
             dispatched = True
-            method = getattr(instance.connection, operation)
+            method = getattr(instance.connection, operation, None)
+            if method is None and operation == "ingest_catalog":
+                from .transports import DiscoveryBudget, ingest_capabilities
+
+                async def method(store, scope, operation_authorize=None):
+                    return await ingest_capabilities(
+                        instance.connection, store, scope,
+                        budget=DiscoveryBudget.from_config(spec.config),
+                        authorize=operation_authorize,
+                    )
+            if method is None:
+                raise GatewayError("unsupported_operation", f"MCP does not support {operation}")
             timeout = float(spec.config.get("call_timeout", 60))
             return await asyncio.wait_for(method(*args), timeout)
         except GatewayError as exc:
