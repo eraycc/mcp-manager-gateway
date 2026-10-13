@@ -1,0 +1,28 @@
+# Isolated development targets only; never mount a business database.
+services:
+  mysql80:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: mmg-test-only
+      MYSQL_DATABASE: mmg_test_external
+      MYSQL_ROOT_HOST: "%"
+    ports: ["127.0.0.1::3306"]
+    tmpfs: ["/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 2s
+      timeout: 2s
+      retries: 90
+  mysql84:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: mmg-test-only
+      MYSQL_DATABASE: mmg_test_external
+      MYSQL_ROOT_HOST: "%"
+    ports: ["127.0.0.1::3306"]
+    tmpfs: ["/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 2s
+      timeout: 2s
+      retries: 90

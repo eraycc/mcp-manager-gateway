@@ -1,8 +1,6 @@
 import asyncio
-import os
 
 import httpx
-import pytest
 from sqlalchemy import select
 
 from mcp_manager.app import create_app
@@ -10,11 +8,11 @@ from mcp_manager.cli import migrate_database
 from mcp_manager.config import Settings
 from mcp_manager.database import Database, User
 
-URL = os.environ.get("MCP_TEST_MYSQL_URL")
-pytestmark = pytest.mark.skipif(not URL, reason="MCP_TEST_MYSQL_URL is not set")
 
 
-async def test_sqlite_mysql_round_trip_and_first_admin_race(tmp_path):
+
+async def test_sqlite_database_round_trip_and_first_admin_race(tmp_path, db_settings, db_backend):
+    target_mysql_url = db_settings.database_url
     source = Settings(data_dir=tmp_path / "source", secret_key="migration-test-key")
     app = create_app(source)
     async with app.router.lifespan_context(app):
@@ -26,8 +24,8 @@ async def test_sqlite_mysql_round_trip_and_first_admin_race(tmp_path):
             row = (await client.post("/api/v1/mcps", json={"name": "sealed", "transport": "stdio",
                     "config": {"command": "uv", "args": ["--version"], "env": {"SECRET": "preserved"}}})).json()
             token = (await client.post("/api/v1/tokens", json={"name": "migration", "scope_mode": "all"})).json()
-    await migrate_database(source, URL)
-    mysql = Settings(data_dir=tmp_path / "mysql", database_url=URL, secret_key=source.secret_key)
+    await migrate_database(source, target_mysql_url)
+    mysql = Settings(data_dir=tmp_path / "mysql", database_url=target_mysql_url, secret_key=source.secret_key)
     app2 = create_app(mysql)
     async with app2.router.lifespan_context(app2):
         imported = await app2.state.catalog.get(row["id"])
