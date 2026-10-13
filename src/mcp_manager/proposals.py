@@ -464,58 +464,29 @@ async def batch(data: dict, request: Request, user=ADMIN):
 
 @router.post("/{proposal_id}/approve")
 async def approve(proposal_id: str, data: dict, request: Request, user=ADMIN):
-    await web_authorizer(request)()
+    from sqlalchemy.exc import IntegrityError
+    from .proposal_service import approve_proposal
+
     db, catalog = request.app.state.db, request.app.state.catalog
-    async with db.session() as session:
-        row = await session.get(McpProposal, proposal_id)
-        if not row:
-            raise HTTPException(404, "Proposal not found")
-        if row.status == "approved":
-            return proposal_public(row, catalog)
-        if row.status == "rejected":
-            raise HTTPException(409, "Rejected proposal cannot be approved")
-        payload = catalog.unseal(row.payload)
-        mode = data.get("mode") or row.mode or "lazy"
-        isolation = data.get("isolation") or row.isolation or "service"
-        config_isolation = data.get("config_isolation") or row.config_isolation
-    config = deepcopy(payload["config"])
-    if config.get("auth", {}).get("type") == "oauth":
-        validate_proposal_oauth(config["auth"])
-        if config_isolation:
-            config["auth"]["config_isolation"] = config_isolation
-        else:
-            config["auth"].pop("config_isolation", None)
-    canonical = json.dumps(
-        {"transport": payload["transport"], "config": config, "isolation": isolation},
-        sort_keys=True, ensure_ascii=False, separators=(",", ":"),
-    )
-    for existing in await catalog.rows():
-        existing_config = await catalog.credentials.materialize(existing, user.id, require=False)
-        candidate = json.dumps(
-            {"transport": existing.transport, "config": existing_config, "isolation": existing.isolation},
-            sort_keys=True, ensure_ascii=False, separators=(",", ":"),
-        )
-        if candidate == canonical:
-            raise HTTPException(409, "An identical MCP service already exists")
-    created = await catalog.create(
-        {**payload, "config": config, "mode": mode, "isolation": isolation},
-        authorize=web_authorizer(request),
-        user_id=user.id,
-    )
-    async with db.locked() as session:
-        await web_authorizer(request)(session)
-        row = await session.get(McpProposal, proposal_id)
-        if row.status in {"approved", "rejected"}:
-            raise HTTPException(409, "Proposal was finalized concurrently")
-        row.status = "approved"
-        row.mode = mode
-        row.isolation = isolation
-        row.config_isolation = config_isolation
-        row.approved_mcp_id = created.id
-        row.updated_at = now()
-        await session.flush()
-        result = proposal_public(row, catalog)
-    await request.app.state.logs.audit("mcp.proposal.approve", user.id, {
+    created = None
+    try:
+        async with db.locked() as session:
+            actor = await web_authorizer(request)(session)
+            row = await session.get(McpProposal, proposal_id)
+            if not row:
+                raise HTTPException(404, "Proposal not found")
+            if row.status == "approved":
+                return proposal_public(row, catalog)
+            created = await approve_proposal(
+                session, proposal_id, actor=actor, expected_revision=data.get("revision"),
+                catalog=catalog, values=data,
+            )
+            result = proposal_public(row, catalog)
+    except IntegrityError:
+        raise HTTPException(409, "MCP slug already exists") from None
+    catalog.runtime.versions[created.id] = created.revision
+    await catalog.refresh_after_change(created, actor.id, web_authorizer(request))
+    await request.app.state.logs.audit("mcp.proposal.approve", actor.id, {
         "proposal_id": proposal_id, "mcp_id": created.id,
     })
     return result

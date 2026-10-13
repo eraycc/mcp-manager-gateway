@@ -604,59 +604,50 @@ class Catalog:
         if "description" in values and not isinstance(values["description"], str):
             raise ValueError("Description must be a string")
 
-    async def create(self, values, *, authorize=None, user_id=None):
+    async def create_in_session(self, session, values, *, user_id=None):
+        """Create local rows only; caller owns the transaction and post-commit discovery."""
         values = dict(values)
         self.validate_metadata(values)
         transport = values.get("transport", "stdio")
-        if transport == "http":
-            transport = "streamable-http"
+        transport = "streamable-http" if transport == "http" else transport
         config = values.get("config", {})
         mode = values.get("mode", "lazy")
         isolation = values.get("isolation", "service")
         if mode not in {"eager", "lazy", "disabled"}:
             raise ValueError("Invalid mode")
         validate_service_config(transport, isolation, config)
-        name = values.get("name", "").strip()
-        if not name or len(name) > 128:
-            raise ValueError("Name must contain 1–128 characters")
+        name = values["name"].strip()
         requested_slug = values.get("slug")
         if requested_slug:
             validate_slug(requested_slug)
+            slug = requested_slug
+        else:
+            base, suffix = slug_base(name), 2
+            slug = base
+            while await session.scalar(select(McpServer.id).where(McpServer.slug == slug)):
+                tail = "-" + str(suffix)
+                slug = base[:64 - len(tail)].rstrip("-") + tail
+                suffix += 1
+        row = McpServer(
+            id=str(uuid4()), name=name, slug=slug,
+            description=values.get("description", ""), tags=values.get("tags", []),
+            transport=transport, mode=mode, isolation=isolation, config=self.seal({}),
+        )
+        session.add(row)
+        await session.flush()
+        stored = await self.credentials.persist_config(session, row, config, isolation, user_id)
+        row.config = self.seal(stored)
+        await session.flush()
+        return row
+
+    async def create(self, values, *, authorize=None, user_id=None):
         try:
-            async with self.db.locked() as s:
+            async with self.db.locked() as session:
                 if authorize:
-                    await authorize(s)
-                if requested_slug:
-                    slug = requested_slug
-                else:
-                    base = slug_base(name)
-                    existing = set((await s.scalars(select(McpServer.slug))).all())
-                    slug = base
-                    suffix = 2
-                    while slug in existing:
-                        tail = "-" + str(suffix)
-                        slug = base[:64 - len(tail)].rstrip("-") + tail
-                        suffix += 1
-                row = McpServer(
-                    id=str(uuid4()),
-                    name=name,
-                    slug=slug,
-                    description=values.get("description", ""),
-                    tags=values.get("tags", []),
-                    transport=transport,
-                    mode=mode,
-                    isolation=isolation,
-                    config=self.seal({}),
-                )
-                s.add(row)
-                await s.flush()
-                stored = await self.credentials.persist_config(
-                    s, row, config, isolation, user_id
-                )
-                row.config = self.seal(stored)
-                await s.flush()
+                    await authorize(session)
+                row = await self.create_in_session(session, values, user_id=user_id)
         except IntegrityError:
-            raise HTTPException(409, "MCP slug already exists")
+            raise HTTPException(409, "MCP slug already exists") from None
         self.runtime.versions[row.id] = row.revision
         await self.refresh_after_change(row, user_id, authorize)
         return await self.get(row.id)
