@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {api,allPages,errorText,watchJob} from '../../src/mcp_manager/static/core.js';
+import {abortableDelay,api,allPages,errorText,jobProgressModel,previewJson,watchJob} from '../../src/mcp_manager/static/core.js';
+import {CAPABILITY_PAGE_SIZE,capabilityDetailUrl,capabilityListUrl} from '../../src/mcp_manager/static/capability-browser.js';
+import {importPage} from '../../src/mcp_manager/static/importer.js';
 
 test('mutations send cookie CSRF token and JSON with same-origin credentials', async()=>{
   globalThis.document={cookie:'other=x; mcp_csrf=abc%2Fdef'};
@@ -51,3 +53,41 @@ test('abort signal reaches fetch without being swallowed',async()=>{
 });
 
 test('interrupted restored jobs are terminal',async()=>{globalThis.fetch=async()=>{throw new Error('must not poll')};const job={id:'restored',status:'interrupted'};assert.equal(await watchJob(job),job)});
+
+test('large capability views stay on a fifty-item summary page and encode exact details',()=>{
+  assert.equal(CAPABILITY_PAGE_SIZE,50);
+  const url=new URL(capabilityListUrl('/mcps/service/capabilities',{kind:'tools',q:'中文 / tool',cursor:'next',limit:1000}),'http://localhost');
+  assert.equal(url.searchParams.get('limit'),'50');
+  assert.equal(url.searchParams.get('q'),'中文 / tool');
+  assert.equal(url.searchParams.get('cursor'),'next');
+  assert.equal(capabilityDetailUrl('/mcps/service/capabilities','tools','folder/name'),'/mcps/service/capabilities/tools/folder%2Fname');
+});
+
+test('job progress model contains counters only and clamps invalid progress',()=>{
+  assert.deepEqual(jobProgressModel({status:'running',total:10,completed:12,succeeded:8,failed:2,results:['large']}),{
+    total:10,completed:10,succeeded:8,failed:2,cancelled:0,percent:100,status:'running',terminal:false,error:''
+  });
+});
+
+test('automatic JSON previews remain within their byte budget',()=>{
+  const preview=previewJson({text:'中'.repeat(100_000)},65536);
+  assert.equal(preview.truncated,true);
+  assert.ok(new TextEncoder().encode(preview.text).length<=65536);
+});
+
+test('ten thousand imports only expose the current fifty-row window',()=>{
+  const entries=Array.from({length:10_000},(_,index)=>({item:{name:'service-'+String(index).padStart(5,'0')},status:'未诊断'}));
+  const first=importPage(entries,'',1);
+  assert.equal(first.items.length,50);
+  assert.equal(first.total,10_000);
+  assert.equal(first.pages,200);
+  const filtered=importPage(entries,'service-09999',1);
+  assert.equal(filtered.items.length,1);
+});
+
+test('abortable delay removes its listener after an ordinary tick',async()=>{
+  const listeners=new Set();
+  const signal={aborted:false,addEventListener(_name,fn){listeners.add(fn)},removeEventListener(_name,fn){listeners.delete(fn)}};
+  await abortableDelay(0,signal);
+  assert.equal(listeners.size,0);
+});

@@ -50,15 +50,32 @@ async def running_gateway(tmp_path, monkeypatch):
 
 
 async def login(page, url, *, keep_update_dialog=False):
-    await page.goto(url)
-    await page.get_by_label("用户名", exact=True).fill("admin")
-    await page.get_by_label("密码", exact=True).fill("password12345")
-    await page.get_by_role("button", name="登录", exact=True).click()
-    await expect(page.get_by_role("heading", name="仪表盘", exact=True)).to_be_visible()
-    update_dialog = page.get_by_role("dialog", name="发现新版本", exact=True)
+    browser_errors = []
+
+    def record_page_error(error):
+        browser_errors.append(f"{error}; stack={getattr(error, 'stack', None)}")
+
+    page.on("pageerror", record_page_error)
+    page.on("console", lambda message: browser_errors.append(message.text) if message.type == "error" else None)
+    page.on("requestfailed", lambda request: browser_errors.append(f"request failed: {request.url}: {request.failure}"))
+    response = await page.goto(url)
+    username = page.locator('input[autocomplete="username"]')
+    try:
+        await username.wait_for(timeout=5000)
+    except Exception as exc:
+        body = (await page.locator("body").inner_text())[:1000]
+        raise AssertionError(
+            f"console did not initialize: status={response.status if response else None}; "
+            f"errors={browser_errors}; body={body!r}"
+        ) from exc
+    await username.fill("admin")
+    await page.locator('input[autocomplete="current-password"]').fill("password12345")
+    await page.locator(".auth form button[type=submit]").click()
+    await expect(page.locator(".stats")).to_be_visible()
+    update_dialog = page.locator("dialog").first
     await expect(update_dialog).to_be_visible(timeout=5000)
     if not keep_update_dialog:
-        await update_dialog.get_by_role("button", name="关闭", exact=True).click()
+        await update_dialog.locator(".dialog-head button").click()
 
 
 @pytest.mark.asyncio

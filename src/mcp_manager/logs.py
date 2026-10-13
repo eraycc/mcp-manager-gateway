@@ -8,7 +8,7 @@ import os
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -72,13 +72,13 @@ class LogStore:
         event = redact(dict(event))
         event.setdefault("id", uuid.uuid4().hex)
         event["event_id"] = uuid.uuid4().hex
-        event.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
-        event["timestamp"] = self.normalize_time(event["timestamp"], default_timezone=timezone.utc)
+        event.setdefault("timestamp", datetime.now(UTC).isoformat())
+        event["timestamp"] = self.normalize_time(event["timestamp"], default_timezone=UTC)
         event.setdefault("source", "gateway")
         event.setdefault("duration_ms", 0)
-        stamp = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
+        stamp = datetime.fromisoformat(event["timestamp"])
         if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=timezone.utc)
+            stamp = stamp.replace(tzinfo=UTC)
         path = self.root / (stamp.astimezone(self.timezone).strftime("%Y-%m-%d") + ".jsonl")
         raw = (json.dumps(event, ensure_ascii=False, default=str) + "\n").encode("utf-8")
         with self.lock:
@@ -111,7 +111,7 @@ class LogStore:
                   "mcp_name", "tool_name", "status", "source", "duration_ms")
         self.conn.execute("INSERT OR REPLACE INTO calls VALUES(" + ",".join("?" * 15) + ")",
                           [event["id"], path.name, offset, size] + [
-                              self.normalize_time(event["timestamp"], default_timezone=timezone.utc)
+                              self.normalize_time(event["timestamp"], default_timezone=UTC)
                               if f == "timestamp" else event.get(f) for f in fields])
 
     def _set_offset(self, path, offset):
@@ -179,12 +179,12 @@ class LogStore:
     @staticmethod
     def normalize_time(value, *, default_timezone):
         try:
-            stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            stamp = datetime.fromisoformat(value)
         except (ValueError, TypeError, AttributeError) as exc:
             raise ValueError("Log time must be a valid ISO 8601 date/time") from exc
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=default_timezone)
-        return stamp.astimezone(timezone.utc).isoformat(timespec="microseconds")
+        return stamp.astimezone(UTC).isoformat(timespec="microseconds")
 
     def _where(self, filters):
         sql, values = [], []
@@ -219,8 +219,55 @@ class LogStore:
             rows = self.conn.execute("SELECT * FROM calls" + where +
                 " ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?",
                 values + [page_size, (page - 1) * page_size]).fetchall()
-            items = [{k: r[k] for k in r.keys() if k not in ("path", "offset", "size")} for r in rows]
+            items = [{k: r[k] for k in r if k not in ("path", "offset", "size")} for r in rows]
         return {"items": items, "total": total, "page": page, "page_size": page_size, "total_pages": pages}
+
+    async def reference(self, id, *, user_id=None):
+        return await asyncio.to_thread(self._reference, id, user_id)
+
+    def _reference(self, id, user_id):
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM calls WHERE id=?", [id]).fetchone()
+            if not row or user_id is not None and row["user_id"] != user_id:
+                return None
+            return {
+                "id": row["id"],
+                "path": self.root / row["path"],
+                "offset": row["offset"],
+                "size": row["size"],
+                "user_id": row["user_id"],
+            }
+
+    async def preview(self, id, *, user_id=None, max_bytes=65536):
+        reference = await self.reference(id, user_id=user_id)
+        if not reference:
+            return None
+        def read():
+            with reference["path"].open("rb") as source:
+                source.seek(reference["offset"])
+                raw = source.read(min(reference["size"], max_bytes) + 1)
+            return raw
+        raw = await asyncio.to_thread(read)
+        truncated = reference["size"] > max_bytes
+        return {
+            "preview": raw[:max_bytes].decode("utf-8", errors="ignore"),
+            "truncated": truncated,
+            "size_bytes": reference["size"],
+        }
+
+    async def download_chunks(self, reference, *, chunk_size=65536):
+        source = await asyncio.to_thread(reference["path"].open, "rb")
+        remaining = reference["size"]
+        try:
+            await asyncio.to_thread(source.seek, reference["offset"])
+            while remaining:
+                chunk = await asyncio.to_thread(source.read, min(chunk_size, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+        finally:
+            await asyncio.to_thread(source.close)
 
     async def detail(self, id, *, user_id=None):
         return await asyncio.to_thread(self._detail, id, user_id)
@@ -343,7 +390,7 @@ class LogStore:
     def _audit(self, action, user_id, details):
         path = self.root / "audit"
         path.mkdir(exist_ok=True)
-        event = {"event_id": uuid.uuid4().hex, "timestamp": datetime.now(timezone.utc).isoformat(),
+        event = {"event_id": uuid.uuid4().hex, "timestamp": datetime.now(UTC).isoformat(),
                  "action": action, "user_id": user_id, "details": redact(details)}
         with self.lock, (path / (datetime.now(self.timezone).strftime("%Y-%m-%d") + ".jsonl")).open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")

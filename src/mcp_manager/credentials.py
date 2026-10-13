@@ -150,7 +150,7 @@ class CredentialStore:
         await self.write(session, row.id, owner, payload)
         return owner
 
-    async def status(self, row, user_id: str | None) -> dict:
+    async def status(self, row, user_id: str | None, session=None) -> dict:
         """Return the profile-facing credential state and action."""
         config = self.catalog.unseal(row.config)
         auth = config.get("auth", {"type": "none"})
@@ -168,7 +168,8 @@ class CredentialStore:
             return result
 
         owner = credential_owner(row.isolation, user_id)
-        personal = await self.load(row.id, owner)
+        personal = (await self._load(session, row.id, owner) if session is not None
+                    else await self.load(row.id, owner))
         if auth_type == "bearer":
             configured = bool(personal.get("auth_config", {}).get("token"))
             if not configured:
@@ -176,7 +177,10 @@ class CredentialStore:
         else:
             ownership = config_isolation(config)
             config_payload = (
-                personal if ownership == "user" else await self.load(row.id, "service")
+                personal if ownership == "user" else (
+                    await self._load(session, row.id, "service") if session is not None
+                    else await self.load(row.id, "service")
+                )
             )
             if not config_payload.get("auth_config"):
                 return result | {"state": "missing", "action": "configure_oauth"}

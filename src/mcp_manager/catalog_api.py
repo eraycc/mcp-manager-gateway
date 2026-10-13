@@ -62,7 +62,8 @@ def lightweight_public(cat, row, user_id):
 
 @router.get("/mcps")
 async def listing(request: Request, q: str = "", page: int = 1, page_size: int = 20,
-                  mode: str = "", transport: str = "", status: str = "", user=USER):
+                  mode: str = "", transport: str = "", status: str = "",
+                  enabled_only: bool = False, user=USER):
     from sqlalchemy import Text, cast, func, or_, select
     from sqlalchemy.orm import load_only
 
@@ -77,6 +78,8 @@ async def listing(request: Request, q: str = "", page: int = 1, page_size: int =
         filters.append(McpServer.id.in_(actor.mcp_ids))
     if mode:
         filters.append(McpServer.mode == mode)
+    if enabled_only:
+        filters.append(McpServer.mode != "disabled")
     if transport:
         filters.append(McpServer.transport == transport)
     if q:
@@ -282,7 +285,17 @@ async def diagnose(data: dict, request: Request, user=ADMIN):
             value = await runtime.discover(spec, lease.id)
             from .http_budget import ensure_json_budget
 
-            await ensure_json_budget(value, max_bytes=1048576)
+            if data.get("summary"):
+                value = {
+                    "tool_count": len(value.get("tools", [])),
+                    "resource_count": len(value.get("resources", [])),
+                    "prompt_count": len(value.get("prompts", [])),
+                    "template_count": len(value.get("templates", [])),
+                    "capability_errors": value.get("capability_errors", []),
+                }
+                await ensure_json_budget(value, max_bytes=16384)
+            else:
+                await ensure_json_budget(value, max_bytes=1048576)
             await web_authorizer(request)()
             return value
         except Exception as exc:

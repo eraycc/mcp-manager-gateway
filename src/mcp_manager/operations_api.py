@@ -157,6 +157,35 @@ async def rebuild_logs(request: Request, user=ADMIN):
     return await request.app.state.jobs.submit("logs.rebuild", ["index"], operation, user.id)
 
 
+@router.get("/logs/{log_id}/preview")
+async def log_preview(log_id: str, request: Request, user=USER):
+    result = await request.app.state.logs.preview(
+        log_id, user_id=None if user.role == "admin" else user.id, max_bytes=65536)
+    if not result:
+        raise HTTPException(404, "Log not found")
+    fresh = await current_user(request)
+    if fresh.role != "admin" and fresh.id != user.id:
+        raise HTTPException(404, "Log not found")
+    return result
+
+
+@router.get("/logs/{log_id}/download")
+async def log_download(log_id: str, request: Request, user=USER):
+    store = request.app.state.logs
+    reference = await store.reference(log_id, user_id=None if user.role == "admin" else user.id)
+    if not reference:
+        raise HTTPException(404, "Log not found")
+    async def stream():
+        async for chunk in store.download_chunks(reference):
+            fresh = await current_user(request)
+            if fresh.role != "admin" and reference["user_id"] != fresh.id:
+                return
+            yield chunk
+    return StreamingResponse(stream(), media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="mcp-log.json"',
+                 "Cache-Control": "private, no-store"})
+
+
 @router.get("/logs/{log_id}")
 async def log_detail(log_id: str, request: Request, user=USER):
     result = await request.app.state.logs.detail(log_id, user_id=None if user.role == "admin" else user.id)

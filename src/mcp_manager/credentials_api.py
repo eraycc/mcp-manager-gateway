@@ -2,6 +2,7 @@
 import copy
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import select
 
 from .catalog import restore
 from .catalog_api import permitted
@@ -49,6 +50,29 @@ def personal_authorizer(request, server_id: str, revision: int):
         return user
 
     return authorize
+
+
+@router.post("/mcps/credentials/status-batch")
+async def credential_status_batch(data: dict, request: Request, user=USER):
+    ids = data.get("ids")
+    if not isinstance(ids, list) or len(ids) > 50 or any(not isinstance(item, str) or not item for item in ids):
+        raise HTTPException(422, "ids must contain at most 50 non-empty strings")
+    requested = list(dict.fromkeys(ids))
+    async with request.app.state.db.locked() as session:
+        actor = await revalidate_user(request, session)
+        allowed = requested
+        if actor.role != "admin" and actor.scope_mode != "all":
+            permitted_ids = set(actor.mcp_ids)
+            allowed = [item for item in requested if item in permitted_ids]
+        rows = (await session.scalars(select(McpServer).where(McpServer.id.in_(allowed)))).all() if allowed else []
+        by_id = {row.id: row for row in rows}
+        items = []
+        for identity in allowed:
+            row = by_id.get(identity)
+            if row is not None:
+                status = await request.app.state.credentials.status(row, actor.id, session=session)
+                items.append({"id": identity, **status})
+    return {"items": items}
 
 
 @router.get("/mcps/{server_id}/credentials/status")
