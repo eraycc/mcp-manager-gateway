@@ -304,6 +304,8 @@ class Discovery:
                 description, description_source = service_description(row.description, preview)
                 count, status = len(cache["tools"]), cache["cache_status"]
             failure = catalog.failure_details(row, user.id if user else None)
+            if failure["status"] == "failed":
+                names, count, status = [], 0, "error"
             item = {
                 "id": row.id, "mcp": row.id, "name": row.name, "slug": row.slug,
                 "description": description, "description_source": description_source,
@@ -365,7 +367,7 @@ class Discovery:
             await authorize()
             return builder.finish()
         row_by_id = {row.id: row for row in rows}
-        selected_rows = [row_by_id[item["id"]] for item in selected]
+        selected_rows = [row_by_id[item["id"]] for item in selected if item["status"] != "failed"]
         legacy = [row for row in selected_rows if row.id not in indexed
                   and catalog.cached_view(row, user.id if user else None)["tools"]]
         if not legacy:

@@ -2,6 +2,8 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from catalog_fixture import catalog_tools
+from starlette.requests import Request
 from test_bug1_catalog import console
 from test_discovery_failure_policy import Upstream
 
@@ -87,7 +89,7 @@ async def test_refresh_discovery_failure_preserves_ready_cache_and_status(tmp_pa
         cache = app.state.catalog.cached(current)
         public = app.state.catalog.public(current, user_id=actor["id"])
         assert cache["cache_status"] == "ready"
-        assert [tool["name"] for tool in cache["tools"]] == ["first"]
+        assert [tool["name"] for tool in await catalog_tools(app, current)] == ["first"]
         assert cache["last_refresh_error"] == "tools/list failed"
         assert public["status"] == "stopped"
         assert public["startup_failure_count"] == 0
@@ -136,13 +138,13 @@ async def test_ready_empty_cache_is_preserved_on_refresh_failure(tmp_path):
 
 
 async def test_status_filter_and_failed_agent_summary(tmp_path):
-    async with console(tmp_path) as (app, web, actor):
+    async with console(tmp_path) as (app, web, _actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
         failed = await app.state.catalog.create(
             {"name": "failed service", "slug": "failed", "config": {"command": "fake"}}
         )
-        disabled = await app.state.catalog.create(
+        await app.state.catalog.create(
             {"name": "disabled service", "slug": "disabled", "mode": "disabled",
              "config": {"command": "fake"}}
         )
@@ -165,15 +167,15 @@ async def test_status_filter_and_failed_agent_summary(tmp_path):
         assert [item["id"] for item in listing["items"]] == [failed.id]
         assert listing["items"][0]["mode"] == "lazy"
 
-        user = SimpleNamespace(id=actor["id"], username="admin")
-        token = SimpleNamespace(id="token", discovery_mode="discovery",
-                                enable_resource_tools=False, enable_mcp_proposal=False)
-
-        async def principal(request):
-            return user, token, [failed.id, disabled.id]
-
-        app.state.gateway.principal = principal
-        request = SimpleNamespace(headers={})
+        created = await web.post("/api/v1/tokens", json={
+            "name": "failure-discovery", "discovery_mode": "discovery",
+            "scope_mode": "all",
+        })
+        assert created.status_code == 200, created.text
+        request = Request({
+            "type": "http", "method": "POST", "path": "/mcp", "app": app,
+            "headers": [(b"authorization", ("Bearer " + created.json()["token"]).encode())],
+        })
         search = await app.state.gateway.call_tool(
             SimpleNamespace(request=request),
             SimpleNamespace(name="gateway_search_mcps", arguments={"query": "*"}),
@@ -186,6 +188,16 @@ async def test_status_filter_and_failed_agent_summary(tmp_path):
         assert summary["failure_reason"] == "connection refused"
         assert summary["failure_scope"] == "global"
         assert summary["tools_list"] == []
+        assert summary["tool_count"] == 0 and summary["catalog_status"] == "error"
+        tools = await app.state.gateway.call_tool(
+            SimpleNamespace(request=request),
+            SimpleNamespace(name="gateway_search_tools", arguments={"mcp": failed.id}),
+        )
+        assert tools.structured_content["tools"] == []
+        native = await app.state.gateway.native_page(
+            SimpleNamespace(request=request), SimpleNamespace(cursor=None), kind="tools",
+        )
+        assert native.tools == []
 
         known = await app.state.gateway.call_tool(
             SimpleNamespace(request=request),

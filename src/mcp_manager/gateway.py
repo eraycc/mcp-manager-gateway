@@ -404,20 +404,34 @@ class Gateway:
                 raise ValueError("gateway_read_resource requires only uri")
             rows = await self.app.state.catalog.rows(ids=(await self.principal(request))[2], metadata_only=True)
             return await self.read_resource_tool(request, user, token, rows, str(arguments["uri"]))
+        if discovery and name in {"gateway_search", "gateway_inspect"}:
+            query = arguments.get("query", "") if name == "gateway_search" else arguments.get("name", "")
+            options = {"tool": query, "limit": arguments.get("limit", 50) if name == "gateway_search" else 1}
+            if name == "gateway_search":
+                options["names_only"] = True
+            if arguments.get("cursor"):
+                options["cursor"] = arguments["cursor"]
+            result = await self.discovery.search("gateway_search_tools", options, request)
+            body = result.structured_content
+            if name == "gateway_inspect":
+                exact = next((tool for tool in body["tools"] if tool["gateway_name"] == query), None)
+                if exact is None:
+                    raise ValueError("Tool not found in authorized catalog")
+                return result_json(dict(exact, name=query))
+            matches = [
+                {"name": tool["gateway_name"], "description": tool.get("description", ""),
+                 "mcp": next((row["name"] for row in body["mcps"]
+                              if alias(row["slug"], tool["name"]) == tool["gateway_name"]), "")}
+                for tool in body["tools"]
+            ]
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=json.dumps(matches, ensure_ascii=False))],
+                structuredContent={"items": matches, "total": body["total"],
+                                   "next_cursor": body.get("next_cursor")},
+            )
         user, token, rows, entries = await self.directory(request)
         if discovery and name in {"gateway_search_mcps", "gateway_search_tools"}:
             return await self.discovery.search(name, arguments, request)
-        if discovery and name == "gateway_search":
-            q = arguments.get("query", "").strip().lower()
-            q = "" if q == "*" else q
-            matches = [{"name": e[2]["name"], "description": e[1].get("description", ""), "mcp": e[0].name}
-                       for e in entries if q in (e[2]["name"] + " " + e[1].get("description", "")).lower()]
-            return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(matches, ensure_ascii=False))])
-        if discovery and name == "gateway_inspect":
-            tool = next((e[2] for e in entries if e[2]["name"] == arguments.get("name")), None)
-            if tool is None:
-                raise ValueError("Tool not found in authorized cache")
-            return types.CallToolResult(content=[types.TextContent(type="text", text=json.dumps(tool, ensure_ascii=False))])
         if discovery:
             if name != "gateway_call":
                 raise ValueError("Use gateway_call in discovery mode")
@@ -604,6 +618,7 @@ class Gateway:
         catalog = self.app.state.catalog
         rows = [row for row in await catalog.rows(ids=allowed, metadata_only=True) if row.mode != "disabled"]
         expected = await self.search_scope(ctx.request, user, token, rows)
+        rows = [row for row in rows if catalog.service_status(row, user.id if user else None) != "failed"]
         scopes = await catalog.index_scopes(rows, user.id if user else None)
         indexed = await catalog.index.get_summaries(scopes.values())
         version = fingerprint([expected, "native", kind])

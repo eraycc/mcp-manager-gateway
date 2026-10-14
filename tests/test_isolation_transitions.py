@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from catalog_fixture import catalog_tools
 
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
@@ -83,7 +84,7 @@ async def test_user_to_service_promotes_actor_and_clears_scoped_catalogs(tmp_pat
         assert spec.config["auth"]["token"] == "admin-token"
         keys = [key for key in app.state.catalog.cache_store.items if key.startswith(row.id + "-")]
         assert keys == [app.state.catalog.cache_key(changed)]
-        assert [tool["name"] for tool in app.state.catalog.cached(changed, "bob")["tools"]] == [
+        assert [tool["name"] for tool in await catalog_tools(app, changed, "bob")] == [
             "admin-tool"
         ]
 

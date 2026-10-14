@@ -133,10 +133,8 @@ async def test_cache_states_refresh_and_structured_error(bug1_browser):
     dialog = page.get_by_role("dialog")
     await expect(dialog).to_contain_text("当前没有可展示的能力")
     await dialog.get_by_role("button", name="刷新发现缓存").click()
-    await expect(page.locator("#toast")).to_have_text("缓存已刷新，请重新打开目录查看最新代次")
-    await dialog.get_by_role("button", name="关闭", exact=True).click()
-    await page.get_by_role("row").filter(has_text="never").get_by_role("button", name="工具 / 测试").click()
-    dialog = page.get_by_role("dialog")
+    await expect(page.locator("#toast")).to_have_text("缓存已刷新")
+    await expect(dialog).to_be_visible()
     await expect(dialog).to_contain_text("echo")
     await page.route("**/api/v1/mcps/never/test", lambda r: r.fulfill(status=502, json={
         "detail": "Complete OAuth authorization in the Web console", "code": "auth_required"}))

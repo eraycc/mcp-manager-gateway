@@ -4,6 +4,7 @@ import json
 
 import httpx
 import pytest
+from catalog_fixture import catalog_tools, publish_tools
 from test_embeddings import config
 from test_progressive_discovery import discovery_env, payload  # noqa: F401
 
@@ -13,10 +14,10 @@ from mcp_manager.runtime import GatewayError
 
 async def test_boolean_property_schema_remains_discoverable(discovery_env):  # noqa: F811
     app, rows, _calls, _ctx, invoke, _web = discovery_env
-    cache = app.state.catalog.cached(rows["files"])
+    tools = await catalog_tools(app, rows["files"])
     schema = {"type": "object", "properties": {"payload": True}, "required": ["payload"]}
-    cache["tools"][0]["inputSchema"] = schema
-    app.state.catalog.save_cache(rows["files"], cache)
+    tools[0]["inputSchema"] = schema
+    await publish_tools(app, rows["files"], tools)
     assert payload(await invoke("gateway_search_mcps", {}))["total"] == 3
     result = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
     assert result["tools"][0]["inputSchema"] == schema

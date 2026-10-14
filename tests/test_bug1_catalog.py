@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 import pytest
+from catalog_fixture import catalog_tools, publish_tools
 
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
@@ -43,11 +44,11 @@ async def test_create_edit_disable_refreshes_directory_without_kept_lazy_lease(t
         assert not app.state.runtime.leases
         response = await web.patch("/api/v1/mcps/" + row["id"], json={"config": {"command": "second"}})
         assert response.json()["tool_count"] == 1
-        tools = (await web.get("/api/v1/mcps/" + row["id"] + "/tools")).json()
-        assert [t["name"] for t in tools["tools"]] == ["second"]
+        tools = (await web.get("/api/v1/mcps/" + row["id"] + "/capabilities")).json()
+        assert [t["name"] for t in tools["items"]] == ["second"]
         response = await web.patch("/api/v1/mcps/" + row["id"], json={"mode": "disabled"})
         assert response.json()["cache_status"] == "disabled"
-        assert (await web.get("/api/v1/mcps/" + row["id"] + "/tools")).json()["tools"] == []
+        assert (await web.get("/api/v1/mcps/" + row["id"] + "/capabilities")).json()["items"] == []
 
 
 async def test_admin_uses_own_personal_oauth_cache(tmp_path):
@@ -65,11 +66,14 @@ async def test_admin_uses_own_personal_oauth_cache(tmp_path):
             yield Connection()
         app.state.runtime.connector = connect
         row = await app.state.catalog.update(row.id, {"mode": "lazy"}, user_id=actor["id"])
-        app.state.catalog.save_cache(row, {"tools": [{"name": "mine"}], "cache_at": "2026-09-12T00:00:00+00:00"}, actor["id"])
-        app.state.catalog.save_cache(row, {"tools": [{"name": "other"}, {"name": "private"}]}, "other-user")
+        await publish_tools(app, row, [{"name": "mine"}], actor["id"])
+        await publish_tools(app, row, [{"name": "other"}, {"name": "private"}], "other-user")
         item = (await web.get("/api/v1/mcps")).json()["items"][0]
         assert item["tool_count"] == 1
-        assert item["cache_at"] == "2026-09-12T00:00:00+00:00"
+        scope = await app.state.catalog.index_scope(row, actor["id"])
+        summaries = await app.state.catalog.index.get_summaries([scope])
+        assert item["cache_at"] == summaries[row.id]["cache_at"].isoformat()
+        assert [tool["name"] for tool in await catalog_tools(app, row, actor["id"])] == ["mine"]
         assert item["auth_type"] == "oauth"
 
 
@@ -95,7 +99,7 @@ async def test_missing_cached_tool_cannot_bypass_validation(tmp_path):
             yield Connection()
         app.state.runtime.connector = connect
         row = await app.state.catalog.create({"name": "service", "config": {"command": "fake"}})
-        app.state.catalog.save_cache(row, {"tools": []})
+        await publish_tools(app, row, [])
         lease = app.state.runtime.create_lease("system", "test")
         try:
             with pytest.raises(GatewayError) as exc:
@@ -118,7 +122,7 @@ async def test_eager_start_and_call_keeps_refresh_warning_without_implicit_disco
         config = {"command": "fake"} if transport == "stdio" else {"url": "https://mcp.test"}
         row = await app.state.catalog.create({"name": "eager", "mode": "eager", "transport": transport, "config": config})
         assert app.state.runtime.status()[0]["phase"] == "ready"
-        assert app.state.catalog.cached(row)["tools"][0]["name"] == "current"
+        assert (await catalog_tools(app, row))[0]["name"] == "current"
         await app.state.runtime.stop_server(row.id)
         app.state.catalog.save_cache(row, {
             "tools": [{"name": "current", "inputSchema": {"type": "object"}}],

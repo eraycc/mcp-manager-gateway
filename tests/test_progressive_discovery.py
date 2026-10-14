@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from catalog_fixture import catalog_tools, publish_tools
 from mcp import types
 from starlette.requests import Request
 from test_bug1_catalog import console
@@ -180,7 +181,8 @@ async def test_exact_multi_tool_query_is_compact_and_reports_missing(discovery_e
     ]
     assert body["missing_tools"] == ["missing"]
     assert body["mcps"] == [{"id": rows["files"].id, "name": "files", "slug": "files"}]
-    assert set(body) == {
+    assert body["search"] == {"mode": "keyword", "semantic_status": "not_needed"}
+    assert set(body) - {"search"} == {
         "instructions", "mcps", "tools", "truncated", "returned", "total", "missing_tools",
     }
     assert body["truncated"] is False
@@ -211,16 +213,10 @@ async def test_exact_multi_tool_query_keeps_cross_service_matches(discovery_env)
 
 async def test_empty_schema_is_preserved_without_empty_metadata(discovery_env):
     app, rows, _calls, _ctx, invoke, _web = discovery_env
-    cache = app.state.catalog.cached(rows["files"])
-    app.state.catalog.save_cache(rows["files"], {
-        **cache,
-        "tools": [*cache["tools"], {
-            "name": "status",
-            "description": "",
-            "inputSchema": {},
-            "annotations": {},
-        }],
-    })
+    tools = await catalog_tools(app, rows["files"])
+    await publish_tools(app, rows["files"], [*tools, {
+        "name": "status", "description": "", "inputSchema": {}, "annotations": {},
+    }])
 
     body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "status"}))
     assert body["tools"] == [{
@@ -247,15 +243,15 @@ async def test_complex_schema_keeps_examples_and_required_only_template(discover
 
 async def test_template_skips_false_union_branch(discovery_env):
     app, rows, _calls, _ctx, invoke, _web = discovery_env
-    cache = app.state.catalog.cached(rows["files"])
-    cache["tools"][0]["inputSchema"] = {
+    tools = await catalog_tools(app, rows["files"])
+    tools[0]["inputSchema"] = {
         "anyOf": [False, {
             "type": "object",
             "properties": {"value": {"type": "string"}},
             "required": ["value"],
         }],
     }
-    app.state.catalog.save_cache(rows["files"], cache)
+    await publish_tools(app, rows["files"], tools)
 
     body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
     assert body["tools"][0]["invocation"]["template"]["arguments"] == {"value": "<string>"}
@@ -263,13 +259,13 @@ async def test_template_skips_false_union_branch(discovery_env):
 
 async def test_template_merges_all_allof_requirements(discovery_env):
     app, rows, _calls, _ctx, invoke, _web = discovery_env
-    cache = app.state.catalog.cached(rows["files"])
-    cache["tools"][0]["inputSchema"] = {
+    tools = await catalog_tools(app, rows["files"])
+    tools[0]["inputSchema"] = {
         "type": "object",
         "properties": {"a": {"type": "string"}, "b": {"type": "integer"}},
         "allOf": [{"required": ["a"]}, {"required": ["b"]}],
     }
-    app.state.catalog.save_cache(rows["files"], cache)
+    await publish_tools(app, rows["files"], tools)
 
     body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
     assert body["tools"][0]["invocation"]["template"]["arguments"] == {
@@ -280,8 +276,8 @@ async def test_template_merges_all_allof_requirements(discovery_env):
 
 async def test_template_recursively_merges_overlapping_allof_properties(discovery_env):
     app, rows, _calls, _ctx, invoke, _web = discovery_env
-    cache = app.state.catalog.cached(rows["files"])
-    cache["tools"][0]["inputSchema"] = {
+    tools = await catalog_tools(app, rows["files"])
+    tools[0]["inputSchema"] = {
         "type": "object",
         "allOf": [
             {
@@ -302,7 +298,7 @@ async def test_template_recursively_merges_overlapping_allof_properties(discover
             },
         ],
     }
-    app.state.catalog.save_cache(rows["files"], cache)
+    await publish_tools(app, rows["files"], tools)
 
     body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
     assert body["tools"][0]["invocation"]["template"]["arguments"] == {
@@ -312,14 +308,14 @@ async def test_template_recursively_merges_overlapping_allof_properties(discover
 
 async def test_conditional_schema_gets_a_required_branch_template(discovery_env):
     app, rows, _calls, _ctx, invoke, _web = discovery_env
-    cache = app.state.catalog.cached(rows["files"])
-    cache["tools"][0]["inputSchema"] = {
+    tools = await catalog_tools(app, rows["files"])
+    tools[0]["inputSchema"] = {
         "type": "object",
         "properties": {"kind": {"type": "string"}, "value": {"type": "string"}},
         "if": {"properties": {"kind": {"const": "text"}}, "required": ["kind"]},
         "then": {"required": ["value"]},
     }
-    app.state.catalog.save_cache(rows["files"], cache)
+    await publish_tools(app, rows["files"], tools)
 
     body = payload(await invoke("gateway_search_tools", {"mcp": "files", "tool": "read_file"}))
     assert body["tools"][0]["invocation"]["template"]["arguments"] == {
@@ -380,8 +376,8 @@ async def test_pagination_has_no_duplicates_and_rejects_changed_catalog(discover
     assert "next_cursor" not in page and "hint" not in page
     assert len(names) == len(set(names)) == 4
     assert {m["slug"] for m in first["mcps"]} == {"archive"}  # only providers on this page
-    cache = app.state.catalog.cached(rows["files"])
-    app.state.catalog.save_cache(rows["files"], {**cache, "tools": cache["tools"][:1]})
+    tools = await catalog_tools(app, rows["files"])
+    await publish_tools(app, rows["files"], tools[:1])
     stale = await invoke("gateway_search_tools", {"limit": 1, "cursor": first["next_cursor"]})
     assert stale.is_error
     assert stale.structured_content["error"]["code"] == "catalog_changed"
@@ -413,3 +409,43 @@ async def test_legacy_discovery_entry_points_remain_callable(discovery_env):
     assert len(json.loads(result.content[0].text)) == 4
     inspected = await invoke("gateway_inspect", {"name": "files__read_file"})
     assert json.loads(inspected.content[0].text)["inputSchema"] == SCHEMA
+
+
+async def test_legacy_discovery_pages_index_without_launching_or_loading_unrelated_schemas(discovery_env):
+    app, rows, calls, _ctx, invoke, _web = discovery_env
+    schema = {"type": "object", "properties": {"payload": True}, "required": ["payload"]}
+    await publish_tools(app, rows["files"], [
+        {"name": f"tool-{index:03}", "description": "light summary", "inputSchema": schema}
+        for index in range(61)
+    ])
+    cursor, names = None, []
+    while True:
+        result = await invoke("gateway_search", {
+            "query": "*", "limit": 20, **({"cursor": cursor} if cursor else {}),
+        })
+        assert not result.is_error, result
+        page = json.loads(result.content[0].text)
+        assert len(page) <= 20
+        assert all("inputSchema" not in item for item in page)
+        assert result.structured_content["total"] == 63
+        assert all(item["mcp"] in {"files", "archive"} for item in page)
+        names.extend(item["name"] for item in page)
+        cursor = result.structured_content["next_cursor"]
+        if not cursor:
+            break
+    assert len(names) == len(set(names)) == 63
+    assert app.state.runtime.status() == [] and calls == []
+    inspected = await invoke("gateway_inspect", {"name": "files__tool-060"})
+    assert payload(inspected)["inputSchema"] == schema
+    assert (await invoke("gateway_inspect", {"name": "tool-060"})).is_error
+
+
+def test_typo_probe_uses_a_fixed_hash_budget():
+    from mcp_manager.catalog_retrieval import MAX_FUZZY_HASHES, term_hash, typo_hashes
+
+    assert term_hash("recipient") in typo_hashes(["recipent"])
+    assert term_hash("recipient") in typo_hashes(["recipietn"])
+    assert typo_hashes(["a", "短词"]) == []
+    probes = typo_hashes([char * 32 for char in "abcdefghijklmnop"])
+    assert len(probes) <= MAX_FUZZY_HASHES
+    assert all(len(value) == 64 for value in probes)
