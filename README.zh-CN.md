@@ -285,7 +285,7 @@ pip install --upgrade mcp-manager-gateway
 
 完整升级矩阵见 [部署与升级](wiki/operations/deployment-and-upgrades.md)。
 
-启动后的后台维护及后续每小时检查会压缩缓存历史并回收过期向量；无法识别的旧向量缓存会重建，禁用服务和发现失败的作用域保持不动。旧 `jobs/jobs.jsonl` 不再读取或导入，也不会自动删除。详情见 [缓存与历史残留](wiki/operations/backup-and-migration.md#缓存与历史残留)。
+仅启动后的首次后台维护清理历史缓存残留；运行期间随 MCP 删除、能力成功更新或 embedding 模型变化执行针对性同步，不做每小时缓存扫描，也没有向量 TTL 或条目数量淘汰。未变化工具复用同作用域的既有向量，不重复请求模型；禁用服务和发现失败作用域保持不动。旧 `jobs/jobs.jsonl` 不再读取或导入，也不会自动删除。详情见 [缓存与历史残留](wiki/operations/backup-and-migration.md#缓存与历史残留)。
 
 常用维护命令：
 

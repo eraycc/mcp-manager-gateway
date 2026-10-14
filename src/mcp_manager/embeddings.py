@@ -3,14 +3,14 @@ import asyncio
 import hashlib
 import json
 import math
-import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from weakref import WeakValueDictionary
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import and_, delete, exists, or_, select, tuple_
+from sqlalchemy import and_, delete, exists, insert, or_, select, tuple_
+from sqlalchemy.orm import aliased
 
 from .catalog_models import ArtifactObject, CatalogEntry, CatalogGeneration, CatalogHead
 from .catalog_store import generation_scope, scope_key
@@ -26,8 +26,6 @@ MAX_BATCH_INPUTS = 32
 MAX_BATCH_CHARS = 256_000
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 PROBE_TEXT = "MCP semantic discovery probe"
-LEGACY_CACHE_MAX_ENTRIES = 2048
-LEGACY_CACHE_TTL_SECONDS = 7 * 86400
 
 
 class _EmbeddingError(Exception):
@@ -241,6 +239,7 @@ class EmbeddingIndex:
 
             prepared = []
             cache_refs = {}
+            cache_capabilities = {}
             seen = set()
             truncated = 0
             for item in documents:
@@ -256,6 +255,9 @@ class EmbeddingIndex:
                     text = text[:MAX_TEXT_CHARS]
                     truncated += 1
                 prepared.append((item["id"], text, content_hash))
+                capability = item.get("cache_capability")
+                if isinstance(capability, list) and len(capability) == 4 and all(isinstance(v, str) for v in capability):
+                    cache_capabilities[item["id"]] = capability
                 reference = item.get("cache_ref")
                 if (isinstance(reference, (list, tuple)) and len(reference) == 2
                         and isinstance(reference[0], str) and type(reference[1]) is int):
@@ -295,16 +297,18 @@ class EmbeddingIndex:
                     )
                     cache_failed = False
                     query_refs = sorted({tuple(ref) for ref in cache_refs.values()})
+                    hashes = {identity: content_hash for identity, _text, content_hash in prepared}
                     for (document_id, _text, key), vector in zip(missing, embedded, strict=True):
                         vectors[document_id] = vector
                         try:
                             await asyncio.to_thread(self.store.set, key, {
-                                "vector": vector, "cache_version": 1,
+                                "vector": vector, "cache_version": 2,
+                                "capability": cache_capabilities.get(document_id),
+                                "content_hash": hashes.get(document_id),
                                 "model_hash": self._model_hash(endpoint, model),
                                 "references": [cache_refs[document_id]] if document_id in cache_refs else (
                                     [list(ref) for ref in query_refs] if not document_id else []
                                 ),
-                                "cached_at": time.time(),
                             })
                         except OSError:
                             cache_failed = True
@@ -669,7 +673,7 @@ class EmbeddingIndex:
             return {"status": "unavailable", "semantic_status": "unavailable", "reason": "internal_error"}
 
 
-async def prune_stale_vectors(state, *, batch_limit=250):
+async def prune_stale_vectors(state, *, batch_limit=250, server_id=None, startup=False):
     """Reclaim rebuildable vectors without changing catalog or disabled/failed scopes."""
     from .embedding_api import load_embedding_config
 
@@ -698,6 +702,11 @@ async def prune_stale_vectors(state, *, batch_limit=250):
     )
     stale = and_(~disabled, ~failed, or_(~referenced, EmbeddingVector.model_hash != model_hash)
                  if model_hash else ~referenced)
+    if server_id is not None:
+        stale = and_(stale, exists().where(
+            CatalogGeneration.id == EmbeddingVector.generation_id,
+            CatalogGeneration.server_id == server_id,
+        ))
     deleted = 0
     if batch_limit:
         async with state.db.locked() as session:
@@ -720,36 +729,130 @@ async def prune_stale_vectors(state, *, batch_limit=250):
             CatalogHead.status != "ready"
         ))).all())
 
+    def capability_providers():
+        with state.embeddings.store.lock:
+            return list({value["capability"][0] for value in state.embeddings.store.items.values()
+                         if isinstance(value, dict) and isinstance(value.get("capability"), list)
+                         and len(value["capability"]) == 4
+                         and (server_id is None or value["capability"][0] == server_id)})
+
+    provider_ids = await asyncio.to_thread(capability_providers)
+    live_capabilities = {}
+    indexed_owners = set()
+    for offset in range(0, len(provider_ids), 250):
+        async with state.db.session() as session:
+            indexed_owners.update((await session.execute(select(CatalogHead.server_id, CatalogHead.owner).where(
+                CatalogHead.server_id.in_(provider_ids[offset:offset + 250]),
+                CatalogHead.generation_id.is_not(None),
+            ))).all())
+            records = (await session.execute(select(
+                CatalogGeneration.server_id, CatalogGeneration.owner,
+                CatalogEntry.kind, CatalogEntry.name_hash, CatalogEntry.summary,
+            ).join(CatalogEntry, CatalogEntry.generation_id == CatalogGeneration.id).join(
+                CatalogHead, CatalogHead.generation_id == CatalogGeneration.id,
+            ).where(CatalogGeneration.server_id.in_(provider_ids[offset:offset + 250]),
+                    CatalogEntry.kind != "tools"))).all()
+            live_capabilities.update({(provider, owner, kind, name_hash): summary.get("semantic_hash")
+                                      for provider, owner, kind, name_hash, summary in records})
+
     def clean_cache():
         store = state.embeddings.store
         with store.lock:
-            doomed, live = set(), []
-            cutoff = time.time() - LEGACY_CACHE_TTL_SECONDS
+            doomed = set()
             for key, value in store.items.items():
-                if not isinstance(value, dict) or value.get("cache_version") != 1:
-                    doomed.add(key)  # Approved one-time rebuild of untraceable legacy hashes.
+                if not isinstance(value, dict) or value.get("cache_version") != 2:
+                    if startup:
+                        doomed.add(key)  # One-time rebuild of untraceable legacy hashes.
                     continue
                 refs = value.get("references")
                 if not isinstance(refs, list) or any(
                     not isinstance(ref, list) or len(ref) != 2 or not isinstance(ref[0], str)
                     or type(ref[1]) is not int for ref in refs
                 ):
+                    if startup:
+                        doomed.add(key)
+                    continue
+                if server_id is not None and not any(ref[0] == server_id for ref in refs):
+                    continue
+                if any(ref[0] not in services for ref in refs):
                     doomed.add(key)
                     continue
                 if any(ref[0] in protected or services.get(ref[0], (None, None))[1] == "disabled" for ref in refs):
                     continue
-                timestamp = value.get("cached_at")
-                if (not _number(timestamp) or timestamp < cutoff
-                        or (model_hash and value.get("model_hash") != model_hash)
-                        or any(services.get(server_id, (None, None))[0] != revision for server_id, revision in refs)):
+                if model_hash and value.get("model_hash") != model_hash:
                     doomed.add(key)
-                else:
-                    live.append((timestamp, key))
-            # Query and token scopes can be unlimited even when the directory is small.
-            # Bound reusable active cache entries; protected scopes are retained.
-            live.sort()
-            doomed.update(key for _, key in live[:max(0, len(live) - LEGACY_CACHE_MAX_ENTRIES)])
-            return store.delete_keys(doomed) if doomed else 0
+                    continue
+                capability = value.get("capability")
+                if isinstance(capability, list) and len(capability) == 4:
+                    identity = tuple(capability)
+                    current_hash = live_capabilities.get(identity)
+                    provider, owner, kind, name_hash = capability
+                    if current_hash is None and (provider, owner) not in indexed_owners:
+                        # A pre-index catalog is still authoritative for the legacy resource route.
+                        cache_key = provider + "-" + hashlib.sha256(owner.encode()).hexdigest()[:24]
+                        with state.catalog.cache_store.lock:
+                            record = state.catalog.cache_store.items.get(cache_key, {})
+                            data = record.get("data", {}) if isinstance(record, dict) else {}
+                            for item in data.get(kind, []) if isinstance(data, dict) else []:
+                                name = item.get("uri") if kind == "resources" else item.get("uriTemplate") if kind == "templates" else item.get("name")
+                                if isinstance(name, str) and hashlib.sha256(name.encode()).hexdigest() == name_hash:
+                                    current_hash = resource_vector_hash(item)
+                                    break
+                    if current_hash != value.get("content_hash"):
+                        doomed.add(key)
+                elif any(services.get(identity, (None, None))[0] != revision for identity, revision in refs):
+                    doomed.add(key)
+            if doomed:
+                return store.delete_keys(doomed)
+            if startup:
+                store.compact()
+            return 0
 
     cached = await asyncio.to_thread(clean_cache)
     return {"vectors": deleted, "cache_entries": cached}
+
+
+async def reuse_generation_vectors(session, previous, generation):
+    """Rebind unchanged same-owner tools without reading payloads or calling a model."""
+    if not previous:
+        return
+    old, new = aliased(CatalogEntry), aliased(CatalogEntry)
+    offset = 0
+    while True:
+        rows = list((await session.execute(select(
+            EmbeddingVector, new.id.label("new_entry_id"), new.search_text,
+        ).join(old, old.id == EmbeddingVector.entry_id).join(new, and_(
+            new.generation_id == generation.id, new.kind == "tools",
+            new.name_hash == old.name_hash, new.schema_hash == old.schema_hash,
+        )).where(
+            EmbeddingVector.generation_id == previous,
+            EmbeddingVector.scope_key == generation.scope_key,
+            EmbeddingVector.owner == generation.owner,
+        ).order_by(new.id, EmbeddingVector.model_hash).offset(offset).limit(250))).all())
+        if not rows:
+            return
+
+        def prepare(candidates=rows):
+            values = []
+            for vector, entry_id, text in candidates:
+                if vector.content_hash != hashlib.sha256(text.encode()).hexdigest():
+                    continue
+                values.append({
+                    "generation_id": generation.id, "entry_id": entry_id,
+                    "model_hash": vector.model_hash, "scope_key": generation.scope_key,
+                    "owner": generation.owner, "content_hash": vector.content_hash,
+                    "artifact_id": vector.artifact_id, "artifact_bytes": vector.artifact_bytes,
+                    "vector_index": vector.vector_index, "dimension": vector.dimension,
+                })
+            return values
+
+        values = await asyncio.to_thread(prepare)
+        if values:
+            await session.execute(insert(EmbeddingVector), values)
+        offset += len(rows)
+
+
+def resource_vector_hash(entry):
+    """Match legacy descriptive embedding input exactly; timestamps and revisions are excluded."""
+    text = {key: entry[key] for key in ("name", "title", "description") if isinstance(entry.get(key), str)}
+    return hashlib.sha256(json.dumps(text, ensure_ascii=False).encode()).hexdigest()

@@ -70,6 +70,7 @@ class CatalogStore:
         self.artifacts = artifacts
         self.signing_key = signing_key.encode() if isinstance(signing_key, str) else signing_key
         self.scope_resolver = scope_resolver
+        self.on_publish = None
         self._search_cache = OrderedDict()
         self._search_cache_lock = asyncio.Lock()
         self._search_cache_entries = 64
@@ -149,6 +150,10 @@ class CatalogStore:
             for field, limit in (("title", 256), ("description", 1024)):
                 if isinstance(entry.get(field), str):
                     summary[field] = entry[field][:limit]
+            if kind != "tools":
+                from .embeddings import resource_vector_hash
+
+                summary["semantic_hash"] = resource_vector_hash(entry)
             if kind in {"resources", "templates"}:
                 summary["uri" if kind == "resources" else "uriTemplate"] = name
             gateway_name = alias(slug, name) if kind in {"tools", "prompts"} else None
@@ -257,10 +262,21 @@ class CatalogStore:
             generation.counts, generation.digest = counts, accumulator.hexdigest()
             generation.details = dict(generation.details or {}, tools_preview=sorted(preview),
                                       generated_description=generated)
+            from .embedding_models import EmbeddingVector
+            from .embeddings import reuse_generation_vectors
+
+            await reuse_generation_vectors(session, head.generation_id, generation)
             generation.status, generation.published_at = "ready", now()
             head.generation_id, head.status = identity, "ready"
+            # The new head owns all current vectors; removed/changed tools leave no stale index rows.
+            await session.execute(delete(EmbeddingVector).where(
+                EmbeddingVector.scope_key == generation.scope_key,
+                EmbeddingVector.generation_id != identity,
+            ))
             await session.flush()
             result = generation_ref(generation)
+        if self.on_publish:
+            await self.on_publish(generation.server_id)
         return result
 
     async def _current(self, session, scope):

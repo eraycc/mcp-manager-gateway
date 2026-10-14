@@ -42,6 +42,7 @@ async def retention_app(tmp_path, monkeypatch):
         catalog=SimpleNamespace(artifacts=artifacts, cache_store=JsonlStore(tmp_path / "cache/catalog.jsonl")),
         embeddings=EmbeddingIndex(tmp_path, db=db, artifacts=artifacts),
         retention_next=0,
+        cache_cleanup_done=False,
         refresh_next=None,
     )
     monkeypatch.setattr(app_module, "now", lambda: CURRENT)

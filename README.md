@@ -232,7 +232,7 @@ pip install --upgrade mcp-manager-gateway
 
 Source and container installations should be updated through Git plus uv or by rebuilding/pulling the relevant image. `mmg upgrade` performs database schema migration; it does not update the installed Python package.
 
-Background maintenance compacts cache history and reclaims stale embedding vectors after startup and on subsequent hourly checks. Untraceable legacy vector caches are rebuilt; disabled services and failed discovery scopes are preserved. Legacy `jobs/jobs.jsonl` is no longer read or imported and is not automatically deleted. See [Backup and migration](wiki/operations/backup-and-migration.md#缓存与历史残留).
+A one-time startup background pass reclaims historical cache residue. During operation, cache reconciliation follows MCP deletion, successful capability changes, or embedding model changes; there is no hourly cache sweep, vector TTL, or entry-count eviction. Unchanged tools reuse existing same-scope vectors without requesting the model again; disabled services and failed discovery scopes are preserved. Legacy `jobs/jobs.jsonl` is no longer read or imported and is not automatically deleted. See [Backup and migration](wiki/operations/backup-and-migration.md#缓存与历史残留).
 
 Update detection in **System Settings → About** only reports availability. It never modifies the installation. Automatic checks can be disabled while the manual **Check for Updates** action remains available.
 

@@ -18,7 +18,7 @@ from sqlalchemy import select
 from starlette.responses import JSONResponse
 
 from .about import NAME, VERSION
-from .catalog import alias
+from .catalog import alias, catalog_owner
 from .database import ApiToken, User
 from .discovery import DISCOVERY, Discovery, result_json, validate_meta, validation_error
 from .identity import authenticate_token, expired
@@ -488,17 +488,22 @@ class Gateway:
             documents = []
             keyed = {}
             providers = {row.id: row for row in rows}
-            for index, item in enumerate(items):
+            for item in items:
                 document_id = hashlib.sha256(
                     json.dumps([item.get("mcp", {}).get("id"), item.get("kind"),
-                                item.get("uri") or item.get("uriTemplate") or item.get("name"), index],
+                                item.get("uri") or item.get("uriTemplate") or item.get("name")],
                                ensure_ascii=False).encode()
                 ).hexdigest()
                 keyed[document_id] = item
                 from .discovery import resource_search_document
                 provider = providers[item["mcp"]["id"]]
+                kind = {"resource": "resources", "template": "templates", "prompt": "prompts"}[item["kind"]]
+                exact = item["name"] if kind == "prompts" else item.get("uri", item.get("uriTemplate", ""))
+                exact = exact.removeprefix("mcp-manager://" + provider.id + "/")
                 documents.append({"id": document_id, "text": json.dumps(resource_search_document(item), ensure_ascii=False),
-                                  "cache_ref": [provider.id, provider.revision]})
+                                  "cache_ref": [provider.id, provider.revision],
+                                  "cache_capability": [provider.id, catalog_owner(provider.isolation, user.id if user else None),
+                                                       kind, hashlib.sha256(exact.encode()).hexdigest()]})
             from .embedding_api import load_embedding_config
             config = await load_embedding_config(self.app.state)
             scope = hashlib.sha256(

@@ -90,10 +90,53 @@ async def run_storage_retention(state, *, at, batch_limit=250):
     remaining -= deleted["proposal_entries"]
     deleted["catalog_rows"] = await _prune_capability_rows(state, at, remaining)
     remaining -= deleted["catalog_rows"]
-    vectors = await prune_stale_vectors(state, batch_limit=remaining)
-    deleted["embedding_vectors"] = vectors["vectors"]
-    remaining -= deleted["embedding_vectors"]
     deleted["artifacts"] = await _prune_artifacts(state, remaining)
-    await asyncio.to_thread(state.catalog.cache_store.compact)
-    return {"deleted": sum(deleted.values()), "by_kind": deleted,
-            "cache": {"embedding_entries": vectors["cache_entries"], "catalog_compacted": True}}
+    return {"deleted": sum(deleted.values()), "by_kind": deleted}
+
+
+async def reconcile_service_cache(state, server_id=None, *, startup=False):
+    """Only startup or a concrete catalog/model change initiates cache reconciliation."""
+    total, cached = 0, 0
+    while True:
+        result = await prune_stale_vectors(state, batch_limit=250, server_id=server_id, startup=startup)
+        total += result["vectors"]
+        cached += result["cache_entries"]
+        if result["vectors"] < 250:
+            break
+        await asyncio.sleep(0)
+
+    async with state.db.session() as session:
+        from .database import McpServer
+
+        services = dict((await session.execute(select(McpServer.id, McpServer.revision))).all())
+
+    def clean_catalog():
+        store = state.catalog.cache_store
+        with store.lock:
+            doomed = {key for key, value in store.items.items()
+                      if (server_id is None or key.startswith(server_id + "-"))
+                      and (key.rsplit("-", 1)[0] not in services
+                           or (isinstance(value, dict)
+                               and value.get("revision") != services.get(key.rsplit("-", 1)[0])))}
+            if doomed:
+                return store.delete_keys(doomed)
+            if startup:
+                store.compact()
+            return 0
+
+    catalog_entries = await asyncio.to_thread(clean_catalog)
+    return {"vectors": total, "embedding_entries": cached, "catalog_entries": catalog_entries}
+
+
+async def run_startup_cache_cleanup(state):
+    """Batched historical cleanup; retries only on failure, never on an hourly timer."""
+    return await reconcile_service_cache(state, startup=True)
+
+
+async def cache_changed(state, server_id=None):
+    """Keep successful publication valid even if a physical rewrite needs a retry."""
+    try:
+        await reconcile_service_cache(state, server_id)
+    except OSError:
+        state.cache_cleanup_done = False
+        state.retention_next = 0

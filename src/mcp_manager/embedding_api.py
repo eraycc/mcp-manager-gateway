@@ -108,6 +108,11 @@ async def update_embedding_settings(data: dict, request: Request, user=ADMIN):
             session.add(SystemSetting(key=SETTING_KEY, value=sealed))
         else:
             row.value = sealed
+    if ((previous.get("base_url"), previous.get("model")) != (candidate["base_url"], candidate["model"])
+            or (candidate["enabled"] and not previous.get("enabled"))):
+        from .retention import cache_changed
+
+        await cache_changed(request.app.state)
     return _public(candidate)
 
 

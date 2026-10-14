@@ -203,8 +203,11 @@ async def _log_retention(app):
 
             cutoff = now() - timedelta(days=days, microseconds=1)
             await state.logs.delete(to_time=cutoff.isoformat())
-        from .retention import run_storage_retention
+        from .retention import run_startup_cache_cleanup, run_storage_retention
 
+        if not state.cache_cleanup_done:
+            await run_startup_cache_cleanup(state)
+            state.cache_cleanup_done = True
         await run_storage_retention(state, at=now(), batch_limit=250)
     except Exception:
         state.retention_next = 0
@@ -295,6 +298,11 @@ def create_app(config=None):
         state.runtime.on_start_failure = state.catalog.start_failed
         state.refresh_next = None
         state.retention_next = 0
+        state.cache_cleanup_done = False
+        from .retention import cache_changed
+
+        state.catalog.on_cache_change = lambda server_id: cache_changed(state, server_id)
+        state.catalog.index.on_publish = state.catalog.on_cache_change
         task = None
         try:
             await state.db.initialize()

@@ -109,6 +109,7 @@ class Catalog:
         self.oauth = None
         self.credentials = None
         self.tasks = set()
+        self.on_cache_change = None
         self.cache_store = JsonlStore(self.cache_dir / "catalog.jsonl", fail_closed=True)
         self._cache_failures = {}
         self._validators = OrderedDict()
@@ -668,7 +669,7 @@ class Catalog:
                 # A revision or ownership change must never publish stale tools.
                 self.runtime.versions[server_id] = row.revision
                 self.runtime.holds.discard(server_id)
-                self.cache_store.delete_prefix(server_id + "-")
+                await asyncio.to_thread(self.cache_store.delete_prefix, server_id + "-")
                 for key in list(self._cache_failures):
                     if key.startswith(server_id + "-"):
                         self._cache_failures.pop(key, None)
@@ -702,10 +703,17 @@ class Catalog:
                 invalidate_setting_cache(
                     self.db, ["tests:" + server_id, "anonymous_mcp_ids"]
                 )
-                self.cache_store.delete_prefix(server_id + "-")
+                try:
+                    await asyncio.to_thread(self.cache_store.delete_prefix, server_id + "-")
+                except OSError:
+                    if not self.on_cache_change:
+                        raise
+                    # The row is deleted; the callback retries physical cleanup in the background.
                 for key in list(self._cache_failures):
                     if key.startswith(server_id + "-"):
                         self._cache_failures.pop(key, None)
+                if self.on_cache_change:
+                    await self.on_cache_change(server_id)
 
     async def refresh_targets(self, server_id=None):
         targets = []
