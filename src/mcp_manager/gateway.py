@@ -4,13 +4,16 @@ import hashlib
 import json
 import secrets
 import time
+from types import SimpleNamespace
+from urllib.parse import unquote
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from jsonschema import ValidationError
+from jsonschema import Draft202012Validator, ValidationError
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.shared.exceptions import MCPError
 from sqlalchemy import select
 from starlette.responses import JSONResponse
 
@@ -48,13 +51,16 @@ RESOURCE_TOOLS = [
     {
         "name": "gateway_read_resource",
         "description": (
-            "Read one authorized resource by the exact URI returned by gateway_list_resources. "
-            "Use only when the client does not support the native MCP resources/read protocol."
+            "Read one authorized resource or prompt by the exact URI returned by gateway_list_resources. "
+            "Prompt URIs use prompts/get; supply string arguments when required. "
+            "Use only when the client does not support the native MCP resource and prompt protocols."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "uri": {"type": "string", "minLength": 1, "maxLength": 8192},
+                "arguments": {"type": "object", "maxProperties": 100,
+                              "additionalProperties": {"type": "string", "maxLength": 8192}},
             },
             "required": ["uri"],
             "additionalProperties": False,
@@ -400,10 +406,14 @@ class Gateway:
             from .resource_discovery import resource_page
             return await resource_page(self, request, arguments)
         if discovery and token.enable_resource_tools and name == "gateway_read_resource":
-            if not isinstance(arguments, dict) or set(arguments) != {"uri"}:
-                raise ValueError("gateway_read_resource requires only uri")
+            try:
+                Draft202012Validator(RESOURCE_TOOLS[1]["inputSchema"]).validate(arguments)
+            except ValidationError as exc:
+                raise validation_error(exc, name="gateway_read_resource") from None
             rows = await self.app.state.catalog.rows(ids=(await self.principal(request))[2], metadata_only=True)
-            return await self.read_resource_tool(request, user, token, rows, str(arguments["uri"]))
+            return await self.read_resource_tool(
+                request, user, token, rows, arguments["uri"], arguments.get("arguments", {})
+            )
         if discovery and name in {"gateway_search", "gateway_inspect"}:
             query = arguments.get("query", "") if name == "gateway_search" else arguments.get("name", "")
             options = {"tool": query, "limit": arguments.get("limit", 50) if name == "gateway_search" else 1}
@@ -579,7 +589,7 @@ class Gateway:
             raise
         return types.CallToolResult.model_validate(result)
 
-    async def resource_value(self, request, user, token, rows, uri):
+    async def resource_value(self, request, user, token, rows, uri, arguments=None):
         candidate = next((r for r in rows if uri.startswith("mcp-manager://" + r.id + "/")), None)
         if not candidate:
             raise ValueError("Resource not authorized")
@@ -592,6 +602,33 @@ class Gateway:
         await self.ensure(request, row)
         prefix = "mcp-manager://" + row.id + "/"
         original = uri[len(prefix):]
+        prompt_prefix = "prompt://" + row.slug + "/"
+        if original.startswith(prompt_prefix):
+            from .prompt_resources import prompt_uri
+
+            scope = await catalog.index_scope(row, user.id if user else None)
+            indexed = await catalog.index.has_scope(scope)
+            resource = await catalog.index.has_capability(scope, kind="resources", name=original) if indexed else next(
+                (item for item in catalog.cached_view(row, user.id if user else None)["resources"]
+                 if item["uri"] == original), None
+            )
+            if not resource:
+                name = unquote(original[len(prompt_prefix):])
+                definition = await catalog.index.has_capability(scope, kind="prompts", name=name) if indexed else next(
+                    (item for item in catalog.cached_view(row, user.id if user else None)["prompts"]
+                     if item["name"] == name), None
+                )
+                if original != prompt_uri(row, name) or not definition:
+                    raise GatewayError("prompt_not_found", "Prompt not found in authorized catalog")
+                prompt = await self.get_prompt(
+                    SimpleNamespace(request=request),
+                    SimpleNamespace(name=alias(row.slug, name), arguments=arguments or {}),
+                )
+                value = prompt.model_dump(mode="json", by_alias=True, exclude_none=True)
+                text = await asyncio.to_thread(json.dumps, value, ensure_ascii=False)
+                return row, dict(value, contents=[{"uri": uri, "mimeType": "application/json", "text": text}])
+        if arguments:
+            raise GatewayError("invalid_arguments", "arguments are supported only for prompt URIs")
         result = await self.app.state.runtime.perform(
             await catalog.spec(row, user.id if user else None),
             self.lease(request, user, token).id, "read_resource", original,
@@ -604,11 +641,11 @@ class Gateway:
         ])
         return row, result
 
-    async def read_resource_tool(self, request, user, token, rows, uri):
-        row, result = await self.resource_value(request, user, token, rows, uri)
+    async def read_resource_tool(self, request, user, token, rows, uri, arguments=None):
+        row, result = await self.resource_value(request, user, token, rows, uri, arguments)
         return result_json({
             "mcp": {"id": row.id, "name": row.name, "slug": row.slug},
-            "contents": result.get("contents", []),
+            **result,
         })
 
     async def native_page(self, ctx, params, *, kind):
@@ -687,7 +724,13 @@ class Gateway:
     async def read_resource(self, ctx, params):
         user, token, allowed = await self.principal(ctx.request)
         rows = await self.app.state.catalog.rows(ids=allowed, metadata_only=True)
-        _row, result = await self.resource_value(ctx.request, user, token, rows, str(params.uri))
+        try:
+            _row, result = await self.resource_value(ctx.request, user, token, rows, str(params.uri))
+        except (GatewayError, ValueError, HTTPException) as exc:
+            code = getattr(exc, "code", "invalid_request")
+            message = str(getattr(exc, "detail", exc))
+            raise MCPError(code=-32602 if code == "invalid_arguments" else -32000,
+                           message=message, data={"code": code}) from None
         return types.ReadResourceResult.model_validate(result)
 
     async def ensure(self, request, row):
@@ -712,6 +755,9 @@ class Gateway:
             expected_scope = await catalog.index.get_generation_scope(ref.generation)
             row = await catalog.get(expected_scope.server_id)
             original_name = ref.original_name
+            definition = await catalog.index.get_definition(expected_scope, kind="prompts", name=original_name)
+            if definition is None:
+                raise GatewayError("prompt_not_found", "Prompt catalog changed")
         else:
             candidates = [row for row in await catalog.rows(ids=allowed, metadata_only=True)
                           if params.name.startswith((row.id + "__", (row.slug + "__")[:47]))]
@@ -722,11 +768,15 @@ class Gateway:
                     continue
                 for prompt in catalog.cached_view(candidate, user.id if user else None)["prompts"]:
                     if alias(candidate.slug, prompt["name"]) == params.name:
-                        matches.append((candidate, prompt["name"]))
+                        matches.append((candidate, prompt))
             if len(matches) != 1:
                 raise GatewayError("prompt_not_found", "Prompt not found in authorized catalog")
-            candidate, original_name = matches[0]
+            candidate, definition = matches[0]
+            original_name = definition["name"]
             row = await catalog.get(candidate.id)
+        from .prompt_resources import validate_prompt_arguments
+
+        validate_prompt_arguments(definition, params.arguments or {})
         async def authorize():
             fresh_user, fresh_token, current_allowed = await self.principal(request, target_id=row.id)
             fresh = await catalog.get(row.id, metadata_only=True)

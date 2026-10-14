@@ -158,7 +158,7 @@ Keep a backup, preserve unrelated settings, and never remove the MMG connection 
 | `gateway_search_tools` | Return the full `inputSchema` and exact `gateway_name` |
 | `gateway_call` | Invoke a tool with its exact name and schema-valid arguments |
 | `gateway_list_resources` | Optionally list resources, prompts, and templates |
-| `gateway_read_resource` | Optionally read an exact resource URI |
+| `gateway_read_resource` | Optionally read an exact resource or prompt URI; prompts accept string `arguments` |
 | `gateway_mcp_proposals` | Optionally submit or inspect proposals with an authorized administrator token |
 
 Reliable agents do not guess tool names or arguments: search for the MCP, retrieve the tool schema, and call the exact returned name. Discovery and pagination do not wake lazy services. See the [Gateway tool reference](wiki/reference/gateway-tools.md). Failed services report their state without advertising executable tools; keyword search supports bounded one-character typo recovery.

@@ -151,6 +151,12 @@ def resource_index(rows, cached, *, mcp="", keyword=""):
                         "tool": "gateway_read_resource",
                         "arguments": {"uri": item["uri"]},
                     }
+                elif kind == "prompt":
+                    from .catalog import alias
+                    from .prompt_resources import prompt_read_hint
+
+                    item["gateway_name"] = alias(row.slug, item["name"])
+                    item.update(prompt_read_hint(row, item))
                 result.append(item)
     return result
 

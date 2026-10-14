@@ -63,6 +63,18 @@ test('large capability views stay on a fifty-item summary page and encode exact 
   assert.equal(capabilityDetailUrl('/mcps/service/capabilities','tools','folder/name'),'/mcps/service/capabilities/tools/folder%2Fname');
 });
 
+test('capability definitions use exact identifiers instead of display labels',()=>{
+  const root='/mcps/service/capabilities';
+  assert.equal(capabilityDetailUrl(root,'resources',{name:'Health',uri:'device://health'}),
+    root+'/resources/device%3A%2F%2Fhealth');
+  assert.equal(capabilityDetailUrl(root,'templates',{name:'Device',uriTemplate:'device://{key}'}),
+    root+'/templates/device%3A%2F%2F%7Bkey%7D');
+  assert.equal(capabilityDetailUrl(root,'prompts',{name:'status',gateway_name:'device__status'}),
+    root+'/prompts/status');
+  assert.equal(capabilityDetailUrl(root,'tools',{name:'echo',gateway_name:'device__echo'}),
+    root+'/tools/echo');
+});
+
 test('job progress model contains counters only and clamps invalid progress',()=>{
   assert.deepEqual(jobProgressModel({status:'running',total:10,completed:12,succeeded:8,failed:2,results:['large']}),{
     total:10,completed:10,succeeded:8,failed:2,cancelled:0,percent:100,status:'running',terminal:false,error:''

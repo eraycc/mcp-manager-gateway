@@ -60,7 +60,18 @@ Schema 校验只解析自包含定义中的本地引用，不自动读取远程 
 
 ## `gateway_read_resource`
 
-使用列表结果中的精确 URI 读取资源。该入口是只读资源协议适配，不等价于执行任意业务工具。
+使用列表结果中的精确 URI 读取资源或提示词。该入口是只读资源/提示词协议适配，不等价于执行任意业务工具。
+
+提示词项提供 `uri`、`read_with` 和原生 `prompts/get` 的 `get_with`。兼容 URI 形如 `mcp-manager://<server-id>/prompt://example/workflow`，应直接使用列表返回值，不自行猜测名称。读取时网关精确查找授权提示词并调用下游 `prompts/get`，不会将资源读取失败后盲目重试为提示词。真实声明的同 URI 资源优先按资源处理。
+
+~~~json
+{
+  "uri": "mcp-manager://<server-id>/prompt://example/workflow",
+  "arguments": {"topic": "example"}
+}
+~~~
+
+`arguments` 只用于提示词，参数值必须是字符串。缺少必填参数或参数名错误时返回 `invalid_arguments`，并说明具体字段；不启动下游。工具响应保留完整 `messages`，同时在 `contents` 中提供完整提示词结果的 JSON。原生 `resources/read` 也可读取无需参数的兼容提示词 URI；需要参数时使用原生 `prompts/get` 或上述工具入口。
 
 ## `gateway_mcp_proposals`
 

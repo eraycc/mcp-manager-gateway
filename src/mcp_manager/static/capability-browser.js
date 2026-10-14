@@ -11,7 +11,8 @@ export function capabilityListUrl(resource,{kind='tools',q='',cursor=null,limit=
  return resource+'?'+params;
 }
 
-export function capabilityDetailUrl(resource,kind,name){
+export function capabilityDetailUrl(resource,kind,item){
+ const name=typeof item==='string'?item:kind==='resources'?item.uri:kind==='templates'?item.uriTemplate:item.name;
  return resource+'/'+encodeURIComponent(kind)+'/'+encodeURIComponent(name);
 }
 
@@ -57,7 +58,7 @@ export function capabilityBrowser({resource,signal,title='能力目录',initialK
   if(!area){area=el('div',{class:'capability-definition'});card.append(area)}
   area.replaceChildren(loading('正在获取完整定义…'));
   try{
-   const value=await api(capabilityDetailUrl(resource,kind,nameOf(item)),{signal:current.signal});
+   const value=await api(capabilityDetailUrl(resource,kind,item),{signal:current.signal});
    if(request!==epoch||owned.signal.aborted||!card.isConnected)return;
    const output=el('pre');area.replaceChildren(output);await renderFullJson(output,value,{signal:current.signal});
    if(request!==epoch||owned.signal.aborted)return;
@@ -84,7 +85,7 @@ export function capabilityBrowser({resource,signal,title='能力目录',initialK
     el('p',{class:'muted'},item.description||item.mimeType||'暂无描述'),
     el('div',{class:'actions'},detailButton,
      kind==='tools'&&onTool?button('调用测试',async()=>{
-      const definition=await api(capabilityDetailUrl(resource,kind,nameOf(item)),{signal:owned.signal});
+      const definition=await api(capabilityDetailUrl(resource,kind,item),{signal:owned.signal});
       onTool(definition);
      }):null)
    );

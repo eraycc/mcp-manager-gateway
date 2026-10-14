@@ -18,6 +18,10 @@ def public_summary(row, kind, value):
         item[field] = "mcp-manager://" + row.id + "/" + item[field]
     if kind == "resource":
         item["read_with"] = {"tool": "gateway_read_resource", "arguments": {"uri": item["uri"]}}
+    elif kind == "prompt":
+        from .prompt_resources import prompt_read_hint
+
+        item.update(prompt_read_hint(row, item))
     return item
 
 

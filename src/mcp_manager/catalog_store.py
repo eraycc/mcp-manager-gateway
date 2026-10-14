@@ -442,6 +442,12 @@ class CatalogStore:
             raise GatewayError("catalog_hash_collision", "Capability name hash collision")
         return entry
 
+    async def has_capability(self, scope, *, kind, name):
+        """Exact metadata-only membership check; never read a definition artifact."""
+        self._check_kind(kind)
+        async with self.db.session() as session:
+            return await self._entry(session, scope, kind, name) is not None
+
     async def get_tool(self, scope, original_name):
         async with self.db.session() as session:
             entry = await self._entry(session, scope, "tools", original_name)

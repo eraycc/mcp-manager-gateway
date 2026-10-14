@@ -204,7 +204,7 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 | `gateway_search_tools` | 获取目标工具的完整 `inputSchema` 和精确 `gateway_name` |
 | `gateway_call` | 使用精确名称和符合 Schema 的参数执行工具 |
 | `gateway_list_resources` | 可选：列出资源、提示词和模板 |
-| `gateway_read_resource` | 可选：读取精确资源 URI |
+| `gateway_read_resource` | 可选：读取精确资源或提示词 URI；提示词支持字符串类型的 `arguments` |
 | `gateway_mcp_proposals` | 可选：管理员 Token 批量提交或查询 MCP 提议 |
 
 一个可靠的 Agent 不应猜测工具名或参数：先搜索 MCP，再搜索工具，最后使用返回的精确名称调用。搜索和目录分页不会唤醒 `lazy` 服务。

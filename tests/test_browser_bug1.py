@@ -180,3 +180,58 @@ async def test_auth_poll_stops(bug1_browser):
     await expect(page.get_by_label("密码", exact=True)).to_be_visible()
     await page.clock.fast_forward(60000)
     assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_resource_and_template_definition_buttons_use_uri_and_show_loading(bug1_browser):
+    from urllib.parse import parse_qs, unquote, urlsplit
+
+    page, url = bug1_browser
+    rows = [{"id": "demo", "name": "Capabilities", "slug": "demo", "transport": "stdio",
+             "mode": "lazy", "cache_status": "ready", "tool_count": 1}]
+    await page.route("**/api/v1/mcps?*", lambda route: route.fulfill(json={"items": rows, "total": 1}))
+    entries = {
+        "resources": {"name": "Health display label", "uri": "device://health"},
+        "templates": {"name": "Device display label", "uriTemplate": "device://sensor/{key}"},
+        "prompts": {"name": "status", "arguments": []},
+    }
+    entered, release = asyncio.Event(), asyncio.Event()
+    requested = []
+
+    async def capability(route):
+        parts = urlsplit(route.request.url)
+        if parts.query:
+            kind = parse_qs(parts.query)["kind"][0]
+            items = [entries[kind]] if kind in entries else []
+            await route.fulfill(json={"items": items, "total": len(items), "next_cursor": None})
+            return
+        suffix = parts.path.split("/capabilities/", 1)[1]
+        kind, name = suffix.split("/", 1)
+        requested.append((kind, unquote(name)))
+        entered.set()
+        await release.wait()
+        await route.fulfill(json=entries[kind])
+
+    await page.route("**/api/v1/mcps/demo/capabilities**", capability)
+    await page.goto(url + "/#/mcps")
+    await page.get_by_role("row").filter(has_text="Capabilities").get_by_role("button", name="工具 / 测试").click()
+    dialog = page.get_by_role("dialog")
+    for kind, label, key in [("resources", "资源", "uri"), ("templates", "资源模板", "uriTemplate"),
+                             ("prompts", "提示词", "name")]:
+        entered.clear()
+        release.clear()
+        await dialog.get_by_role("tab", name=label, exact=True).click()
+        control = dialog.get_by_role("button", name="查看完整定义", exact=True)
+        await control.click()
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            await expect(control).to_have_attribute("aria-busy", "true")
+            await expect(dialog.get_by_text("正在获取完整定义…", exact=True)).to_be_visible()
+            assert requested[-1] == (kind, entries[kind][key])
+        finally:
+            release.set()
+        await expect(dialog.locator(".capability-definition pre")).to_contain_text(entries[kind][key])
+        loaded_control = dialog.get_by_role("button", name="收起定义", exact=True)
+        await expect(loaded_control).not_to_have_attribute("aria-busy", "true")
+        await expect(loaded_control).to_be_enabled()
+        await expect(dialog.locator(".error")).to_have_count(0)

@@ -27,6 +27,10 @@ async def test_resource_proxy_with_real_downstream_session(db_app, transport):
     def status(key: str) -> str:
         return "status-" + key
 
+    @peer.prompt()
+    def workflow() -> str:
+        return "issue-workflow"
+
     application = peer.sse_app() if transport == "sse" else peer.streamable_http_app(json_response=False)
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -68,6 +72,12 @@ async def test_resource_proxy_with_real_downstream_session(db_app, transport):
             ctx, SimpleNamespace(name="devices__status", arguments={"key": "battery"}),
         )
         assert prompt.messages[0].content.text == "status-battery"
+        workflow_uri = f'mcp-manager://{row["id"]}/prompt://devices/workflow'
+        value = await db_app.app.state.gateway.read_resource(ctx, SimpleNamespace(uri=workflow_uri))
+        assert '"text": "issue-workflow"' in value.contents[0].text
+        value = await invoke(db_app, ctx, "gateway_read_resource", {"uri": workflow_uri})
+        assert not value.is_error, value
+        assert value.structured_content["messages"][0]["content"]["text"] == "issue-workflow"
     finally:
         # Release gateway-owned connections before the peer shuts down.
         for instance in db_app.app.state.runtime.status():
