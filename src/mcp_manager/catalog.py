@@ -170,7 +170,7 @@ class Catalog:
         runtime_filter = user_id if self.failure_scope(row) == "user" else runtime_user_id
         result.update(
             status=self.service_status(row, user_id),
-            tool_count=len(cache["tools"]),
+            tool_count=cache.get("tool_count", len(cache["tools"])) if cache["cache_status"] == "ready" else 0,
             cache_at=cache.get("cache_at"),
             cache_error=cache.get("cache_error"),
             cache_status=cache.get("cache_status"),
@@ -508,10 +508,7 @@ class Catalog:
                                   "cache_status": "disabled"}, user_id)
             return
         try:
-            if row.isolation == "session":
-                await self.refresh(row.id, user_id, authorize=authorize)
-            else:
-                await self.warm(row.id, user_id, authorize=authorize, expected_revision=row.revision)
+            await self.refresh_index(row.id, user_id, authorize=authorize)
         except Exception:  # noqa: BLE001,S110 - remote failure is persisted by refresh/warm
             # Saving valid configuration succeeds even when a remote service is
             # offline; the attempt and actionable status are recorded in its cache.
@@ -878,6 +875,8 @@ class Catalog:
                 raise GatewayError("credential_changed", "MCP scope changed while publishing capabilities")
             cached = self.cached(current, user_id)
             cached.update(
+                **{key: [] for key in CAPABILITY_KEYS},
+                **{key: result[key] for key in ("tool_count", "resource_count", "prompt_count", "template_count")},
                 cache_status="ready", cache_at=now().isoformat(), cache_attempt_at=now().isoformat(),
                 cache_error=None, cache_error_code=None, runtime_status="stopped",
                 startup_failure_count=0, last_startup_error_code=None, last_startup_error=None,

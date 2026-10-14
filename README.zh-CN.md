@@ -214,6 +214,7 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 ## 管理能力概览
 
 - **多种接入方式**：stdio、Streamable HTTP、旧 SSE、REST 转 MCP；
+- **自动目录刷新**：新增、导入、审批通过与复制服务后自动尝试刷新分页能力目录，成功后直接显示；
 - **统一导入导出**：通用 JSON、Codex TOML、Claude、DSH Cordis/registry；导出采用通用 `mcpServers` 连接字段，MMG 专用设置保存在版本化的 `config` 扩展中，支持完整重新导入（[格式说明](wiki/reference/catalog-api.md#service-configuration-export)）；
 - **授权边界**：用户、Token、匿名范围和 MCP 分配相互独立；
 - **OAuth 隔离**：个人凭据、能力目录和运行实例按用户隔离；

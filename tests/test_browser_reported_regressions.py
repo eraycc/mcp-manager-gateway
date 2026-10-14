@@ -1,4 +1,6 @@
-"""Focused browser regressions for dialog layout, full results and exports."""
+"""Focused browser regressions for dialog layout, full results, logs and exports."""
+import json
+
 import pytest
 from playwright.async_api import async_playwright, expect
 from test_gateway import running_gateway  # noqa: F401
@@ -7,11 +9,11 @@ from test_gateway import running_gateway  # noqa: F401
 @pytest.mark.asyncio
 async def test_reported_console_regressions(running_gateway):  # noqa: F811
     app, web, url, _token, row = running_gateway
-    await web.post(f'/api/v1/mcps/{row["id"]}/refresh')
     identity = await app.state.logs.append({
         "user_id": (await web.get("/api/v1/me")).json()["id"],
         "mcp_id": row["id"], "tool_name": "echo", "status": "success", "result": {"value": "ok"},
     })
+    await app.state.logs.append({"id": "following-record", "status": "success", "mcp_id": row["id"]})
     long_name = "very_long_tool_name_" * 30
     large_value = "完整结果" * 30000 + "END_OF_COMPLETE_RESULT"
     async with async_playwright() as pw:
@@ -28,6 +30,7 @@ async def test_reported_console_regressions(running_gateway):  # noqa: F811
         await page.locator(f'tr[data-row-id="{identity}"]').get_by_role("button", name="详情", exact=True).click()
         popup = page.get_by_role("dialog", name="调用详情", exact=True)
         await expect(popup.locator("pre")).to_contain_text('"status": "success"')
+        assert json.loads(await popup.locator("pre").inner_text())["id"] == identity
         assert not await popup.evaluate("(n)=>Array.from(n.querySelector('.dialog-body > .stack').childNodes).some(c=>c.nodeType===3 && c.textContent==='null')")
         await popup.get_by_role("button", name="关闭", exact=True).click()
 

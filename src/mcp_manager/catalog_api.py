@@ -204,7 +204,7 @@ async def import_mcps(data: dict, request: Request, user=ADMIN):
     if data.get("refresh") is True and refresh_ids:
         async def refresh_imported(server_id):
             actor = await web_authorizer(request)()
-            return await cat.refresh(server_id, actor.id, authorize=web_authorizer(request))
+            return await cat.refresh_index(server_id, actor.id, authorize=web_authorizer(request))
         result["refresh_job"] = await request.app.state.jobs.submit(
             "mcp.import.refresh", refresh_ids, refresh_imported, user.id)
     return result
@@ -370,14 +370,9 @@ async def duplicate(server_id: str, request: Request, user=ADMIN):
         mode="lazy",
     )
     copied = await cat.create(
-        values, authorize=web_authorizer(request), user_id=user.id, discover=False
+        values, authorize=web_authorizer(request), user_id=user.id
     )
-    try:
-        await cat.refresh_index(copied.id, user.id, authorize=web_authorizer(request))
-    except GatewayError:
-        # Copy remains saved; refresh_index records an actionable failure state.
-        pass
-    return await cat.detail(await cat.get(copied.id), user.id)
+    return await cat.detail(copied, user.id)
 
 
 async def indexed_permission(request, server_id, *, configuration=False):

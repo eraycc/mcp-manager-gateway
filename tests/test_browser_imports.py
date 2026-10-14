@@ -165,7 +165,14 @@ async def test_navigation_protocol_and_import_wizard(running_gateway, monkeypatc
         await page.get_by_role("button", name="确认导入", exact=True).click()
         await page.get_by_role("button", name="执行导入", exact=True).click()
         await page.get_by_role("dialog", name="导入结果", exact=True).get_by_role("button", name="关闭").click()
-        assert (await web.get("/api/v1/mcps")).json()["total"] == 6
+        services = (await web.get("/api/v1/mcps")).json()
+        assert services["total"] == 6
+        imported = next(service for service in services["items"] if service["name"] == "rest-0")
+        await page.locator(f'tr[data-row-id="{imported["id"]}"]').get_by_role("button", name="工具 / 测试", exact=True).click()
+        directory = page.get_by_role("dialog", name="rest-0 · 能力目录", exact=True)
+        await expect(directory.locator(".capability-card")).to_have_count(1)
+        await expect(directory.locator(".capability-card")).to_contain_text("read")
+        await directory.get_by_role("button", name="关闭", exact=True).click()
 
         await page.locator('summary[aria-label="显示模式"]').click()
         await page.locator(".action-menu-panel").filter(has_text="显示模式").get_by_role(
@@ -271,7 +278,7 @@ async def test_import_stale_responses_and_partial_retry(running_gateway):  # noq
         await page.unroute("**/api/v1/mcps/import-sources?*",delayed_scan)
         await apply([item("saved"),item("retry-me")])
         async def partial(route):
-            assert route.request.post_data_json["refresh"] is True
+            assert "refresh" not in route.request.post_data_json  # creation already publishes the catalog
             await route.fulfill(json={"results":[{"name":"saved","status":"imported"}],"errors":[{"name":"retry-me","error":"temporary failure"}]})
         await page.route("**/api/v1/mcps/import",partial)
         await page.get_by_role("button",name="确认导入",exact=True).click()

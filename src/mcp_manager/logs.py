@@ -348,7 +348,7 @@ class LogStore:
         def read():
             with reference["path"].open("rb") as source:
                 source.seek(reference["offset"])
-                raw = source.read(min(reference["size"], max_bytes) + 1)
+                raw = source.read(min(reference["size"], max_bytes))
             return raw
         raw = await asyncio.to_thread(read)
         truncated = reference["size"] > max_bytes
