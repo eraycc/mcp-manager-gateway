@@ -11,8 +11,10 @@ from test_runtime_lifecycle import Connection
 from mcp_manager.artifact_store import ArtifactStore
 from mcp_manager.config import Settings
 from mcp_manager.database import Database, set_setting
+from mcp_manager.embeddings import EmbeddingIndex
 from mcp_manager.gateway import Gateway
 from mcp_manager.job_store import JobStore
+from mcp_manager.jsonl_store import JsonlStore
 from mcp_manager.logs import LogStore
 from mcp_manager.runtime import GatewayError, Runtime, ServerSpec
 
@@ -37,7 +39,8 @@ async def retention_app(tmp_path, monkeypatch):
         logs=logs,
         runtime=Runtime(None),
         jobs=SimpleNamespace(store=JobStore(db, artifacts)),
-        catalog=SimpleNamespace(artifacts=artifacts),
+        catalog=SimpleNamespace(artifacts=artifacts, cache_store=JsonlStore(tmp_path / "cache/catalog.jsonl")),
+        embeddings=EmbeddingIndex(tmp_path, db=db, artifacts=artifacts),
         retention_next=0,
         refresh_next=None,
     )
@@ -73,6 +76,7 @@ async def test_retention_removes_only_older_events_from_jsonl_and_rebuilt_index(
     await set_setting(state.db, "log_retention_days", days)
     for event_id, stamp in EVENTS:
         await state.logs.append({"id": event_id, "timestamp": stamp, "status": "success"})
+    await state.logs.audit("test.retention", None, {"marker": "keep-audit"})
     await maintenance_pass(retention_app, monkeypatch)
     assert {row["id"] for row in (await state.logs.query())["items"]} == expected
     persisted = {

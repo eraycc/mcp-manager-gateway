@@ -84,6 +84,7 @@ class JsonlStore:
         with self.lock:
             try:
                 with temp.open("wb") as stream:
+                    # Replay already removes null tombstones; compaction writes only live values.
                     for key, value in self.items.items():
                         stream.write((json.dumps({"key": key, "value": value}, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
                     stream.flush()
@@ -98,9 +99,20 @@ class JsonlStore:
 
     def delete_prefix(self, prefix):
         with self.lock:
-            for key in list(self.items):
-                if key.startswith(prefix):
-                    self.set(key, None)
+            return self.delete_keys({key for key in self.items if key.startswith(prefix)})
+
+    def delete_keys(self, keys: "set[str]"):
+        """Atomically remove exact keys and their history, preserving the old snapshot on failure."""
+        with self.lock:
+            previous = self.items
+            self.items = {key: value for key, value in previous.items() if key not in keys}
+            removed = len(previous) - len(self.items)
+            try:
+                self.compact()
+            except BaseException:
+                self.items = previous
+                raise
+            return removed
 
     def migrate_json(self, convert):
         """Import before removing each old snapshot; unreadable files are preserved."""

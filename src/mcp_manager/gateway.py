@@ -487,6 +487,7 @@ class Gateway:
             }
             documents = []
             keyed = {}
+            providers = {row.id: row for row in rows}
             for index, item in enumerate(items):
                 document_id = hashlib.sha256(
                     json.dumps([item.get("mcp", {}).get("id"), item.get("kind"),
@@ -495,7 +496,9 @@ class Gateway:
                 ).hexdigest()
                 keyed[document_id] = item
                 from .discovery import resource_search_document
-                documents.append({"id": document_id, "text": json.dumps(resource_search_document(item), ensure_ascii=False)})
+                provider = providers[item["mcp"]["id"]]
+                documents.append({"id": document_id, "text": json.dumps(resource_search_document(item), ensure_ascii=False),
+                                  "cache_ref": [provider.id, provider.revision]})
             from .embedding_api import load_embedding_config
             config = await load_embedding_config(self.app.state)
             scope = hashlib.sha256(

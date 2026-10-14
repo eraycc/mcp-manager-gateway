@@ -3,17 +3,19 @@ import asyncio
 import hashlib
 import json
 import math
+import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from weakref import WeakValueDictionary
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import exists, select
+from sqlalchemy import and_, delete, exists, or_, select, tuple_
 
 from .catalog_models import ArtifactObject, CatalogEntry, CatalogGeneration, CatalogHead
 from .catalog_store import generation_scope, scope_key
 from .catalog_types import ArtifactRef, CatalogScope
+from .database import McpServer
 from .embedding_models import EmbeddingVector
 from .jsonl_store import JsonlStore
 from .runtime import GatewayError
@@ -24,6 +26,8 @@ MAX_BATCH_INPUTS = 32
 MAX_BATCH_CHARS = 256_000
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 PROBE_TEXT = "MCP semantic discovery probe"
+LEGACY_CACHE_MAX_ENTRIES = 2048
+LEGACY_CACHE_TTL_SECONDS = 7 * 86400
 
 
 class _EmbeddingError(Exception):
@@ -236,6 +240,7 @@ class EmbeddingIndex:
                 raise _EmbeddingError("input_too_large")
 
             prepared = []
+            cache_refs = {}
             seen = set()
             truncated = 0
             for item in documents:
@@ -251,6 +256,10 @@ class EmbeddingIndex:
                     text = text[:MAX_TEXT_CHARS]
                     truncated += 1
                 prepared.append((item["id"], text, content_hash))
+                reference = item.get("cache_ref")
+                if (isinstance(reference, (list, tuple)) and len(reference) == 2
+                        and isinstance(reference[0], str) and type(reference[1]) is int):
+                    cache_refs[item["id"]] = list(reference)
 
             query_text = query[:MAX_TEXT_CHARS]
             metadata = {"mode": "hybrid", "semantic_status": "ready"}
@@ -285,10 +294,18 @@ class EmbeddingIndex:
                         authorize=authorize,
                     )
                     cache_failed = False
+                    query_refs = sorted({tuple(ref) for ref in cache_refs.values()})
                     for (document_id, _text, key), vector in zip(missing, embedded, strict=True):
                         vectors[document_id] = vector
                         try:
-                            await asyncio.to_thread(self.store.set, key, {"vector": vector})
+                            await asyncio.to_thread(self.store.set, key, {
+                                "vector": vector, "cache_version": 1,
+                                "model_hash": self._model_hash(endpoint, model),
+                                "references": [cache_refs[document_id]] if document_id in cache_refs else (
+                                    [list(ref) for ref in query_refs] if not document_id else []
+                                ),
+                                "cached_at": time.time(),
+                            })
                         except OSError:
                             cache_failed = True
                     if cache_failed:
@@ -650,3 +667,89 @@ class EmbeddingIndex:
             return {"status": "unavailable", "semantic_status": "unavailable", "reason": exc.code}
         except Exception:  # noqa: BLE001 -- diagnostics return only safe error codes.
             return {"status": "unavailable", "semantic_status": "unavailable", "reason": "internal_error"}
+
+
+async def prune_stale_vectors(state, *, batch_limit=250):
+    """Reclaim rebuildable vectors without changing catalog or disabled/failed scopes."""
+    from .embedding_api import load_embedding_config
+
+    if type(batch_limit) is not int or not 0 <= batch_limit <= 250:
+        raise ValueError("Vector retention batch must contain 0–250 items")
+    config = await load_embedding_config(state)
+    model_hash = None
+    if config.get("enabled") is True:
+        try:
+            endpoint, model, *_ = _settings(config)
+            model_hash = EmbeddingIndex._model_hash(endpoint, model)
+        except _EmbeddingError:
+            pass  # An invalid setting is not authority to remove a previous model.
+    disabled = exists().where(
+        CatalogGeneration.id == EmbeddingVector.generation_id,
+        McpServer.id == CatalogGeneration.server_id, McpServer.mode == "disabled",
+    )
+    failed = exists().where(
+        CatalogHead.scope_key == EmbeddingVector.scope_key, CatalogHead.status != "ready",
+    )
+    referenced = exists().where(
+        CatalogEntry.id == EmbeddingVector.entry_id,
+        CatalogEntry.generation_id == EmbeddingVector.generation_id,
+        or_(CatalogHead.generation_id == CatalogEntry.generation_id,
+            CatalogHead.refresh_id == CatalogEntry.generation_id),
+    )
+    stale = and_(~disabled, ~failed, or_(~referenced, EmbeddingVector.model_hash != model_hash)
+                 if model_hash else ~referenced)
+    deleted = 0
+    if batch_limit:
+        async with state.db.locked() as session:
+            identities = list((await session.execute(select(
+                EmbeddingVector.generation_id, EmbeddingVector.entry_id, EmbeddingVector.model_hash,
+            ).where(stale).limit(batch_limit))).all())
+            if identities:
+                result = await session.execute(delete(EmbeddingVector).where(
+                    stale, tuple_(EmbeddingVector.generation_id, EmbeddingVector.entry_id,
+                                  EmbeddingVector.model_hash).in_(identities),
+                ).execution_options(synchronize_session=False))
+                deleted = result.rowcount
+
+    # Only small reference metadata is loaded; vector payloads stay out of SQL and the event loop.
+    async with state.db.session() as session:
+        services = {row.id: (row.revision, row.mode) for row in (await session.execute(
+            select(McpServer.id, McpServer.revision, McpServer.mode)
+        )).all()}
+        protected = set((await session.scalars(select(CatalogHead.server_id).where(
+            CatalogHead.status != "ready"
+        ))).all())
+
+    def clean_cache():
+        store = state.embeddings.store
+        with store.lock:
+            doomed, live = set(), []
+            cutoff = time.time() - LEGACY_CACHE_TTL_SECONDS
+            for key, value in store.items.items():
+                if not isinstance(value, dict) or value.get("cache_version") != 1:
+                    doomed.add(key)  # Approved one-time rebuild of untraceable legacy hashes.
+                    continue
+                refs = value.get("references")
+                if not isinstance(refs, list) or any(
+                    not isinstance(ref, list) or len(ref) != 2 or not isinstance(ref[0], str)
+                    or type(ref[1]) is not int for ref in refs
+                ):
+                    doomed.add(key)
+                    continue
+                if any(ref[0] in protected or services.get(ref[0], (None, None))[1] == "disabled" for ref in refs):
+                    continue
+                timestamp = value.get("cached_at")
+                if (not _number(timestamp) or timestamp < cutoff
+                        or (model_hash and value.get("model_hash") != model_hash)
+                        or any(services.get(server_id, (None, None))[0] != revision for server_id, revision in refs)):
+                    doomed.add(key)
+                else:
+                    live.append((timestamp, key))
+            # Query and token scopes can be unlimited even when the directory is small.
+            # Bound reusable active cache entries; protected scopes are retained.
+            live.sort()
+            doomed.update(key for _, key in live[:max(0, len(live) - LEGACY_CACHE_MAX_ENTRIES)])
+            return store.delete_keys(doomed) if doomed else 0
+
+    cached = await asyncio.to_thread(clean_cache)
+    return {"vectors": deleted, "cache_entries": cached}

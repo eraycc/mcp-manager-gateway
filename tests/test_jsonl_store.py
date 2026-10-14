@@ -68,7 +68,7 @@ async def test_legacy_caches_consolidate_latest_revision_and_remove_json(tmp_pat
         assert [p.name for p in cache.iterdir()] == ["catalog.jsonl"]
 
 
-async def test_jobs_migrate_redact_and_mark_interrupted_without_replay(tmp_path):
+async def test_reconciliation_never_reads_or_removes_legacy_jobs(tmp_path, monkeypatch):
     from mcp_manager.config import Settings
     from mcp_manager.database import Database
     from mcp_manager.home_migration import reconcile_data
@@ -79,16 +79,25 @@ async def test_jobs_migrate_redact_and_mark_interrupted_without_replay(tmp_path)
     (directory / "one.json").write_text(json.dumps({
         "id": "one", "status": "running", "token": "secret-value", "completed": 1}), encoding="utf-8")
     settings = Settings(data_dir=tmp_path, secret_key="legacy-job-test")
-    assert (await reconcile_data(settings))["jobs"] == 1
+    legacy = directory / "jobs.jsonl"
+    legacy.write_text("opaque old job history", encoding="utf-8")
+    original = JsonlStore.__init__
+
+    def reject_jobs(store, path, **kwargs):
+        assert Path(path).parent.name != "jobs", "Legacy jobs must never be read"
+        original(store, path, **kwargs)
+
+    monkeypatch.setattr(JsonlStore, "__init__", reject_jobs)
+    assert (await reconcile_data(settings))["jobs"] == 0
     db = Database(settings)
     try:
         await db.initialize()
         async with db.session() as session:
-            assert (await session.get(JobRecord, "one")).status == "interrupted"
+            assert await session.get(JobRecord, "one") is None
     finally:
         await db.close()
-    assert not list(directory.glob("*.json"))
-    assert "secret-value" not in (directory / "jobs.jsonl").read_text(encoding="utf-8")
+    assert (directory / "one.json").exists()
+    assert legacy.read_text(encoding="utf-8") == "opaque old job history"
     assert (await reconcile_data(settings))["jobs"] == 0
 
 
@@ -122,3 +131,57 @@ async def test_missing_lazy_cache_is_rebuilt_on_restart_without_keeping_process(
         assert restarted.state.catalog.cached(current)["cache_status"] == "ready"
         assert peer.starts == 1
         assert not restarted.state.runtime.instances
+
+
+def test_delete_prefix_physically_removes_history_and_tombstones(tmp_path):
+    store = JsonlStore(tmp_path / "state.jsonl", fail_closed=True)
+    store.set("gone-user", {"payload": "x" * 4096})
+    store.set("gone-user", {"payload": "latest"})
+    store.set("gone-deleted", {"payload": "old"})
+    store.set("gone-deleted", None)
+    store.set("keep", {"payload": "valid"})
+    before = store.path.stat().st_size
+    store.delete_prefix("gone-")
+    assert store.path.stat().st_size < before
+    assert store.records == 1
+    assert [json.loads(line)["key"] for line in store.path.read_text().splitlines()] == ["keep"]
+    assert JsonlStore(store.path, fail_closed=True).items == {"keep": {"payload": "valid"}}
+    first = store.path.read_bytes()
+    store.compact()
+    store.compact()
+    assert store.path.read_bytes() == first
+
+
+def test_delete_keys_is_exact_and_atomic_on_replace_failure(tmp_path, monkeypatch):
+    store = JsonlStore(tmp_path / "state.jsonl", fail_closed=True)
+    store.set("one", {"payload": "old"})
+    store.set("one", {"payload": "current"})
+    store.set("one-more", {"payload": "keep"})
+    before = store.path.read_bytes()
+    original_records = store.records
+
+    def blocked(path, target):
+        raise PermissionError("locked")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", blocked)
+        import pytest
+        with pytest.raises(PermissionError):
+            store.delete_keys({"one"})
+    assert store.path.read_bytes() == before
+    assert store.get("one") == {"payload": "current"}
+    assert store.records == original_records
+    assert not list(tmp_path.glob("*.compact.jsonl"))
+    assert store.delete_keys({"one"}) == 1
+    assert JsonlStore(store.path).items == {"one-more": {"payload": "keep"}}
+    assert store.delete_keys({"missing"}) == 0
+
+
+def test_delete_prefix_never_resurrects_a_tombstoned_key(tmp_path):
+    store = JsonlStore(tmp_path / "state.jsonl", fail_closed=True)
+    store.set("old", {"payload": "obsolete"})
+    store.set("old", None)
+    store.set("keep", {"payload": "valid"})
+    store.delete_prefix("unrelated-")
+    assert JsonlStore(store.path, fail_closed=True).items == {"keep": {"payload": "valid"}}
+    assert "obsolete" not in store.path.read_text()

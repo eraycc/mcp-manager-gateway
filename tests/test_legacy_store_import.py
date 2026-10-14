@@ -6,7 +6,7 @@ import pytest
 from mcp_manager.config import Settings
 from mcp_manager.database import ApiToken, Database, McpProposal, McpServer, User
 from mcp_manager.home_migration import reconcile_data
-from mcp_manager.job_models import JobRecord
+
 
 
 @pytest.mark.asyncio
@@ -55,27 +55,16 @@ async def test_reconcile_backfills_proposals_and_imports_legacy_indexes(tmp_path
         json.dumps({"tools": [{"name": "legacy_tool"}], "cache_status": "ready"}),
         encoding="utf-8",
     )
-    jobs_dir = config.data_dir / "jobs"
-    jobs_dir.mkdir()
-    legacy_job = jobs_dir / "legacy-job.json"
-    legacy_job.write_text(
-        json.dumps({"id": "legacy-job", "action": "old.batch", "status": "running", "total": 3}),
-        encoding="utf-8",
-    )
 
     report = await reconcile_data(config, batch_size=2)
-    assert report == {"proposals": 1, "catalog_snapshots": 1, "jobs": 1}
+    assert report == {"proposals": 1, "catalog_snapshots": 1, "jobs": 0}
     assert not legacy_cache.exists()
-    assert not legacy_job.exists()
 
     reopened = Database(config)
     await reopened.initialize()
     async with reopened.session() as session:
         proposal = await session.get(McpProposal, proposal_id)
-        job = await session.get(JobRecord, "legacy-job")
         assert proposal.public_name == "公开名称"
-        assert job.status == "interrupted"
-        assert job.action == "old.batch"
     await reopened.close()
 
     assert await reconcile_data(config, batch_size=2) == {

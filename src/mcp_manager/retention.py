@@ -1,4 +1,5 @@
 """Batched retention coordinator for database rows and immutable artifacts."""
+import asyncio
 from datetime import timedelta
 
 from sqlalchemy import delete, exists, select
@@ -6,6 +7,7 @@ from sqlalchemy import delete, exists, select
 from .catalog_models import ArtifactObject, CatalogEntry, CatalogGeneration, CatalogHead, ProposalTestEntry
 from .database import McpProposal
 from .embedding_models import EmbeddingVector
+from .embeddings import prune_stale_vectors
 from .job_models import JobResult
 
 
@@ -88,5 +90,10 @@ async def run_storage_retention(state, *, at, batch_limit=250):
     remaining -= deleted["proposal_entries"]
     deleted["catalog_rows"] = await _prune_capability_rows(state, at, remaining)
     remaining -= deleted["catalog_rows"]
+    vectors = await prune_stale_vectors(state, batch_limit=remaining)
+    deleted["embedding_vectors"] = vectors["vectors"]
+    remaining -= deleted["embedding_vectors"]
     deleted["artifacts"] = await _prune_artifacts(state, remaining)
-    return {"deleted": sum(deleted.values()), "by_kind": deleted}
+    await asyncio.to_thread(state.catalog.cache_store.compact)
+    return {"deleted": sum(deleted.values()), "by_kind": deleted,
+            "cache": {"embedding_entries": vectors["cache_entries"], "catalog_compacted": True}}
