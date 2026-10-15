@@ -13,7 +13,7 @@ from filelock import FileLock, Timeout
 from jsonschema import ValidationError
 from sqlalchemy import select
 
-from . import catalog_api, credentials_api, embedding_api, identity, operations_api, proposals
+from . import catalog_api, credentials_api, embedding_api, identity, operations_api, proposals, storage_api
 from .catalog import Catalog
 from .config import PACKAGE_ROOT, Settings
 from .credentials import CredentialStore
@@ -25,6 +25,7 @@ from .logs import LogStore
 from .oauth import OAuth
 from .oauth import router as oauth_router
 from .runtime import GatewayError, Runtime, RuntimeCapacity
+from .storage_maintenance import StorageMaintenance
 from .transports import connect, load_transport_plugins
 
 
@@ -306,6 +307,8 @@ def create_app(config=None):
         task = None
         try:
             await state.db.initialize()
+            state.storage = StorageMaintenance(state)
+            await state.storage.startup()
             await state.jobs.start()
             state.cors_origins = await get_setting(state.db, "cors_origins", ["*"])
             state.allowed_hosts = await get_setting(state.db, "allowed_hosts", ["*"])
@@ -383,6 +386,7 @@ def create_app(config=None):
         catalog_api.router,
         credentials_api.router,
         operations_api.router,
+        storage_api.router,
         oauth_router,
         embedding_api.router,
         proposals.router,

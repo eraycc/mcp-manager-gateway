@@ -190,7 +190,8 @@ Browser translation can send visible page text to the configured translation pro
 - optional translation with provider and ignore-rule controls;
 - optional PyPI update detection, with automatic checks enabled by default and manual checks always available;
 - keyword and fuzzy tool search, with optional OpenAI-compatible embeddings;
-- SQLite by default and optional MySQL.
+- SQLite by default and optional MySQL;
+- independent threshold-based startup compaction and manual space reclamation for file-backed SQLite databases, without expiring valid data ([storage maintenance](wiki/database-deployment.md#数据库空间治理)).
 
 See [Manage services](wiki/guides/manage-services.md), [Runtime and lifecycle](wiki/concepts/runtime-and-lifecycle.md), and [Security model](wiki/security/security-model.md).
 

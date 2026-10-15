@@ -1,6 +1,7 @@
 import{$,el,icon,pretty,api,button,toast,run,field,selectField,check,jsonField,dialog,formDialog,detail,download,directDownload,badge,date,route,navigate,title,loading,empty,allPages,jobDialog,tablePage,cacheInfo,pagedList,tabPanels,enableTableDragging}from './core.js';
 import{mcpEditor,proposalEditor,mcpTools,mcpImport,oauthDialog,credentialDialog,credentialStateLabel}from './mcps.js';
 import{embeddingSettings}from './search-settings.js';
+import{storageSettings}from './storage-settings.js';
 import{capabilityBrowser}from './capability-browser.js';
 import{translationSettings}from './translation-settings.js';
 import{DEFAULT_TRANSLATION_CONFIG,normalizeTranslationConfig,applyTranslation,disableTranslation,preferredTranslationTarget}from './translation.js';
@@ -286,6 +287,7 @@ async function settings(main,signal){
  settingPanels.push(['translation','翻译设置',translation.node]);
  const about=el('section',{class:'card'},el('h2',{},'关于'),loading());
  const loadAbout=async()=>{try{const content=aboutPanel(await api('/about',{signal}),updateCheck.node);about.replaceChildren(...content.childNodes);about.className=content.className}catch(e){if(e.name==='AbortError')return;about.replaceChildren(el('h2',{},'关于'),el('p',{class:'error',role:'alert'},e.message),button('重试',loadAbout))}};
+ settingPanels.push(['storage','存储治理',storageSettings(signal)]);
  settingPanels.push(['embedding','工具检索',await embeddingSettings(signal)]);
  const aboutLabel=el('span',{class:'tab-label'},'关于',updateState?.notification_count?notificationDot(updateState.notification_count):null);settingPanels.push(['about',aboutLabel,about]);
  form.append(tabPanels(settingPanels,{key:'settings_tab',label:'系统设置分类'}));

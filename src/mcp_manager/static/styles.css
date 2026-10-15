@@ -70,7 +70,11 @@ html,body,#app{min-height:100vh}html:has(body.dark){background:#101726}.shell{mi
 .settings-form:has(#settings_tab-panel-embedding:not([hidden])) .settings-save{display:none}
 @media(max-width:720px){.settings-grid,.settings-row{grid-template-columns:minmax(0,1fr)}.about-links{grid-template-columns:minmax(0,1fr)}.about-version{width:100%}.session-actions{width:100%}.session-actions button{flex:1}}
 
-.settings-form>div,#settings_tab-panel-embedding,.settings-grid>label{min-width:0}
+.settings-form>div,#settings_tab-panel-embedding,#settings_tab-panel-storage,.settings-grid>label{min-width:0}
+.storage-database{min-width:0;margin:0;padding:18px;border:1px solid var(--line);border-radius:8px}
+.storage-database legend{padding:0 8px;font-size:15px;font-weight:600}
+.storage-database>p{margin:0}
+.storage-status{min-height:24px;overflow-wrap:anywhere}
 #settings_tab-panel-embedding small,#settings_tab-panel-embedding .notice{overflow-wrap:anywhere}
 .toolbar>label.filter-submit-field{display:grid;grid-template-rows:auto auto;align-content:start}
 .toolbar>label.filter-submit-field>.field-label{min-height:1.55em;line-height:1.55}
