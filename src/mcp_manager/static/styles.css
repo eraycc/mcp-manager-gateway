@@ -138,7 +138,7 @@ button.is-busy .button-label{opacity:.72}
 .capability-card{min-width:0;margin:0;padding:18px}
 .capability-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
 .capability-name{min-width:0;overflow-wrap:anywhere}
-.capability-card p{margin:8px 0 14px}
+.capability-card p{margin:8px 0 14px;overflow-wrap:anywhere}
 .capability-definition{margin-top:14px;border-top:1px solid var(--line);padding-top:14px}
 .capability-definition pre{max-height:320px;margin:0}
 .capability-pagination{padding-inline:0}

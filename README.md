@@ -50,7 +50,7 @@ Listing MCPs, searching tools, and paging through the catalog never starts a dow
 
 Each agent connects to MMG instead of carrying dozens of independent MCP definitions. The gateway centrally manages services, credentials, permissions, health, and runtime state. The same catalog can be safely assigned to different users and tokens.
 
-For Web integrations with large catalogs, use [capability summary pages and exact definitions](wiki/reference/catalog-api.md). Approval tests support a bounded summary response; legacy full-list responses have explicit size limits. Agent service summaries include a bounded tool-name preview; enumerate `gateway_search_tools` for the full catalog. Exact calls use indexed routes and reuse schema validators.
+For Web integrations with large catalogs, use [capability summary pages and exact definitions](wiki/reference/catalog-api.md). Capability cards wrap long descriptions, URLs, and identifiers within their borders on desktop and mobile. Approval tests support a bounded summary response; legacy full-list responses have explicit size limits. Agent service summaries include a bounded tool-name preview; enumerate `gateway_search_tools` for the full catalog. Exact calls use indexed routes and reuse schema validators.
 
 ### Agent proposals with human approval
 

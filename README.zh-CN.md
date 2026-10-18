@@ -50,7 +50,7 @@ MCP Manager Gateway
 
 每个 Agent 只连接 MMG，不再分别维护几十份 MCP 配置。服务、凭据、权限和运行状态由网关集中管理；同一套 MCP 可以安全地分配给不同用户和 Token。
 
-大目录的 Web 集成请使用[能力摘要分页与精确详情](wiki/reference/catalog-api.md)。审批测试支持有界摘要响应；旧全量列表接口有明确的大小限制。Agent 服务摘要提供有界工具名称预览，完整目录通过 `gateway_search_tools` 分页遍历；精确调用走索引路由并复用 Schema 校验器。
+大目录的 Web 集成请使用[能力摘要分页与精确详情](wiki/reference/catalog-api.md)。能力卡片中的长描述、URL 和标识符会在卡片边界内自动换行，适配桌面与手机。审批测试支持有界摘要响应；旧全量列表接口有明确的大小限制。Agent 服务摘要提供有界工具名称预览，完整目录通过 `gateway_search_tools` 分页遍历；精确调用走索引路由并复用 Schema 校验器。
 
 ### Agent 提议，人类审批
 
