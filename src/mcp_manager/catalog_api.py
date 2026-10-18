@@ -4,6 +4,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from .catalog import restore, web_authorizer
+from .credentials import PERSONAL_AUTH_TYPES
 from .database import McpServer, SystemSetting, get_setting, invalidate_setting_cache
 from .diagnostics import diagnostic_secrets, sanitize_diagnostic_error
 from .identity import admin_user, current_user, effective_mcp_ids
@@ -106,11 +107,15 @@ async def listing(request: Request, q: str = "", page: int = 1, page_size: int =
         rows = list((await session.scalars(statement.offset((page - 1) * page_size).limit(page_size))).all())
     scopes = await cat.index_scopes(rows, actor.id)
     summaries = await cat.index.get_summaries(scopes.values())
+    credentials = (await cat.credentials.configuration_summaries(rows, actor.id)
+                   if actor.role == "admin" else {})
     items = []
     for row in rows:
         item = lightweight_public(cat, row, actor.id)
         if row.mode != "disabled" and row.id in summaries:
             item.update(summaries[row.id])
+        if row.id in credentials:
+            item["personal_credentials"] = credentials[row.id]
         items.append(item)
     from .http_budget import ensure_json_budget
 
@@ -440,7 +445,7 @@ async def cached_tools(server_id: str, request: Request, user=USER):
     if record and record["revision"] == row.revision:
         await ensure_json_budget(record["data"], max_bytes=1048576)
     value = cat.cached(row, actor.id)
-    if row.auth_type in {None, "bearer", "oauth"}:
+    if row.auth_type is None or row.auth_type in PERSONAL_AUTH_TYPES:
         try:
             await cat.credentials.materialize(row, actor.id)
         except GatewayError as exc:

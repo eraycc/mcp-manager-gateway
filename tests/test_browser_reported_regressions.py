@@ -49,7 +49,7 @@ async def test_reported_console_regressions(running_gateway):  # noqa: F811
         await page.route("**/api/v1/mcps/*/test", lambda route: route.fulfill(json={
             "content": [{"type": "text", "text": large_value}],
         }))
-        await service.get_by_role("button", name="工具 / 测试", exact=True).click()
+        await service.get_by_role("button", name="能力/测试", exact=True).click()
         directory = page.get_by_role("dialog", name="Echo · 能力目录", exact=True)
         await expect(directory.locator(".capability-card")).to_have_count(2)
         await directory.get_by_role("button", name="查看完整定义", exact=True).first.click()
@@ -71,7 +71,7 @@ async def test_reported_console_regressions(running_gateway):  # noqa: F811
         }))
         await page.route("**/api/v1/mcps/*/refresh", lambda route: (responses.append("refreshed"), route.fulfill(json={"status": "ready", "tool_count": 1}))[1])
         await directory.locator(".dialog-head").get_by_role("button", name="关闭", exact=True).click()
-        await service.get_by_role("button", name="工具 / 测试", exact=True).click()
+        await service.get_by_role("button", name="能力/测试", exact=True).click()
         directory = page.get_by_role("dialog", name="Echo · 能力目录", exact=True)
         await directory.get_by_role("button", name="刷新发现缓存", exact=True).click()
         await expect(directory.locator(".capability-card")).to_contain_text("after-refresh")

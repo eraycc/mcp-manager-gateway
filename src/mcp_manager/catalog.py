@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from .artifact_store import ArtifactStore
 from .catalog_store import CatalogStore
 from .catalog_types import CatalogScope
-from .credentials import catalog_owner, credential_owner
+from .credentials import PERSONAL_AUTH_TYPES, catalog_owner, credential_owner
 from .database import ApiToken, McpServer, SystemSetting, User, invalidate_setting_cache, now
 from .db_types import strict_json_dumps
 from .diagnostics import SECRET_KEYS, safe_gateway_error
@@ -360,6 +360,13 @@ class Catalog:
             "outcome_unknown",
         }:
             return exc
+        try:
+            scope = await self.index_scope(row, user_id)
+            expected_refresh = await self.index.refresh_version(scope)
+        except GatewayError as changed:
+            if changed.code in {"revision_changed", "credential_changed", "disabled"}:
+                return exc
+            raise
         async with self.db.locked() as session:
             current = await session.get(McpServer, row.id)
             if not current or current.revision != row.revision or current.mode == "disabled":
@@ -390,10 +397,20 @@ class Catalog:
                 value.update(
                     failed_gateway_names=sorted(names),
                     cache_status="error",
-                    cache_at=None,
+                    cache_at=None, cache_error_code=code, cache_error=str(exc)[:500],
+                    cache_attempt_at=failed_at,
                     **{key: [] for key in CAPABILITY_KEYS},
+                    **{key: 0 for key in ("tool_count", "resource_count", "prompt_count", "template_count")},
                 )
             self.save_cache(current, value, user_id)
+        if count >= self.startup_failure_threshold:
+            try:
+                await self.index.record_failure(scope, {
+                    "cache_error_code": code, "cache_error": str(exc)[:500], "cache_attempt_at": failed_at,
+                }, expected_refresh=expected_refresh)
+            except GatewayError as changed:
+                if changed.code not in {"revision_changed", "credential_changed", "disabled"}:
+                    raise
         details = self.failure_details(current, user_id)
         if not isinstance(exc, GatewayError):
             exc = GatewayError(code, str(exc) or "MCP startup failed")
@@ -556,7 +573,7 @@ class Catalog:
             )
         owner = (
             credential_owner(row.isolation, user_id)
-            if auth_type in {"bearer", "oauth"}
+            if auth_type in PERSONAL_AUTH_TYPES
             else ""
         )
         scope = (
@@ -896,7 +913,7 @@ class Catalog:
                 **{key: result[key] for key in ("tool_count", "resource_count", "prompt_count", "template_count")},
                 cache_status="ready", cache_at=now().isoformat(), cache_attempt_at=now().isoformat(),
                 cache_error=None, cache_error_code=None, runtime_status="stopped",
-                startup_failure_count=0, last_startup_error_code=None, last_startup_error=None,
+                startup_failure_count=0, failed_gateway_names=[], last_startup_error_code=None, last_startup_error=None,
                 last_startup_failure_at=None, last_refresh_error_code=None,
                 last_refresh_error=None, last_refresh_failure_at=None,
             )

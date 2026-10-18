@@ -129,7 +129,7 @@ async def test_cache_states_refresh_and_structured_error(bug1_browser):
         json={"name": "echo", "inputSchema": {"type": "object"}}
     ))
     await page.route("**/api/v1/mcps/never/refresh", refresh)
-    await page.get_by_role("row").filter(has_text="never").get_by_role("button", name="工具 / 测试").click()
+    await page.get_by_role("row").filter(has_text="never").get_by_role("button", name="能力/测试").click()
     dialog = page.get_by_role("dialog")
     await expect(dialog).to_contain_text("当前没有可展示的能力")
     await dialog.get_by_role("button", name="刷新发现缓存").click()
@@ -214,7 +214,7 @@ async def test_resource_and_template_definition_buttons_use_uri_and_show_loading
 
     await page.route("**/api/v1/mcps/demo/capabilities**", capability)
     await page.goto(url + "/#/mcps")
-    await page.get_by_role("row").filter(has_text="Capabilities").get_by_role("button", name="工具 / 测试").click()
+    await page.get_by_role("row").filter(has_text="Capabilities").get_by_role("button", name="能力/测试").click()
     dialog = page.get_by_role("dialog")
     for kind, label, key in [("resources", "资源", "uri"), ("templates", "资源模板", "uriTemplate"),
                              ("prompts", "提示词", "name")]:

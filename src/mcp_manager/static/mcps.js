@@ -43,12 +43,43 @@ export function transportTemplate(transport){const common={startup_timeout:30,ca
 
 export const credentialStateLabel=state=>({not_required:'无需配置',missing:'未配置',pending_authorization:'待授权',discovering:'发现中',ready:'可用',failed:'发现失败'}[state]||state);
 
+function personalRefreshControls(service,initial,onChange){
+ if(!initial.refresh_supported)return null;
+ const root=el('section',{class:'stack personal-capability-refresh'});
+ const draw=(status,message='',failed=false)=>{
+  const changed=status.revision!==service.revision,control=button('刷新能力缓存',async()=>{
+   let next=status,text='',error=false;
+   try{
+    const value=await api('/mcps/'+service.id+'/credentials/refresh',{method:'POST',body:{revision:service.revision}});
+    next=value;text='已刷新：工具 '+value.tool_count+' · 资源 '+value.resource_count+' · 提示词 '+value.prompt_count+' · 资源模板 '+value.template_count;
+   }catch(e){
+    text=e.message;error=true;
+    try{next=await api('/mcps/'+service.id+'/credentials/status')}
+    catch(failure){next={...status,refresh_allowed:false,refresh_reason:failure.message}}
+   }
+   if(root.isConnected)draw(next,text,error);
+   await onChange()
+  });
+  control.disabled=changed||!status.refresh_allowed;
+  root.replaceChildren(...[el('p',{class:'muted'},'仅刷新你自己的能力缓存，不会保存表单中尚未保存的修改。'),control,
+   changed?el('p',{class:'muted'},'服务配置已变化，请关闭后重新打开。'):status.refresh_reason?el('p',{class:'muted'},status.refresh_reason):null,
+   message?el('div',{class:failed?'error':'notice',role:failed?'alert':'status'},message):null].filter(Boolean))
+ };
+ draw(initial);return root
+}
+
 export async function credentialDialog(service,onChange=()=>{}){
  const status=await api('/mcps/'+service.id+'/credentials/status'),authType=status.auth_type;
- const defs=authType==='bearer'?[['token','Bearer Token','password']]:[['authorization_url','授权 URL','url'],['token_url','Token URL','url'],['client_id','Client ID','text'],['client_secret','Client Secret','password'],['scopes','Scopes（空格分隔）','text']];
- const fields=Object.fromEntries(defs.map(([key,label,type])=>[key,field(label,'',type)]));
+ const defs={
+  bearer:[['token','Bearer Token','password']],
+  basic:[['username','用户名','text'],['password','密码','password']],
+  api_key:[['header','请求头名称（例如 X-API-Key）','text'],['value','API Key','password']],
+  oauth:[['authorization_url','授权 URL','url'],['token_url','Token URL','url'],['client_id','Client ID','text'],['client_secret','Client Secret','password'],['scopes','Scopes（空格分隔）','text']]
+ }[authType];
+ if(!defs)throw new Error('此服务无需配置个人凭据');
+ const fields=Object.fromEntries(defs.map(([key,label,type])=>[key,field(label,key==='header'?'X-API-Key':'',type)]));
  for(const [key]of defs)fields[key].input.required=key!=='scopes';
- formDialog(authType==='bearer'?'配置凭据':'OAuth 配置',defs.map(([key])=>fields[key].node),async()=>{
+ formDialog(authType==='oauth'?'OAuth 配置':'配置凭据',[...defs.map(([key])=>fields[key].node),personalRefreshControls(service,status,onChange)],async()=>{
   const auth={type:authType};
   for(const [key]of defs)auth[key]=key==='scopes'?fields[key].input.value.split(/[ ,]+/).filter(Boolean):fields[key].input.value;
   if(authType==='oauth')auth.config_isolation='user';
@@ -61,8 +92,12 @@ export async function credentialDialog(service,onChange=()=>{}){
 export async function oauthDialog(service,canManage,onChange=()=>{},returnTo='mcps'){
  const state=await api('/mcps/'+service.id+'/oauth/status'),content=el('div',{class:'stack'});
  content.append(el('p',{class:'notice'},state.authorized?'当前登录用户已完成 OAuth 授权。':'当前登录用户尚未完成 OAuth 授权，或授权已过期。其他用户的个人授权不可复用。'));
- content.append(el('p',{class:'muted'},'授权不会自动启用已禁用的服务。授权返回后点击“重新检查授权状态”，管理员可点击“验证并启动”或设置按需/常驻；读取工具成功后才恢复可用目录。列表中的失败时间表示上一次尝试。'));
+ content.append(el('p',{class:'muted'},'授权不会自动启用已禁用的服务。授权返回后点击“重新检查授权状态”，可在个人资料中刷新本人的能力缓存；管理员也可验证并启动。读取工具成功后才恢复可用目录。列表中的失败时间表示上一次尝试。'));
  const d=dialog('授权服务',content);
+ if(returnTo==='profile'){
+  try{const personal=await api('/mcps/'+service.id+'/credentials/status');if(d.isConnected)content.append(...[personalRefreshControls(service,personal,onChange)].filter(Boolean))}
+  catch(error){if(d.isConnected)content.append(el('p',{class:'error',role:'alert'},error.message))}
+ }
  content.append(button('重新检查授权状态',async()=>{d.close();await oauthDialog(service,canManage,onChange,returnTo)}));
  if(state.authorized&&canManage)content.append(button('验证并启动',async()=>{try{await api('/mcps/'+service.id+'/start',{method:'POST'});toast('验证成功，服务已启动','success');d.close()}finally{onChange()}},'primary'));
  if(state.authorized)content.append(button('断开 OAuth 授权',()=>formDialog('确认操作',[el('p',{},'断开后，你需要重新授权才能调用此服务。其他用户的授权不受影响。')],async()=>{await api('/mcps/'+service.id+'/oauth/disconnect',{method:'POST'});d.close();toast('已断开 OAuth 授权');onChange()},{saveLabel:'确认执行'}),'danger'));

@@ -110,8 +110,16 @@ async def test_proposal_test_feedback_and_batch_job_dialog(running_gateway, monk
 
         batch = page.locator(f'tr[data-row-id="{batch_id}"]')
         await batch.get_by_role("checkbox").check()
-        await page.get_by_role("button", name="批量测试", exact=True).click()
-        await expect(page.locator("#toast")).to_have_text("已提交批量测试")
+        async with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith("/api/v1/mcp-proposals/batch-test")
+        ) as pending:
+            await page.get_by_role("button", name="批量测试", exact=True).click()
+        submitted = await pending.value
+        assert submitted.status == 200
+        assert submitted.request.post_data_json == {"ids": [batch_id]}
+        job = await submitted.json()
+        assert job["id"] and job["total"] == 1
         dialog = page.get_by_role("dialog", name="MCP 批量测试", exact=True)
         await expect(dialog).to_be_visible()
         await asyncio.wait_for(entered["batch"].wait(), 5)
@@ -121,7 +129,10 @@ async def test_proposal_test_feedback_and_batch_job_dialog(running_gateway, monk
             timeout=5000
         )
         await dialog.get_by_role("button", name="关闭", exact=True).last.click()
-        await expect(batch).to_contain_text("已取消")
+        # Cancelled batches retain selection; list polling refreshes their state every 10 seconds.
+        await expect(batch).to_contain_text("已取消", timeout=15000)
+        await expect(batch.get_by_role("checkbox")).to_be_checked()
+        await expect(page.get_by_text("已选 1 项", exact=True)).to_be_visible()
 
         await page.reload()
         await expect(page.locator(f'tr[data-row-id="{batch_id}"]')).to_contain_text("已取消")

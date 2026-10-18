@@ -88,6 +88,12 @@ mmg --version
 mmg --help
 ~~~
 
+## 显式启动
+
+~~~console
+mmg serve
+~~~
+
 启动后打开 <http://127.0.0.1:8765>。第一次注册的账户成为管理员，密码至少 10 个字符。
 
 ## 关于 `mmg upgrade`

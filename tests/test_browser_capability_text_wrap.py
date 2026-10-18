@@ -50,7 +50,7 @@ async def test_capability_descriptions_wrap_inside_cards(running_gateway, entry)
         await page.goto(url + "/#/" + entry)
         if entry == "mcps":
             service = page.locator(f'tr[data-row-id="{row["id"]}"]')
-            await service.get_by_role("button", name="工具 / 测试", exact=True).click()
+            await service.get_by_role("button", name="能力/测试", exact=True).click()
         elif entry == "proposals":
             await page.get_by_role("button", name="能力目录", exact=True).click()
         else:

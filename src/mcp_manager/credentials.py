@@ -1,11 +1,27 @@
 """Credential ownership and sealed credential persistence."""
 import copy
+import time
 from typing import Literal
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 
-from .database import SystemSetting
+from .database import SystemSetting, User
 from .runtime import GatewayError
+
+STATIC_AUTH_FIELDS = {
+    "bearer": ("token",),
+    "basic": ("username", "password"),
+    "api_key": ("value",),
+}
+PERSONAL_AUTH_TYPES = frozenset((*STATIC_AUTH_FIELDS, "oauth"))
+
+
+def static_auth_configured(auth_type: str, auth: dict) -> bool:
+    return auth.get("type") == auth_type and all(
+        isinstance(auth.get(field), str) and bool(auth[field])
+        for field in STATIC_AUTH_FIELDS[auth_type]
+    )
+
 
 OAUTH_TOKEN_FIELDS = {
     "access_token",
@@ -150,12 +166,69 @@ class CredentialStore:
         await self.write(session, row.id, owner, payload)
         return owner
 
+    async def configuration_summaries(self, rows, user_id: str) -> dict:
+        """Aggregate personal credential readiness for an administrator's current page."""
+        from .oauth import token_expiry
+
+        eligible = {row.id: row for row in rows
+                    if row.isolation == "user" and row.auth_type in PERSONAL_AUTH_TYPES}
+        if not eligible:
+            return {}
+        async with self.db.session() as session:
+            users = (await session.execute(
+                select(User.id, User.role, User.scope_mode, User.mcp_ids).where(User.disabled.is_(False))
+            )).all()
+            allowed = {
+                identity: {user.id for user in users
+                           if user.role == "admin" or user.scope_mode == "all" or identity in user.mcp_ids}
+                for identity in eligible
+            }
+            settings = (await session.execute(
+                select(SystemSetting.key, SystemSetting.value).where(or_(*[
+                    SystemSetting.key.startswith(f"credential:{identity}:", autoescape=True)
+                    for identity in eligible
+                ]))
+            )).all()
+        payloads = {identity: {} for identity in eligible}
+        for key, value in settings:
+            _, identity, owner = key.split(":", 2)
+            shared_oauth = (owner == "service" and eligible[identity].auth_type == "oauth"
+                            and eligible[identity].config_isolation != "user")
+            if value and (owner in allowed[identity] or shared_oauth):
+                payloads[identity][owner] = self.catalog.unseal(value)
+
+        checked_at = time.time()
+
+        def configured(row, owner):
+            personal = payloads[row.id].get(owner, {})
+            if row.auth_type in STATIC_AUTH_FIELDS:
+                return static_auth_configured(row.auth_type, personal.get("auth_config", {}))
+            config = (personal if row.config_isolation == "user"
+                      else payloads[row.id].get("service", {})).get("auth_config", {})
+            token = personal.get("oauth_token", {})
+            return bool(
+                config.get("type") == "oauth"
+                and all(isinstance(config.get(key), str) and config[key]
+                        for key in ("authorization_url", "token_url", "client_id"))
+                and token.get("access_token")
+                and (token.get("refresh_token") or token_expiry(token) > checked_at)
+            )
+
+        return {
+            identity: {
+                "current_user_configured": user_id in allowed[identity] and configured(row, user_id),
+                "configured_users": sum(configured(row, owner) for owner in allowed[identity]),
+                "total_users": len(allowed[identity]),
+            }
+            for identity, row in eligible.items()
+        }
+
     async def status(self, row, user_id: str | None, session=None) -> dict:
         """Return the profile-facing credential state and action."""
         config = self.catalog.unseal(row.config)
         auth = config.get("auth", {"type": "none"})
         auth_type = auth.get("type", "none")
-        required = row.isolation == "user" and auth_type in {"bearer", "oauth"}
+        required = row.isolation == "user" and auth_type in PERSONAL_AUTH_TYPES
         result = {
             "required": required,
             "auth_type": auth_type,
@@ -170,10 +243,10 @@ class CredentialStore:
         owner = credential_owner(row.isolation, user_id)
         personal = (await self._load(session, row.id, owner) if session is not None
                     else await self.load(row.id, owner))
-        if auth_type == "bearer":
-            configured = bool(personal.get("auth_config", {}).get("token"))
+        if auth_type in STATIC_AUTH_FIELDS:
+            configured = static_auth_configured(auth_type, personal.get("auth_config", {}))
             if not configured:
-                return result | {"state": "missing", "action": "configure_bearer"}
+                return result | {"state": "missing", "action": "configure_" + auth_type}
         else:
             ownership = config_isolation(config)
             config_payload = (
@@ -213,7 +286,7 @@ class CredentialStore:
         auth = stored.get("auth", {"type": "none"})
         auth_type = auth.get("type", "none")
 
-        if auth_type == "bearer":
+        if auth_type == "bearer" or auth_type in STATIC_AUTH_FIELDS and new_isolation == "user":
             owner = credential_owner(new_isolation, actor_id)
             payload = await self._load(session, row.id, owner)
             payload["auth_config"] = copy.deepcopy(auth)
@@ -222,7 +295,9 @@ class CredentialStore:
             if row.isolation in {"service", "session"} and new_isolation == "user":
                 await session.flush()
                 await self.write(session, row.id, "service", {})
-            stored["auth"] = {"type": "bearer"}
+            stored["auth"] = {"type": auth_type}
+            if auth_type == "api_key":
+                stored["auth"]["header"] = auth.get("header", "X-API-Key")
             return stored
 
         if auth_type != "oauth":
@@ -281,21 +356,27 @@ class CredentialStore:
         config = self.catalog.unseal(row.config)
         auth = config.get("auth", {"type": "none"})
         auth_type = auth.get("type", "none")
-        if auth_type not in {"bearer", "oauth"}:
+        if auth_type not in PERSONAL_AUTH_TYPES or (auth_type in {"basic", "api_key"} and row.isolation != "user"):
             return config
 
         owner = credential_owner(row.isolation, user_id)
-        if auth_type == "bearer":
+        if auth_type in STATIC_AUTH_FIELDS:
             payload = await self._load(session, row.id, owner)
-            resolved = payload.get("auth_config")
-            if not resolved and auth.get("token"):
+            resolved = payload.get("auth_config") or {}
+            if not resolved and auth_type == "bearer" and auth.get("token"):
                 resolved = auth
-            if not resolved or not resolved.get("token"):
+            if not static_auth_configured(auth_type, resolved):
                 if require:
+                    label = {"bearer": "Bearer", "basic": "Basic", "api_key": "API Key"}[auth_type]
                     raise GatewayError(
                         "auth_required",
-                        "Bearer credential is not configured for this MCP service",
+                        label + " credential is not configured for this MCP service",
                     )
+                # Legacy inline Basic/API Key values have no provable personal owner.
+                # Never return another user's inline secret as a restoration default.
+                config["auth"] = {"type": auth_type}
+                if auth_type == "api_key":
+                    config["auth"]["header"] = auth.get("header", "X-API-Key")
                 return config
             config["auth"] = copy.deepcopy(resolved)
             return config

@@ -110,6 +110,10 @@ async def test_personal_endpoint_rejects_global_service_and_stale_revision(tmp_p
         ({"type": "none"}, "user", False),
         ({"type": "bearer", "token": "x"}, "service", False),
         ({"type": "bearer", "token": "x"}, "user", True),
+        ({"type": "basic", "username": "u", "password": "p"}, "service", False),
+        ({"type": "basic", "username": "u", "password": "p"}, "user", True),
+        ({"type": "api_key", "value": "key"}, "service", False),
+        ({"type": "api_key", "value": "key"}, "user", True),
     ],
 )
 async def test_profile_credential_status_matrix(tmp_path, auth, isolation, required):

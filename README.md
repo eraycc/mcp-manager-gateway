@@ -181,6 +181,9 @@ Browser translation can send visible page text to the configured translation pro
 - stdio, Streamable HTTP, legacy SSE, and REST-to-MCP transports;
 - newly created, imported, approved and copied services automatically attempt to publish their paged capability catalogs;
 - generic JSON, Codex TOML, Claude, and DSH Cordis/registry import; exports use common `mcpServers` connection fields with a versioned MMG `config` extension for lossless re-import ([format](wiki/reference/catalog-api.md#service-configuration-export));
+- console export of all service configurations as redacted JSON after confirmation; cross-page selection and batch actions in service, approval, token, log, and user lists ([console guide](wiki/guides/manage-services.md));
+- cached tools, resources, prompts, and resource-template counts in service lists and accessible profile services, with service descriptions;
+- persistent profile credential editors for user-isolated Bearer, Basic, API Key, and private OAuth services, for administrators and regular users; authenticated HTTP users can refresh only their own capability cache from the credential or OAuth dialog. Administrator service lists show the administrator’s own capabilities and configured-user totals for enabled users with service access ([guide](wiki/guides/manage-services.md#个人凭据配置与修改));
 - independent user, token, anonymous-scope, and MCP assignment controls;
 - `lazy`, `eager`, and `disabled` lifecycle modes;
 - shared, per-user, and per-session runtime isolation;

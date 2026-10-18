@@ -213,6 +213,8 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 
 ## 管理能力概览
 
+控制台支持确认后导出全部服务的脱敏 JSON 配置；MCP 服务、审批、访问令牌、调用日志和用户列表支持跨页勾选与批量操作。服务列表的“能力列表”和个人资料的“可访问的服务”显示缓存中的工具、资源、提示词及资源模板数量，个人资料同时显示服务描述。管理员和普通用户均可在个人资料中配置、修改按用户隔离服务的 Bearer、Basic、API Key 和个人独享 OAuth 凭据，保存后仍保留编辑入口。已完成认证的 HTTP 类用户隔离服务支持在凭据或 OAuth 授权弹窗中手动刷新本人的能力缓存。管理员服务列表显示当前管理员的能力或未认证状态，以及有访问权的启用用户中的已认证人数。详见[服务管理与测试](wiki/guides/manage-services.md)。
+
 - **多种接入方式**：stdio、Streamable HTTP、旧 SSE、REST 转 MCP；
 - **自动目录刷新**：新增、导入、审批通过与复制服务后自动尝试刷新分页能力目录，成功后直接显示；
 - **统一导入导出**：通用 JSON、Codex TOML、Claude、DSH Cordis/registry；导出采用通用 `mcpServers` 连接字段，MMG 专用设置保存在版本化的 `config` 扩展中，支持完整重新导入（[格式说明](wiki/reference/catalog-api.md#service-configuration-export)）；

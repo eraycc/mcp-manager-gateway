@@ -203,3 +203,52 @@ async def test_missing_personal_bearer_returns_auth_required(tmp_path):
         with pytest.raises(GatewayError) as caught:
             await credential_store(app).materialize(row, "bob")
         assert caught.value.code == "auth_required"
+
+
+@pytest.mark.parametrize("auth", [
+    {"type": "basic", "username": "alice", "password": "alice-password"},
+    {"type": "api_key", "header": "X-Personal-Key", "value": "alice-key"},
+])
+async def test_personal_static_auth_is_sealed_and_scoped_to_owner(tmp_path, auth):
+    app = create_app(Settings(data_dir=tmp_path, secret_key="static-credential-owner"))
+    async with app.router.lifespan_context(app):
+        row = await app.state.catalog.create({
+            "name": auth["type"], "transport": "streamable-http",
+            "mode": "disabled", "isolation": "user",
+            "config": {"url": "https://mcp.test/mcp", "auth": auth},
+        }, user_id="alice")
+        descriptor = app.state.catalog.unseal(row.config)
+        assert "password" not in descriptor["auth"]
+        assert "value" not in descriptor["auth"]
+        store = credential_store(app)
+        assert (await store.materialize(row, "alice"))["auth"] == auth
+        with pytest.raises(GatewayError) as caught:
+            await store.materialize(row, "bob")
+        assert caught.value.code == "auth_required"
+        unresolved = await store.materialize(row, "bob", require=False)
+        assert "password" not in unresolved["auth"]
+        assert "value" not in unresolved["auth"]
+        row.mode = "lazy"
+        spec = await app.state.catalog.spec(row, "alice")
+        assert spec.credential_owner == "alice"
+        assert spec.credential_scope
+
+
+@pytest.mark.parametrize("auth", [
+    {"type": "basic", "username": "legacy", "password": "legacy-password"},
+    {"type": "api_key", "header": "X-Legacy-Key", "value": "legacy-key"},
+])
+async def test_legacy_inline_personal_auth_is_not_reused_by_another_user(tmp_path, auth):
+    app = create_app(Settings(data_dir=tmp_path, secret_key="legacy-static-owner"))
+    async with app.router.lifespan_context(app):
+        row = await disabled_row(app)
+        async with app.state.db.locked() as session:
+            saved = await session.get(McpServer, row.id)
+            saved.config = app.state.catalog.seal({"url": "https://mcp.test/mcp", "auth": auth})
+        row = await app.state.catalog.get(row.id)
+        with pytest.raises(GatewayError) as caught:
+            await credential_store(app).materialize(row, "bob")
+        assert caught.value.code == "auth_required"
+        unresolved = await credential_store(app).materialize(row, "bob", require=False)
+        assert "password" not in unresolved["auth"]
+        assert "value" not in unresolved["auth"]

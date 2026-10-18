@@ -168,7 +168,7 @@ async def test_navigation_protocol_and_import_wizard(running_gateway, monkeypatc
         services = (await web.get("/api/v1/mcps")).json()
         assert services["total"] == 6
         imported = next(service for service in services["items"] if service["name"] == "rest-0")
-        await page.locator(f'tr[data-row-id="{imported["id"]}"]').get_by_role("button", name="工具 / 测试", exact=True).click()
+        await page.locator(f'tr[data-row-id="{imported["id"]}"]').get_by_role("button", name="能力/测试", exact=True).click()
         directory = page.get_by_role("dialog", name="rest-0 · 能力目录", exact=True)
         await expect(directory.locator(".capability-card")).to_have_count(1)
         await expect(directory.locator(".capability-card")).to_contain_text("read")

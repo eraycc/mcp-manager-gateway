@@ -168,3 +168,13 @@ dialog{max-width:calc(100vw - 28px);overflow:hidden}
 .dialog-body .capability-tabs{flex-wrap:nowrap}
 .capability-cache-hint{grid-column:1/-1;margin:0}
 @media(max-width:720px){.dialog-head{padding:14px 18px;gap:12px}.dialog-body .form-grid{grid-template-columns:minmax(0,1fr)}.dialog-head h2{font-size:16px}}
+
+.capability-summary{display:flex;flex-wrap:wrap;gap:2px 10px;max-width:260px;white-space:normal;color:var(--muted);font-size:11px}
+.capability-summary>span{white-space:nowrap}
+.credential-service-info{flex:1;min-width:0;display:grid;gap:5px;overflow-wrap:anywhere}
+.credential-service-name{flex-wrap:wrap}
+.credential-service-description{margin:0;color:var(--muted);font-size:12px;white-space:pre-wrap}
+.credential-service-info .capability-summary{max-width:none}
+
+.service-capabilities{display:grid;gap:5px;max-width:260px;white-space:normal;overflow-wrap:anywhere}
+.service-capabilities .capability-summary{flex-direction:column;gap:2px}

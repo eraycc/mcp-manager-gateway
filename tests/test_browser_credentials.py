@@ -145,7 +145,7 @@ async def test_profile_credential_action_matrix_and_disabled_filter(running_gate
         name="Profile OAuth Shared",
         auth={"type": "oauth", "config_isolation": "shared"},
     )
-    await seed_service(
+    private_id = await seed_service(
         app,
         slug="profile-oauth-private",
         name="Profile OAuth Private",
@@ -204,4 +204,135 @@ async def test_profile_credential_action_matrix_and_disabled_filter(running_gate
         private = services.locator(".credential-service").filter(has_text="Profile OAuth Private")
         await expect(private.get_by_text("未配置", exact=True)).to_be_visible()
         await expect(private.get_by_role("button", name="OAuth 配置", exact=True)).to_be_visible()
+        await expect(shared.get_by_role("button", name="OAuth 配置", exact=True)).to_have_count(0)
+        actor = (await _web.get("/api/v1/me")).json()
+        async with app.state.db.locked() as session:
+            await app.state.credentials.write(session, private_id, actor["id"], {
+                "auth_config": {
+                    "type": "oauth", "authorization_url": "https://oauth.invalid/authorize",
+                    "token_url": "https://oauth.invalid/token", "client_id": "personal-client",
+                    "client_secret": "personal-secret",
+                },
+            })
+            await app.state.credentials.write(session, shared_id, actor["id"], {
+                "oauth_token": {"access_token": "shared-user-access"},
+            })
+        await page.reload()
+        await expect(shared.get_by_role("button", name="授权", exact=True)).to_be_visible()
+        await expect(shared.get_by_role("button", name="OAuth 配置", exact=True)).to_have_count(0)
+        await expect(private.get_by_text("待授权", exact=True)).to_be_visible()
+        await expect(private.get_by_role("button", name="OAuth 配置", exact=True)).to_be_visible()
+        await expect(private.get_by_role("button", name="授权", exact=True)).to_be_visible()
+        await browser.close()
+
+
+
+@pytest.mark.parametrize("auth_type", ["bearer", "basic", "api_key", "oauth"])
+@pytest.mark.parametrize("username", ["admin", "reader"])
+async def test_profile_keeps_saved_personal_credentials_editable(running_gateway, auth_type, username):  # noqa: F811
+    from contextlib import asynccontextmanager
+
+    from test_personal_credentials_api import Connection
+
+    app, web, url, _, _ = running_gateway
+    admin = (await web.get("/api/v1/me")).json()
+    response = await web.post("/api/v1/users", json={
+        "username": "reader", "password": "password12345", "role": "user", "scope_mode": "all",
+    })
+    assert response.status_code == 200, response.text
+    reader = response.json()
+    actors = {"admin": admin, "reader": reader}
+    auth = {"type": auth_type}
+    if auth_type == "oauth":
+        auth["config_isolation"] = "user"
+    service_id = await seed_service(
+        app, slug="personal-edit", name="Personal editable MCP", auth=auth,
+    )
+    original = {}
+    async with app.state.db.locked() as session:
+        for name, actor in actors.items():
+            config = ({"type": "bearer", "token": name + "-old-token"} if auth_type == "bearer" else
+                      {"type": "basic", "username": name, "password": name + "-old-password"} if auth_type == "basic" else
+                      {"type": "api_key", "header": "X-Personal-Key", "value": name + "-old-key"} if auth_type == "api_key" else {
+                "type": "oauth", "authorization_url": "https://oauth.invalid/authorize",
+                "token_url": "https://oauth.invalid/token", "client_id": name + "-old-client",
+                "client_secret": name + "-old-secret", "scopes": ["read"],
+            })
+            original[name] = {"auth_config": config}
+            if auth_type == "oauth":
+                original[name]["oauth_token"] = {"access_token": name + "-access-token"}
+            await app.state.credentials.write(session, service_id, actor["id"], original[name])
+
+    @asynccontextmanager
+    async def connect(_spec):
+        yield Connection()
+    app.state.runtime.connector = connect
+
+    async with async_playwright() as pw:
+        executable = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+        browser = await pw.chromium.launch(
+            headless=True, executable_path=executable if os.path.exists(executable) else None,
+        )
+        page = await browser.new_page(viewport={"width": 1280, "height": 900})
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await page.goto(url)
+        await page.locator('input[autocomplete="username"]').fill(username)
+        await page.locator('input[autocomplete="current-password"]').fill("password12345")
+        await page.locator(".auth form button[type=submit]").click()
+        await expect(page.locator(".stats")).to_be_visible()
+        await page.get_by_role("dialog", name="发现新版本", exact=True).get_by_role("button", name="关闭", exact=True).click()
+        await page.goto(url + "/#/profile")
+        if username == "reader":
+            await expect(page.locator('a[aria-label="MCP 服务"]')).to_have_count(0)
+        service = page.locator(".credential-service").filter(has_text="Personal editable MCP")
+        label = "OAuth 配置" if auth_type == "oauth" else "配置凭据"
+        edit = service.get_by_role("button", name=label, exact=True)
+        await expect(edit).to_be_visible()
+        await edit.click()
+        popup = page.get_by_role("dialog", name=label, exact=True)
+        if auth_type == "bearer":
+            await popup.get_by_label("Bearer Token", exact=True).fill(username + "-new-token")
+        elif auth_type == "basic":
+            await popup.get_by_label("用户名", exact=True).fill(username + "-new-name")
+            await popup.get_by_label("密码", exact=True).fill(username + "-new-password")
+        elif auth_type == "api_key":
+            await popup.get_by_label("请求头名称（例如 X-API-Key）", exact=True).fill("X-Personal-Key")
+            await popup.get_by_label("API Key", exact=True).fill(username + "-new-key")
+        else:
+            for field, value in [
+                ("授权 URL", "https://oauth.invalid/new-authorize"),
+                ("Token URL", "https://oauth.invalid/new-token"),
+                ("Client ID", username + "-new-client"),
+                ("Client Secret", username + "-new-secret"),
+                ("Scopes（空格分隔）", "read write"),
+            ]:
+                await popup.get_by_label(field, exact=True).fill(value)
+        async with page.expect_response(
+            lambda response: response.url.endswith(f"/api/v1/mcps/{service_id}/credentials")
+            and response.request.method == "PUT"
+        ) as pending:
+            await popup.get_by_role("button", name="保存", exact=True).click()
+        saved = await pending.value
+        assert saved.status == 200, await saved.text()
+        await expect(popup).to_have_count(0)
+        await expect(edit).to_be_visible()
+        await edit.click()
+        await expect(page.get_by_role("dialog", name=label, exact=True)).to_be_visible()
+        value = await app.state.credentials.load(service_id, actors[username]["id"])
+        if auth_type == "bearer":
+            assert value["auth_config"]["token"] == username + "-new-token"
+        elif auth_type == "basic":
+            assert value["auth_config"]["username"] == username + "-new-name"
+            assert value["auth_config"]["password"] == username + "-new-password"
+        elif auth_type == "api_key":
+            assert value["auth_config"]["header"] == "X-Personal-Key"
+            assert value["auth_config"]["value"] == username + "-new-key"
+        else:
+            assert value["auth_config"]["client_id"] == username + "-new-client"
+            assert value["auth_config"]["client_secret"] == username + "-new-secret"
+            assert value["auth_config"]["scopes"] == ["read", "write"]
+        other = "reader" if username == "admin" else "admin"
+        assert await app.state.credentials.load(service_id, actors[other]["id"]) == original[other]
+        assert errors == []
         await browser.close()

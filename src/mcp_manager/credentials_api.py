@@ -1,12 +1,14 @@
 """Personal credential status and update endpoints."""
 import copy
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from .catalog import restore
 from .catalog_api import permitted
-from .credentials import config_isolation
+from .credentials import PERSONAL_AUTH_TYPES, STATIC_AUTH_FIELDS, config_isolation, static_auth_configured
 from .database import McpServer
 from .identity import current_user, revalidate_user
 from .runtime import GatewayError
@@ -26,7 +28,44 @@ def contains_redacted(value) -> bool:
     return False
 
 
-def personal_authorizer(request, server_id: str, revision: int):
+HTTP_TRANSPORTS = frozenset({"streamable-http", "sse", "rest"})
+
+
+class PersonalRefresh(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(strict=True, ge=1)
+
+
+async def personal_credential_status(state, row, user_id, *, session=None):
+    status = await state.credentials.status(row, user_id, session=session)
+    supported = row.transport in HTTP_TRANSPORTS and status["required"]
+    allowed = supported and row.mode != "disabled" and status["state"] not in {
+        "missing", "pending_authorization", "not_required",
+    }
+    reason = ""
+    if not supported:
+        reason = "仅支持按用户隔离且需要认证的 HTTP 类服务"
+    elif row.mode == "disabled":
+        reason = "此服务已禁用"
+    elif status["state"] == "missing":
+        reason = ("请联系管理员完善 OAuth 共享配置" if status["auth_type"] == "oauth"
+                  and status["config_isolation"] == "shared" else "请先保存个人凭据")
+    elif status["state"] == "pending_authorization":
+        reason = "请先完成本人 OAuth 授权"
+    elif status["auth_type"] == "oauth":
+        from .oauth import token_expiry
+
+        personal = await state.credentials.load(row.id, user_id, session=session)
+        token = personal.get("oauth_token", {})
+        if token_expiry(token) <= time.time() + 60 and not token.get("refresh_token"):
+            allowed, reason = False, "本人 OAuth 授权已过期，请重新授权"
+    return status | {
+        "revision": row.revision, "refresh_supported": supported,
+        "refresh_allowed": allowed, "refresh_reason": reason,
+    }
+
+
+def personal_authorizer(request, server_id: str, revision: int, *, refresh=False):
     """Revalidate user assignment, revision, and isolation at dispatch time."""
 
     async def authorize(session=None):
@@ -47,6 +86,14 @@ def personal_authorizer(request, server_id: str, revision: int):
             and server_id not in user.mcp_ids
         ):
             raise HTTPException(404, "MCP not found")
+        if refresh:
+            status = await personal_credential_status(request.app.state, row, user.id, session=session)
+            if not status["refresh_supported"]:
+                raise HTTPException(422, status["refresh_reason"])
+            if row.mode == "disabled":
+                raise GatewayError("disabled", "MCP service is disabled")
+            if not status["refresh_allowed"]:
+                raise GatewayError("auth_required", status["refresh_reason"])
         return user
 
     return authorize
@@ -78,7 +125,7 @@ async def credential_status_batch(data: dict, request: Request, user=USER):
 @router.get("/mcps/{server_id}/credentials/status")
 async def credential_status(server_id: str, request: Request, user=USER):
     row = await permitted(request, server_id, user)
-    return await request.app.state.credentials.status(row, user.id)
+    return await personal_credential_status(request.app.state, row, user.id)
 
 
 @router.put("/mcps/{server_id}/credentials")
@@ -98,7 +145,7 @@ async def save_credentials(server_id: str, data: dict, request: Request, user=US
         row = await session.get(McpServer, server_id, populate_existing=True)
         descriptor = state.catalog.unseal(row.config)
         saved_type = descriptor.get("auth", {}).get("type", "none")
-        if saved_type not in {"bearer", "oauth"}:
+        if saved_type not in PERSONAL_AUTH_TYPES:
             raise HTTPException(422, "This MCP does not use personal credentials")
         if submitted.get("type") != saved_type:
             raise HTTPException(422, "Authentication type cannot be changed here")
@@ -113,6 +160,8 @@ async def save_credentials(server_id: str, data: dict, request: Request, user=US
             raise GatewayError(
                 "auth_required", "Saved credential is unavailable; enter it again"
             )
+        if saved_type in STATIC_AUTH_FIELDS and not static_auth_configured(saved_type, resolved_auth):
+            raise HTTPException(422, "Complete all required credential fields")
         full = copy.deepcopy(descriptor)
         full["auth"] = resolved_auth
         if saved_type == "oauth":
@@ -133,4 +182,34 @@ async def save_credentials(server_id: str, data: dict, request: Request, user=US
             # The status endpoint exposes fail-closed discovery diagnostics.
             pass
     current = await state.catalog.get(server_id)
-    return await state.credentials.status(current, actor.id)
+    return await personal_credential_status(state, current, actor.id)
+
+
+@router.post("/mcps/{server_id}/credentials/refresh")
+async def refresh_personal_capabilities(server_id: str, data: PersonalRefresh, request: Request, user=USER):
+    state = request.app.state
+    row = await permitted(request, server_id, user)
+    authorize = personal_authorizer(request, server_id, data.revision, refresh=True)
+    actor = await authorize()
+    if state.catalog.unseal(row.config).get("auth", {}).get("type") == "oauth":
+        # Complete any token renewal before capturing the catalog credential generation.
+        scope = await state.catalog.index_scope(row, actor.id)
+        expected_refresh = await state.catalog.index.refresh_version(scope)
+        try:
+            await state.catalog.spec(row, actor.id)
+        except GatewayError as exc:
+            raise await state.catalog.record_refresh_failure(
+                row, exc, actor.id, scope=scope, expected_refresh=expected_refresh,
+                had_ready=state.catalog.cached(row, actor.id)["cache_status"] == "ready",
+            ) from exc
+        await authorize()
+    result = await state.catalog.refresh_index(server_id, actor.id, authorize=authorize)
+    await authorize()
+    current = await state.catalog.get(server_id)
+    cache = state.catalog.cached(current, actor.id)
+    await state.logs.audit("mcp.credentials.refresh", actor.id, {"mcp_id": server_id})
+    return {
+        **await personal_credential_status(state, current, actor.id),
+        "cache_status": cache["cache_status"], "cache_at": cache.get("cache_at"),
+        **{key: result[key] for key in ("tool_count", "resource_count", "prompt_count", "template_count")},
+    }
