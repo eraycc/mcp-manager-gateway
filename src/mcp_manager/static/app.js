@@ -174,7 +174,7 @@ function serviceCapabilities(row){
  const summary=row.personal_credentials;
  if(!summary)return capabilitySummary(row)||el('span',{class:'muted'},'暂无能力缓存');
  return el('div',{class:'service-capabilities'},
-  el('span',{class:'subtext'},summary.current_user_configured?'当前管理员的能力列表':'当前管理员未认证'),
+  el('span',{class:'subtext'},summary.current_user_configured?'当前用户能力列表':'当前管理员未认证'),
   summary.current_user_configured?capabilitySummary(row,{includeUnavailable:true}):null,
   el('span',{class:'subtext',title:'统计有权访问此服务的启用用户（包含管理员）；凭据须完整保存，OAuth 还需有效授权。'},'已认证 '+summary.configured_users+' / '+summary.total_users))
 }

@@ -269,7 +269,7 @@ async def test_admin_personal_capabilities_show_own_authentication_and_user_tota
     await mock_records(page, "/mcps", rows, [])
     await page.goto(url + "/#/mcps")
     own = page.locator('tr[data-row-id="row-0"] .service-capabilities')
-    await expect(own).to_contain_text("当前管理员的能力列表")
+    await expect(own).to_contain_text("当前用户能力列表")
     await expect(own).to_contain_text("已认证 3 / 4")
     labels = own.locator(".capability-summary > span")
     await expect(labels).to_have_text(["工具 2", "资源 3", "提示词 4", "资源模板 5"])
@@ -281,7 +281,7 @@ async def test_admin_personal_capabilities_show_own_authentication_and_user_tota
     await expect(missing.locator(".capability-summary")).to_have_count(0)
     await expect(page.locator('tr[data-row-id="row-2"] .capability-summary')).to_contain_text("工具 2")
     failed = page.locator('tr[data-row-id="row-3"] .service-capabilities')
-    await expect(failed).to_contain_text("当前管理员的能力列表")
+    await expect(failed).to_contain_text("当前用户能力列表")
     await expect(failed.locator(".capability-summary > span")).to_have_text(
         ["工具 0", "资源 0", "提示词 0", "资源模板 0"],
     )
