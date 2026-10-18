@@ -63,7 +63,10 @@ async def test_eager_rest_refresh_detects_server_that_stopped(tmp_path):
         failed = await web.post("/api/v1/mcps/" + row["id"] + "/refresh")
         assert failed.status_code == 502
         current = (await web.get("/api/v1/mcps/" + row["id"])).json()
-        assert current["mode"] == "eager" and current["tool_count"] == 1
+        assert current["mode"] == "eager" and current["tool_count"] == 0
+        assert current["cache_status"] == "error"
+        assert current["cache_error_code"] == "connection_error"
+        assert "connection refused" in current["cache_error"]
         assert current["status"] == "ready"
         assert current["startup_failure_count"] == 0
         assert "connection refused" in current["last_refresh_error"]

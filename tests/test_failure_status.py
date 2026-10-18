@@ -10,14 +10,13 @@ from test_discovery_failure_policy import Upstream
 from mcp_manager.runtime import GatewayError
 
 
-async def test_start_failures_keep_policy_until_threshold_then_mark_failed(tmp_path):
+async def test_refresh_start_failures_clear_tools_immediately_and_keep_policy(tmp_path):
     async with console(tmp_path) as (app, _web, actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
         row = await app.state.catalog.create(
             {"name": "service", "config": {"command": "fake"}}
         )
-        old_tools = app.state.catalog.cached(row)["tools"]
         peer.failure = OSError("upstream unavailable")
 
         for expected_count in (1, 2):
@@ -26,9 +25,9 @@ async def test_start_failures_keep_policy_until_threshold_then_mark_failed(tmp_p
             current = await app.state.catalog.get(row.id)
             public = app.state.catalog.public(current, user_id=actor["id"])
             assert current.mode == "lazy"
-            assert public["status"] == "stopped"
+            assert public["status"] == "failed"
             assert public["startup_failure_count"] == expected_count
-            assert app.state.catalog.cached(current)["tools"] == old_tools
+            assert app.state.catalog.cached(current)["tools"] == []
             assert caught.value.details["startup_failure_count"] == expected_count
 
         with pytest.raises(GatewayError) as caught:
@@ -75,7 +74,7 @@ async def test_successful_start_clears_failure_count_without_implicit_discovery(
         )["startup_failure_count"] == 0
 
 
-async def test_refresh_discovery_failure_preserves_ready_cache_and_status(tmp_path):
+async def test_refresh_discovery_failure_invalidates_ready_cache_and_status(tmp_path):
     async with console(tmp_path) as (app, _web, actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
@@ -88,10 +87,10 @@ async def test_refresh_discovery_failure_preserves_ready_cache_and_status(tmp_pa
         current = await app.state.catalog.get(row.id)
         cache = app.state.catalog.cached(current)
         public = app.state.catalog.public(current, user_id=actor["id"])
-        assert cache["cache_status"] == "ready"
-        assert [tool["name"] for tool in await catalog_tools(app, current)] == ["first"]
+        assert cache["cache_status"] == "error"
+        assert await catalog_tools(app, current) == []
         assert cache["last_refresh_error"] == "tools/list failed"
-        assert public["status"] == "stopped"
+        assert public["status"] == "failed"
         assert public["startup_failure_count"] == 0
 
 
@@ -111,11 +110,11 @@ async def test_first_discovery_failure_without_ready_cache_counts_as_start_failu
         public = app.state.catalog.public(current, user_id=actor["id"])
         assert current.mode == "lazy"
         assert public["startup_failure_count"] == 1
-        assert public["status"] == "stopped"
+        assert public["status"] == "failed"
         assert app.state.catalog.cached(current)["tools"] == []
 
 
-async def test_ready_empty_cache_is_preserved_on_refresh_failure(tmp_path):
+async def test_ready_empty_cache_is_marked_failed_on_refresh_failure(tmp_path):
     async with console(tmp_path) as (app, _web, actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
@@ -129,7 +128,7 @@ async def test_ready_empty_cache_is_preserved_on_refresh_failure(tmp_path):
         with pytest.raises(GatewayError, match="empty tools/list failed"):
             await app.state.catalog.refresh(row.id)
         cache = app.state.catalog.cached(await app.state.catalog.get(row.id))
-        assert cache["cache_status"] == "ready"
+        assert cache["cache_status"] == "error"
         assert cache["tools"] == []
         assert cache["last_refresh_error"] == "empty tools/list failed"
         assert app.state.catalog.public(
@@ -148,20 +147,9 @@ async def test_status_filter_and_failed_agent_summary(tmp_path):
             {"name": "disabled service", "slug": "disabled", "mode": "disabled",
              "config": {"command": "fake"}}
         )
-        cache = app.state.catalog.cached(failed)
-        cache.update(
-            runtime_status="failed",
-            startup_failure_count=3,
-            last_startup_error_code="startup_failed",
-            last_startup_error="connection refused",
-            last_startup_failure_at="2026-09-15T00:00:00+00:00",
-            failure_scope="global",
-            failed_gateway_names=["failed__first"],
-            tools=[],
-            cache_status="error",
-            cache_at=None,
-        )
-        app.state.catalog.save_cache(failed, cache)
+        peer.discovery_failure = RuntimeError("connection refused")
+        with pytest.raises(GatewayError):
+            await app.state.catalog.refresh_index(failed.id)
 
         listing = (await web.get("/api/v1/mcps", params={"status": "failed"})).json()
         assert [item["id"] for item in listing["items"]] == [failed.id]
@@ -184,7 +172,7 @@ async def test_status_filter_and_failed_agent_summary(tmp_path):
         assert [item["id"] for item in body["items"]] == [failed.id]
         summary = body["items"][0]
         assert summary["status"] == "failed"
-        assert summary["startup_failure_count"] == 3
+        assert summary["startup_failure_count"] == 0
         assert summary["failure_reason"] == "connection refused"
         assert summary["failure_scope"] == "global"
         assert summary["tools_list"] == []
@@ -199,6 +187,7 @@ async def test_status_filter_and_failed_agent_summary(tmp_path):
         )
         assert native.tools == []
 
+        peer.discovery_failure = None
         known = await app.state.gateway.call_tool(
             SimpleNamespace(request=request),
             SimpleNamespace(
@@ -206,8 +195,8 @@ async def test_status_filter_and_failed_agent_summary(tmp_path):
                 arguments={"name": "failed__first", "arguments": {"value": 1}},
             ),
         )
-        assert known.structured_content["error"]["code"] == "mcp_failed"
-        assert known.structured_content["error"]["mcp_id"] == failed.id
+        assert not known.is_error
+        assert known.content[0].text == "ok"
 
         unknown = await app.state.gateway.call_tool(
             SimpleNamespace(request=request),

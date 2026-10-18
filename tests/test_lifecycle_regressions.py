@@ -16,7 +16,7 @@ async def test_stop_rejects_queued_dispatch():
     await fake.entered.wait()
     queued = asyncio.create_task(runtime.call(spec(), lease.id, "second", {}))
     await asyncio.sleep(.02)
-    stopping = asyncio.create_task(runtime.stop_server("s1", hold=True))
+    stopping = asyncio.create_task(runtime.stop_server("s1"))
     await asyncio.sleep(.02)
     fake.unblock.set()
     await first
@@ -25,6 +25,8 @@ async def test_stop_rejects_queued_dispatch():
     await stopping
     assert fake.calls == 1
     assert fake.closes == 1
+    await runtime.call(spec(), lease.id, "new", {})
+    assert fake.calls == 2
     await runtime.close()
 
 

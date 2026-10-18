@@ -265,7 +265,6 @@ class Runtime:
         self.on_starting = None
         self.on_start_failure = None
         self._closing = False
-        self.holds: set[str] = set()
         self.versions: dict[str, int] = {}
         self.credential_versions: dict[tuple, str | None] = {}
 
@@ -353,8 +352,6 @@ class Runtime:
             raise GatewayError("shutting_down", "Gateway is shutting down")
         if spec.mode == "disabled":
             raise GatewayError("disabled", "MCP is disabled")
-        if spec.id in self.holds:
-            raise GatewayError("stopped", "MCP was manually stopped; start it before calling")
         if spec.credential_owner and self.credential_versions.get(
                 (spec.id, spec.credential_owner), spec.credential_scope) != spec.credential_scope:
             raise GatewayError("credential_changed", "OAuth credentials changed; call again with current authorization")
@@ -620,15 +617,11 @@ class Runtime:
             if not keep_alive and not instance.refs and (instance.spec.mode == "lazy" or instance.spec.isolation == "session"):
                 await self._stop_instance(instance, only_unreferenced=True)
 
-    async def stop_server(self, server_id: str, *, hold=False, force=False, require_idle=False, revision=None):
+    async def stop_server(self, server_id: str, *, force=False, require_idle=False, revision=None):
         instances = [i for i in self.instances.values() if i.spec.id == server_id
                      and (revision is None or i.spec.revision == revision)]
-        # No await before admission is blocked: a rejected edit leaves the old
-        # generation and any pre-existing manual hold untouched.
         if require_idle and any(i.in_flight or i.phase == "starting" for i in instances):
             raise GatewayError("busy", "MCP has active calls or is starting; retry after completion")
-        if hold:
-            self.holds.add(server_id)
         for instance in instances:
             instance.refs.clear()
             await self._stop_instance(instance, force=force)
@@ -682,7 +675,10 @@ class Runtime:
         # Unidentified HTTP callers have retention leases rather than precise Agent sessions.
         referenced = set().union(*(i.refs for i in self.instances.values())) if self.instances else set()
         for lease in list(self.leases.values()):
-            if lease.kind == "retention" and lease.id not in referenced:
+            # A fresh HTTP lease can be between creation and first acquisition.
+            # No instance reference yet does not make an active request expired.
+            if (lease.kind == "retention" and lease.id not in referenced
+                    and self.idle_seconds > 0 and now - lease.touched >= self.idle_seconds):
                 self.leases.pop(lease.id, None)
 
     def capacity_status(self):

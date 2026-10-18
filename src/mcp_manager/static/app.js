@@ -198,7 +198,7 @@ async function proposals(main,signal){
   filters:[['status','状态',[['pending','待审批'],['incomplete','待完善配置'],['approved','已审批'],['rejected','已拒绝']]]],
   rowActions:r=>[
    button('详情',async()=>detail('提议详情',await api('/mcp-proposals/'+r.id))),
-   ...(r.test_status==='success'?[button('能力目录',()=>capabilityBrowser({resource:'/mcp-proposals/'+r.id+'/test-capabilities',title:r.name+' · 测试能力'}))]:[]),
+   ...(!['approved','rejected'].includes(r.status)&&r.test_status==='success'?[button('能力目录',()=>capabilityBrowser({resource:'/mcp-proposals/'+r.id+'/test-capabilities',title:r.name+' · 测试能力'}))]:[]),
    ...(!['approved','rejected'].includes(r.status)?[
     button('配置',()=>proposalEditor(r,refresh)),
     proposalTestButton(r),

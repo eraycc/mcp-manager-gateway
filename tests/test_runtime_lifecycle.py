@@ -102,7 +102,7 @@ async def test_credential_generation_drains_without_interrupting_active_call(mod
 
 
 @pytest.mark.asyncio
-async def test_busy_configuration_stop_preserves_old_instance_and_hold():
+async def test_busy_configuration_stop_preserves_old_instance():
     connection = Connection()
     connection.block = True
     runtime = Runtime(connection.connect)
@@ -111,9 +111,8 @@ async def test_busy_configuration_stop_preserves_old_instance_and_hold():
     await connection.entered.wait()
     try:
         with pytest.raises(GatewayError) as caught:
-            await runtime.stop_server("s", hold=True, require_idle=True)
+            await runtime.stop_server("s", require_idle=True)
         assert caught.value.code == "busy"
-        assert "s" not in runtime.holds
         assert runtime.status()[0]["phase"] == "ready"
         assert runtime.status()[0]["lease_count"] == 1
         assert connection.closed == 0

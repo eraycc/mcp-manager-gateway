@@ -157,7 +157,7 @@ async def test_revoked_credential_discovery_does_not_restore_cache(tmp_path):
         assert app.state.catalog.cached(row, actor["id"])["tools"] == []
 
 
-async def test_failed_write_does_not_leave_a_runtime_hold(tmp_path):
+async def test_failed_write_preserves_service_policy(tmp_path):
     async with console(tmp_path) as (app, _web, _actor):
         row = await app.state.catalog.create({"name": "service", "mode": "disabled", "config": {"command": "fake"}})
         async def reject_transaction(session=None):
@@ -167,10 +167,10 @@ async def test_failed_write_does_not_leave_a_runtime_hold(tmp_path):
         from fastapi import HTTPException
         with pytest.raises(HTTPException):
             await app.state.catalog.update(row.id, {"name": "changed"}, authorize=reject_transaction)
-        assert row.id not in app.state.runtime.holds
+        assert (await app.state.catalog.get(row.id)).mode == "disabled"
         with pytest.raises(HTTPException):
             await app.state.catalog.delete(row.id, authorize=reject_transaction)
-        assert row.id not in app.state.runtime.holds
+        assert (await app.state.catalog.get(row.id)).mode == "disabled"
 
 
 async def test_browser_gateway_cors_and_management_origin_are_separate(tmp_path):

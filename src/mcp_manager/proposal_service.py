@@ -3,8 +3,9 @@ import json
 from copy import deepcopy
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
+from .catalog_models import ProposalTestEntry
 from .database import McpProposal, McpServer, now
 
 
@@ -58,6 +59,7 @@ async def approve_proposal(session, proposal_id, *, actor, expected_revision, ca
     row.mode, row.isolation, row.config_isolation = mode, isolation, config_isolation
     row.approved_mcp_id = created.id
     row.test_run_id = None
+    await session.execute(delete(ProposalTestEntry).where(ProposalTestEntry.proposal_id == row.id))
     row.updated_at = now()
     await session.flush()
     return created

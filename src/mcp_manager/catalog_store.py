@@ -367,10 +367,8 @@ class CatalogStore:
             CatalogHead.scope_key, CatalogHead.server_id, CatalogHead.owner, CatalogHead.status,
             CatalogGeneration.id.label("generation_id"), CatalogGeneration.status.label("generation_status"),
             CatalogGeneration.revision, CatalogGeneration.credential_generation,
-            CatalogGeneration.counts, CatalogGeneration.published_at,
+            CatalogGeneration.counts, CatalogGeneration.published_at, CatalogGeneration.details,
         ]
-        if preview:
-            columns.append(CatalogGeneration.details)
         async with self.db.session() as session:
             rows = (await session.execute(select(*columns).select_from(CatalogHead).outerjoin(
                 CatalogGeneration, CatalogHead.generation_id == CatalogGeneration.id
@@ -388,6 +386,13 @@ class CatalogStore:
                 "tool_count": counts.get("tools", 0), "resource_count": counts.get("resources", 0),
                 "prompt_count": counts.get("prompts", 0), "template_count": counts.get("templates", 0),
             }
+            failure = (row.status == "error" and row.revision == scope.revision
+                       and row.credential_generation == scope.credential_generation)
+            if failure:
+                item.update({key: value for key, value in (row.details or {}).items() if key in {
+                    "cache_error", "cache_error_code", "last_refresh_error", "last_refresh_error_code",
+                    "last_refresh_failure_at", "cache_attempt_at",
+                }})
             if preview:
                 details = (row.details or {}) if ready else {}
                 item.update(tools_preview=details.get("tools_preview", []),
@@ -521,6 +526,35 @@ class CatalogStore:
         async with self.db.session() as session:
             generation = await session.get(CatalogGeneration, identity)
             return generation_scope(generation) if generation else None
+
+    async def refresh_version(self, scope):
+        async with self.db.session() as session:
+            head = await session.get(CatalogHead, scope_key(scope))
+            return head.refresh_id if head else None
+
+    async def record_failure(self, scope, details, *, expected_refresh):
+        """Invalidate only this scope; a late failure cannot replace newer success."""
+        async with self.db.locked() as session:
+            await self._validate_scope(session, scope)
+            key = scope_key(scope)
+            head = await session.get(CatalogHead, key)
+            failed = await session.get(CatalogGeneration, head.refresh_id) if head and head.refresh_id else None
+            if (head and head.refresh_id != expected_refresh
+                    and (head.status != "error" or not failed or failed.status != "failed")):
+                return False
+            if failed is None or failed.status != "failed" or generation_scope(failed) != scope:
+                failed = CatalogGeneration(
+                    scope_key=key, server_id=scope.server_id, owner=scope.owner, revision=scope.revision,
+                    credential_generation=scope.credential_generation, status="failed", digest="", counts={},
+                )
+                session.add(failed)
+                await session.flush()
+            failed.details = dict(details)
+            if head is None:
+                head = CatalogHead(scope_key=key, server_id=scope.server_id, owner=scope.owner)
+                session.add(head)
+            head.status, head.generation_id, head.refresh_id = "error", failed.id, failed.id
+            return True
 
     async def fail_refresh(self, identity):
         async with self.db.locked() as session:

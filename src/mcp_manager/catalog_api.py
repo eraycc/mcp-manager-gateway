@@ -409,6 +409,8 @@ async def capabilities(server_id: str, request: Request, kind: str = "tools", q:
     legacy = cat.cached_view(row, actor.id) if not page.generation else {}
     return {"items": page.items, "total": page.total, "next_cursor": page.next_cursor,
             "generation": page.generation,
+            **{key: value for key, value in (await cat.index.get_summaries([scope])).get(row.id, {}).items()
+               if key in {"cache_status", "cache_error", "cache_error_code", "last_refresh_failure_at"}},
             "refresh_required": not page.generation and legacy.get("cache_status") == "ready"}
 
 
@@ -477,7 +479,7 @@ async def start(server_id: str, request: Request, user=ADMIN):
 async def stop(server_id: str, request: Request, user=ADMIN):
     await request.app.state.catalog.get(server_id)
     await web_authorizer(request)()
-    await request.app.state.runtime.stop_server(server_id, hold=True)
+    await request.app.state.runtime.stop_server(server_id, force=True)
     return {"ok": True}
 
 

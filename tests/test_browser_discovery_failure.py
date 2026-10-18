@@ -39,7 +39,8 @@ async def test_refresh_failure_replaces_open_cached_tool_list(bug1_browser):
     dialog = page.get_by_role("dialog")
     await expect(dialog).to_contain_text("old_tool")
     await dialog.get_by_role("button", name="刷新发现缓存").click()
-    await expect(dialog).to_contain_text("old_tool")
+    await expect(dialog).not_to_contain_text("old_tool")
+    await expect(dialog.get_by_role("alert")).to_contain_text("upstream offline")
     await expect(page.locator("#toast")).to_have_attribute("data-status", "fail")
     await expect(page.locator("#toast")).to_contain_text("upstream offline")
 

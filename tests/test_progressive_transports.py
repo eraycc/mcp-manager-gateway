@@ -64,8 +64,17 @@ async def gateway_client(transport, url, token):
 
 @pytest.mark.parametrize("transport", ["http", "stdio"])
 @pytest.mark.parametrize("mode", ["native", "discovery"])
-async def test_full_matrix_with_two_downstream_transports(running_gateway, transport, mode):
+async def test_full_matrix_with_two_downstream_transports(running_gateway, transport, mode, monkeypatch):
     app, web, url, _, _local = running_gateway
+    if transport == "http" and mode == "native":
+        original_call = app.state.catalog.call
+
+        async def reap_before_acquire(*args, **kwargs):
+            # Reproduce maintenance between lease creation and instance acquisition.
+            await app.state.runtime.reap()
+            return await original_call(*args, **kwargs)
+
+        monkeypatch.setattr(app.state.catalog, "call", reap_before_acquire)
     async with remote_fixture() as (remote_url, calls):
         response = await web.post("/api/v1/mcps", json={"name": "Remote", "slug": "remote",
             "transport": "streamable-http", "config": {"url": remote_url + "/mcp"}})
@@ -121,6 +130,8 @@ async def test_full_matrix_with_two_downstream_transports(running_gateway, trans
                     mode == "discovery") else await client.call_tool(name, arguments)
             bad = await invoke("remote__echo", {"value": "wrong schema"})
             assert bad.is_error and calls == []
+            if transport == "http" and mode == "native":
+                assert bad.structured_content["error"]["code"] == "invalid_request"
             local_result = await invoke("echo__echo", {"value": "中文"})
             assert local_result.content[0].text == "中文"
             remote_result = await invoke("remote__echo", {"number": 7})

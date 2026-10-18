@@ -304,15 +304,21 @@ class Discovery:
                 description, description_source = service_description(row.description, preview)
                 count, status = len(cache["tools"]), cache["cache_status"]
             failure = catalog.failure_details(row, user.id if user else None)
-            if failure["status"] == "failed":
-                names, count, status = [], 0, "error"
+            diagnostic = indexed.get(row.id, {})
+            reason = diagnostic.get("cache_error") or failure["failure_reason"]
             item = {
                 "id": row.id, "mcp": row.id, "name": row.name, "slug": row.slug,
                 "description": description, "description_source": description_source,
                 "tags": row.tags, "tool_count": count, "tools_list": names,
                 "catalog_status": status, "status": failure["status"],
                 "startup_failure_count": failure["startup_failure_count"],
-                "failure_reason": failure["failure_reason"],
+                "failure_reason": reason,
+                "cache_error": diagnostic.get("cache_error") or cache["cache_error"],
+                "cache_error_code": diagnostic.get("cache_error_code") or cache["cache_error_code"],
+                "last_refresh_error": diagnostic.get("last_refresh_error") or cache["last_refresh_error"],
+                "last_refresh_error_code": diagnostic.get("last_refresh_error_code") or cache["last_refresh_error_code"],
+                "last_refresh_failure_at": diagnostic.get("last_refresh_failure_at") or cache["last_refresh_failure_at"],
+                "recovery": failure["recovery"] if reason else None,
                 "last_startup_error": cache["last_startup_error"],
                 "last_startup_error_code": cache["last_startup_error_code"],
                 "last_startup_failure_at": cache["last_startup_failure_at"],
@@ -367,7 +373,7 @@ class Discovery:
             await authorize()
             return builder.finish()
         row_by_id = {row.id: row for row in rows}
-        selected_rows = [row_by_id[item["id"]] for item in selected if item["status"] != "failed"]
+        selected_rows = [row_by_id[item["id"]] for item in selected]
         legacy = [row for row in selected_rows if row.id not in indexed
                   and catalog.cached_view(row, user.id if user else None)["tools"]]
         if not legacy:

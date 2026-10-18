@@ -28,7 +28,7 @@ export function capabilityBrowser({resource,signal,title='能力目录',initialK
  const form=el('form',{class:'toolbar capability-toolbar'},search,el('button',{type:'submit'},'搜索'));
  const body=el('div',{class:'capability-list','aria-live':'polite'});
  const foot=el('div',{class:'pagination capability-pagination'});
- if(refreshAction)actions=[button('刷新发现缓存',async()=>{await refreshAction();page=0;cursors=[null];await load()}),...actions];
+ if(refreshAction)actions=[button('刷新发现缓存',async()=>{try{await refreshAction()}catch(error){body.replaceChildren(el('div',{class:'error',role:'alert'},error.message));foot.replaceChildren();throw error}page=0;cursors=[null];await load()}),...actions];
  const shell=el('div',{class:'stack capability-browser',role:'region'},actions.length?el('div',{class:'actions capability-actions'},...actions):null,tabs,form,body,foot);
  const popup=dialog(title,shell);
  popup.addEventListener('close',()=>owned.abort(),{once:true});
@@ -74,6 +74,7 @@ export function capabilityBrowser({resource,signal,title='能力目录',initialK
  }
  function render(){
   body.replaceChildren();
+  if(data.cache_error)body.append(el('div',{class:'error',role:'alert'},data.cache_error));
   if(data.refresh_required)body.append(el('p',{class:'notice capability-cache-hint'},'检测到旧版发现缓存，请点击“刷新发现缓存”更新能力目录。'));
   for(const item of data.items.slice(0,CAPABILITY_PAGE_SIZE)){
    const card=el('article',{class:'card capability-card'});

@@ -312,16 +312,6 @@ class Gateway:
                 entries.append((row, tool, dict(tool, name=alias(row.slug, tool["name"]))))
         return user, token, rows, entries
 
-    def failed_target(self, rows, name, user_id):
-        catalog = self.app.state.catalog
-        for row in rows:
-            error = catalog.failed_error(row, user_id)
-            if error is None:
-                continue
-            if name in catalog.cached(row, user_id)["failed_gateway_names"]:
-                return error
-        return None
-
     def lease(self, request, user, token):
         runtime = self.app.state.runtime
         identity = owner(user, token, request)
@@ -449,9 +439,6 @@ class Gateway:
             name, arguments = arguments["name"], arguments["arguments"]
         entry = next((e for e in entries if e[2]["name"] == name), None)
         if not entry:
-            failure = self.failed_target(rows, name, user.id if user else None)
-            if failure is not None:
-                raise failure
             raise ValueError("Tool not found in authorized cache; ask an administrator to refresh")
         row, tool, _ = entry
 
@@ -559,17 +546,39 @@ class Gateway:
             row, original_name = None, None
             for candidate in candidates:
                 scope = await catalog.index_scope(candidate, user.id if user else None)
+                summary = (await catalog.index.get_summaries([scope])).get(candidate.id)
+                if candidate.mode == "disabled":
+                    continue
+                if (summary and summary["cache_status"] != "ready") or (
+                    not summary and catalog.cached_view(candidate, user.id if user else None)["cache_status"] != "ready"
+                ):
+                    async def authorize_recovery(candidate=candidate, scope=scope):
+                        fresh_user, fresh_token, allowed = await self.principal(request, target_id=candidate.id)
+                        fresh = await catalog.get(candidate.id, metadata_only=True)
+                        if (owner(fresh_user, fresh_token, request) != identity or candidate.id not in allowed
+                                or fresh.revision != candidate.revision):
+                            raise GatewayError("permission_revoked", "MCP authorization changed during recovery")
+                        if await catalog.index_scope(fresh, user.id if user else None) != scope:
+                            raise GatewayError("credential_changed", "MCP credentials changed during recovery")
+
+                    await authorize_recovery()
+                    await catalog.ensure_ready(
+                        await catalog.get(candidate.id), user.id if user else None, authorize=authorize_recovery,
+                    )
+                    recovered = await self.resolve_authorized_tool(request, name)
+                    if recovered:
+                        expected_scope = await catalog.index.get_generation_scope(recovered.generation)
+                        row = await catalog.get(expected_scope.server_id)
+                        original_name = recovered.original_name
+                        break
                 if await catalog.index.has_scope(scope):
-                    continue  # Failed/stale new heads cannot fall back to a legacy ready cache.
+                    continue
                 for tool in catalog.cached_view(candidate, user.id if user else None)["tools"]:
                     if name in {alias(candidate.slug, tool["name"]), candidate.id + "__" + tool["name"]}:
                         if row is not None:
                             raise GatewayError("catalog_route_conflict", "Gateway name has multiple authorized routes")
                         row, original_name = candidate, tool["name"]
             if row is None:
-                failure = self.failed_target(candidates, name, user.id if user else None)
-                if failure is not None:
-                    raise failure
                 raise GatewayError("tool_not_found", "Tool not found in authorized cache; ask an administrator to refresh")
             row = await catalog.get(row.id)
 
@@ -663,7 +672,6 @@ class Gateway:
         catalog = self.app.state.catalog
         rows = [row for row in await catalog.rows(ids=allowed, metadata_only=True) if row.mode != "disabled"]
         expected = await self.search_scope(ctx.request, user, token, rows)
-        rows = [row for row in rows if catalog.service_status(row, user.id if user else None) != "failed"]
         scopes = await catalog.index_scopes(rows, user.id if user else None)
         indexed = await catalog.index.get_summaries(scopes.values())
         version = fingerprint([expected, "native", kind])
