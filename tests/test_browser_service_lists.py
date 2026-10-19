@@ -276,7 +276,7 @@ async def test_admin_personal_capabilities_show_own_authentication_and_user_tota
     positions = await labels.evaluate_all("nodes => nodes.map(n => n.getBoundingClientRect().top)")
     assert positions == sorted(set(positions)), positions
     missing = page.locator('tr[data-row-id="row-1"] .service-capabilities')
-    await expect(missing).to_contain_text("当前管理员未认证")
+    await expect(missing).to_contain_text("当前用户未认证")
     await expect(missing).to_contain_text("已认证 2 / 4")
     await expect(missing.locator(".capability-summary")).to_have_count(0)
     await expect(page.locator('tr[data-row-id="row-2"] .capability-summary')).to_contain_text("工具 2")
