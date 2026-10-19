@@ -6,12 +6,12 @@ import pytest
 from mcp_manager import bridge
 
 
-async def test_heartbeat_survives_transient_failure_and_requests_reconnect(monkeypatch):
+async def test_heartbeat_survives_transient_failure_without_premature_reconnect(monkeypatch):
     class LeaseHTTP:
         attempts = 0
         async def post(self, path):
             self.attempts += 1
-            if self.attempts == 1:
+            if self.attempts in {1, 2, 4, 5}:
                 raise bridge.httpx.ConnectError("temporary outage")
             return bridge.httpx.Response(200, request=bridge.httpx.Request("POST", "http://test" + path))
     upstream = bridge.BridgeUpstream("http://test", "")
@@ -19,12 +19,12 @@ async def test_heartbeat_survives_transient_failure_and_requests_reconnect(monke
     task = asyncio.create_task(upstream.heartbeat(http, "lease", .001))
     try:
         for _ in range(100):
-            if http.attempts >= 2:
+            if http.attempts >= 6:
                 break
             await asyncio.sleep(.002)
-        assert http.attempts >= 2
+        assert http.attempts >= 6
         assert not task.done()
-        assert upstream.stale
+        assert not upstream.stale
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -80,3 +80,24 @@ async def test_bridge_keeps_concurrent_requests_and_fails_fast_when_owner_stops(
         await asyncio.gather(upstream.task, return_exceptions=True)
         with pytest.raises(RuntimeError, match="closed"):
             await asyncio.wait_for(upstream.request("call_tool", "third", {}), 1)
+
+
+async def test_heartbeat_requests_reconnect_after_three_consecutive_failures():
+    class LeaseHTTP:
+        attempts = 0
+        async def post(self, _path):
+            self.attempts += 1
+            raise bridge.httpx.ConnectError("Bridge disconnected")
+    upstream = bridge.BridgeUpstream("http://test", "")
+    http = LeaseHTTP()
+    task = asyncio.create_task(upstream.heartbeat(http, "lease", .001))
+    try:
+        for _ in range(100):
+            if http.attempts >= 3:
+                break
+            await asyncio.sleep(.002)
+        assert http.attempts >= 3 and upstream.stale
+        assert not task.done()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

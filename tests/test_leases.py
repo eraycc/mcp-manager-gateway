@@ -15,7 +15,7 @@ from mcp_manager.runtime import Runtime, ServerSpec
 
 async def test_snapshot_has_multiple_instances_and_lease_activity():
     fake = Fake()
-    runtime = Runtime(fake.connect, clock=lambda: 100.)
+    runtime = Runtime(fake.connect, clock=lambda: 100., connection_ttl_seconds=90)
     a = runtime.create_lease("alice", "token", ttl=90, kind="bridge")
     b = runtime.create_lease("bob", "other")
     try:
@@ -160,7 +160,7 @@ async def test_filters_paging_expiry_and_details_do_not_leak_shared_users(db_app
         assert data["total"] == 1 and data["items"][0]["token_name"] == "desktop"
         assert data["mcp_refs"][0]["ref_count"] == 2
         assert (await h.web.get("/api/v1/leases?mcp_id=mcp-a")).json()["total"] == 2
-        one.touched -= 100
+        one.touched -= h.app.state.runtime.connection_ttl_seconds + 10
         expired = (await h.web.get("/api/v1/leases?status=expired")).json()
         assert expired["items"][0]["can_disconnect"] and expired["total"] == 1
         for query in ["page_size=201", "kind=invalid", "sort=invalid", "touched_from=garbage",

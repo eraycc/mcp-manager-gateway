@@ -220,6 +220,11 @@ class Lease:
     kind: str = "agent"
     created: float = field(default_factory=time.time)
     in_flight: int = 0
+    created_clock: float = 0
+    pending: int = 0
+    heartbeat_tick: float = 0
+    heartbeat_seconds: int = 90
+    missed_heartbeats: int = 3
 
 
 @dataclass
@@ -232,11 +237,14 @@ class Instance:
     in_flight: int = 0
     waiters: int = 0
     admitted_user: str = ""
+    admitted_token: str = ""
     last_activity: float = 0
     connection: Any = None
     error: str | None = None
     failure: Exception | None = None
     owner: asyncio.Task | None = None
+    stop_task: asyncio.Task | None = None
+    force_stop: bool = False
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     closed: asyncio.Event = field(default_factory=asyncio.Event)
@@ -251,11 +259,17 @@ class Runtime:
         *,
         clock: Callable[[], float] = time.monotonic,
         idle_seconds: float = 86400,
+        connection_ttl_seconds: int = 43200,
+        bridge_heartbeat_seconds: int = 90,
+        bridge_missed_heartbeats: int = 3,
         capacity: RuntimeCapacity | None = None,
     ):
         self.connector = connector
         self.clock = clock
         self.idle_seconds = idle_seconds
+        self.connection_ttl_seconds = connection_ttl_seconds
+        self.bridge_heartbeat_seconds = bridge_heartbeat_seconds
+        self.bridge_missed_heartbeats = bridge_missed_heartbeats
         self.capacity = capacity or RuntimeCapacity()
         self._business_gate = _FairCallGate(self.capacity, clock)
         self._instance_lock = asyncio.Lock()
@@ -274,14 +288,31 @@ class Runtime:
                      kind: str = "agent") -> Lease:
         if self._closing:
             raise GatewayError("shutting_down", "Gateway is shutting down")
-        lease = Lease(uuid.uuid4().hex, user_id, token_id, ttl, self.clock(), kind)
+        tick = self.clock()
+        lease = Lease(uuid.uuid4().hex, user_id, token_id, ttl, tick, kind,
+                      created=time.time(), created_clock=tick, heartbeat_tick=tick,
+                      heartbeat_seconds=self.bridge_heartbeat_seconds,
+                      missed_heartbeats=self.bridge_missed_heartbeats)
         self.leases[lease.id] = lease
         return lease
+
+    def lease_timeout(self, lease: Lease):
+        if lease.kind in {"agent", "bridge", "retention"}:
+            return self.connection_ttl_seconds or None
+        return lease.ttl
+
+    def lease_expired(self, lease: Lease, *, now=None):
+        ttl = self.lease_timeout(lease)
+        tick = self.clock() if now is None else now
+        inactive = ttl is not None and tick - lease.touched >= ttl
+        lost_bridge = (lease.kind == "bridge" and tick - lease.heartbeat_tick
+                       >= lease.heartbeat_seconds * lease.missed_heartbeats)
+        return not lease.in_flight and not lease.pending and (inactive or lost_bridge)
 
     def check_lease(self, lease_id: str, user_id: str | None = None,
                     token_id: str | None = None) -> Lease:
         lease = self.leases.get(lease_id)
-        if not lease or (lease.ttl is not None and self.clock() - lease.touched >= lease.ttl):
+        if not lease or self.lease_expired(lease):
             raise GatewayError("lease_expired", "Lease expired; create a new lease")
         if user_id is not None and (lease.user_id != user_id or lease.token_id != token_id):
             raise GatewayError("forbidden", "Lease belongs to a different caller")
@@ -289,7 +320,11 @@ class Runtime:
 
     def heartbeat(self, lease_id: str, user_id: str, token_id: str) -> Lease:
         lease = self.check_lease(lease_id, user_id, token_id)
-        lease.touched = self.clock()
+        lease.touched = lease.heartbeat_tick = self.clock()
+        # Switch only when the client receives the new policy; a shorter server
+        # default must not expire a healthy client still sleeping on its old interval.
+        lease.heartbeat_seconds = self.bridge_heartbeat_seconds
+        lease.missed_heartbeats = self.bridge_missed_heartbeats
         return lease
 
     def _key(self, spec: ServerSpec, lease: Lease):
@@ -372,14 +407,14 @@ class Runtime:
             ):
                 return
             pool = owned if len(owned) >= self.capacity.user_instances else active
-            idle = [item for item in pool if item.phase == "ready" and item.in_flight == 0]
+            idle = [item for item in pool if item.phase == "ready" and item.in_flight == 0
+                    and item.spec.mode == "lazy"]
             if idle:
                 victim = min(idle, key=lambda item: item.last_activity)
-                victim.refs.clear()
-                victim.phase = "draining"
         if victim is None:
             raise GatewayError("busy", "Runtime instance capacity is full; retry later")
-        await self._stop_instance(victim)
+        await self._stop_instance(victim, idle_seconds=0,
+                                  expected_activity=victim.last_activity, clear_refs=True)
 
     async def _acquire(self, spec: ServerSpec, lease_id: str) -> Instance:
         self._available(spec)
@@ -398,7 +433,6 @@ class Runtime:
                               and k[-1] == key[-1] and not i.closed.is_set()), None)
                 if other:
                     if other.phase not in {"draining", "stopping"}:
-                        other.phase = "draining"
                         asyncio.create_task(self._stop_instance(other))
                     wait_closed = other.closed
                 instance = self.instances.get(key)
@@ -429,6 +463,7 @@ class Runtime:
                                 key,
                                 spec,
                                 admitted_user=lease.user_id,
+                                admitted_token=lease.token_id,
                                 last_activity=self.clock(),
                             )
                             instance.drained.set()
@@ -482,13 +517,12 @@ class Runtime:
             self.capacity.queue_timeout,
         )
         if business:
-            await self._business_gate.acquire(
-                lease.user_id,
-                spec.id,
-                queue_timeout,
-            )
-            permit = (lease.user_id, spec.id)
+            lease.touched = self.clock()
+            lease.pending += 1
         try:
+            if business:
+                await self._business_gate.acquire(lease.user_id, spec.id, queue_timeout)
+                permit = (lease.user_id, spec.id)
             self.check_lease(lease_id)
             if authorize is not None:
                 await authorize()
@@ -509,7 +543,7 @@ class Runtime:
             if instance.phase != "ready":
                 raise GatewayError("stopped", "MCP is draining or stopped")
             if business:
-                instance.last_activity = self.clock()
+                lease.touched = instance.last_activity = self.clock()
             dispatched = True
             lease.in_flight += 1
             method = getattr(instance.connection, operation, None)
@@ -548,11 +582,17 @@ class Runtime:
                 raise
             if is_request_error(exc):
                 raise GatewayError("downstream_error", str(exc)) from exc
-            instance.phase = "draining"
-            instance.refs.clear()
+            lock = self._locks.setdefault(instance.key, asyncio.Lock())
+            async with lock:
+                instance.phase = "draining"
+                instance.refs.clear()
             code = "outcome_unknown" if business else "connection_error"
             raise GatewayError(code, str(exc) or "Downstream did not return a result") from exc
         finally:
+            if business:
+                lease.pending -= 1
+                if dispatched:
+                    lease.touched = self.clock()
             if dispatched:
                 lease.in_flight -= 1
             if acquired and instance is not None:
@@ -560,18 +600,20 @@ class Runtime:
             if waiting and instance is not None:
                 instance.waiters -= 1
             if instance is not None:
-                if business and dispatched:
-                    instance.last_activity = self.clock()
-                instance.in_flight -= 1
-                if instance.in_flight == 0:
-                    instance.drained.set()
-                    if instance.phase == "draining":
-                        await self._stop_instance(instance)
-                    elif not instance.refs and (
-                        instance.spec.mode == "lazy"
-                        or instance.spec.isolation == "session"
-                    ):
-                        await self._stop_instance(instance, only_unreferenced=True)
+                lock = self._locks.setdefault(instance.key, asyncio.Lock())
+                async with lock:
+                    if business and dispatched:
+                        instance.last_activity = self.clock()
+                    instance.in_flight -= 1
+                    if instance.in_flight == 0:
+                        instance.drained.set()
+                    stopping = instance.phase == "draining" and instance.in_flight == 0
+                    unreferenced = (not instance.refs and instance.spec.mode == "lazy"
+                                    and instance.in_flight == 0)
+                if stopping:
+                    await self._stop_instance(instance)
+                elif unreferenced:
+                    await self._stop_instance(instance, only_unreferenced=True)
             if permit is not None:
                 await self._business_gate.release(*permit)
 
@@ -585,27 +627,53 @@ class Runtime:
         """Reject unavailable revisions through the public runtime boundary."""
         self._available(spec)
 
-    async def stop_instance(self, instance: Instance, *, force=False, only_unreferenced=False):
+    async def stop_instance(self, instance: Instance, *, force=False, only_unreferenced=False, clear_refs=False):
         """Stop one runtime instance without exposing lifecycle internals."""
         await self._stop_instance(
-            instance, force=force, only_unreferenced=only_unreferenced
+            instance, force=force, only_unreferenced=only_unreferenced, clear_refs=clear_refs
         )
 
-    async def _stop_instance(self, instance: Instance, *, force=False, only_unreferenced=False):
+    async def _stop_instance(self, instance: Instance, *, force=False, only_unreferenced=False,
+                             idle_seconds=None, expected_activity=None, clear_refs=False,
+                             require_idle=False):
         lock = self._locks.setdefault(instance.key, asyncio.Lock())
         async with lock:
-            if instance.closed.is_set() or (only_unreferenced and instance.refs):
+            if (instance.closed.is_set() or instance.phase == "stopped"
+                    or self.instances.get(instance.key) is not instance):
                 return
-            instance.phase = "draining"
+            if idle_seconds is not None and (
+                    instance.spec.mode != "lazy" or instance.phase != "ready" or instance.in_flight
+                    or (expected_activity is not None and instance.last_activity != expected_activity)
+                    or self.clock() - instance.last_activity < idle_seconds):
+                return
+            if only_unreferenced and instance.refs:
+                return
+            if require_idle and (instance.in_flight or instance.phase == "starting"):
+                raise GatewayError("busy", "MCP has active calls or is starting; retry after completion")
+            if clear_refs:
+                instance.refs.clear()
+            instance.force_stop |= force
+            task = instance.stop_task
+            if task is None or task.done():
+                instance.phase = "draining"
+                task = instance.stop_task = asyncio.create_task(self._finish_stop(instance))
+        # Callers may be cancelled independently; lifecycle cleanup has one owner.
+        await asyncio.shield(task)
+
+    async def _finish_stop(self, instance: Instance):
         timeout = float(instance.spec.config.get("stop_timeout", 10))
         try:
             await asyncio.wait_for(instance.drained.wait(), timeout)
         except TimeoutError:
-            if not force:
-                # Keep draining. A later call completion / reap will finish the stop.
+            if not instance.force_stop:
                 return
-        instance.phase = "stopping"
-        instance.stop.set()
+        lock = self._locks.setdefault(instance.key, asyncio.Lock())
+        async with lock:
+            if instance.closed.is_set():
+                return
+            instance.phase = "stopping"
+            if not instance.stop.is_set():
+                instance.stop.set()
         try:
             await asyncio.wait_for(asyncio.shield(instance.closed.wait()), timeout)
         except TimeoutError:
@@ -613,14 +681,21 @@ class Runtime:
                 instance.owner.cancel()
                 await asyncio.gather(instance.owner, return_exceptions=True)
 
-    async def release(self, lease_id: str, *, keep_alive=False):
+    async def release(self, lease_id: str, *, keep_alive=False, if_expired=False):
+        lease = self.leases.get(lease_id)
+        if if_expired and (not lease or not self.lease_expired(lease)):
+            return False
         self.leases.pop(lease_id, None)
         for instance in list(self.instances.values()):
             if lease_id not in instance.refs:
                 continue
-            instance.refs.discard(lease_id)
-            if not keep_alive and not instance.refs and (instance.spec.mode == "lazy" or instance.spec.isolation == "session"):
+            lock = self._locks.setdefault(instance.key, asyncio.Lock())
+            async with lock:
+                instance.refs.discard(lease_id)
+                stop = not keep_alive and not instance.refs and instance.spec.mode == "lazy"
+            if stop:
                 await self._stop_instance(instance, only_unreferenced=True)
+        return lease is not None
 
     async def stop_server(self, server_id: str, *, force=False, require_idle=False, revision=None):
         instances = [i for i in self.instances.values() if i.spec.id == server_id
@@ -628,21 +703,19 @@ class Runtime:
         if require_idle and any(i.in_flight or i.phase == "starting" for i in instances):
             raise GatewayError("busy", "MCP has active calls or is starting; retry after completion")
         for instance in instances:
-            instance.refs.clear()
-            await self._stop_instance(instance, force=force)
+            await self._stop_instance(instance, force=force, require_idle=require_idle, clear_refs=True)
 
     async def invalidate_credential(self, server_id, owner):
         self.credential_versions[(server_id, owner)] = None
         for instance in list(self.instances.values()):
             if instance.spec.id == server_id and instance.spec.credential_owner == owner:
-                instance.refs.clear()
-                await self._stop_instance(instance)
+                await self._stop_instance(instance, clear_refs=True)
 
     async def restrict_lease(self, lease_id, allowed):
         for instance in list(self.instances.values()):
             if lease_id in instance.refs and instance.spec.id not in allowed:
                 instance.refs.discard(lease_id)
-                if not instance.refs and (instance.spec.mode == "lazy" or instance.spec.isolation == "session"):
+                if not instance.refs and instance.spec.mode == "lazy":
                     await self._stop_instance(instance, only_unreferenced=True)
 
     async def revoke(self, *, user_id: str | None = None, token_id: str | None = None):
@@ -655,40 +728,32 @@ class Runtime:
             for instance in owned:
                 if instance.spec.credential_owner == user_id:
                     self.credential_versions[(instance.spec.id, user_id)] = None
+        owned.extend(i for i in self.instances.values() if i not in owned
+                     and i.spec.isolation == "session"
+                     and (user_id is None or i.admitted_user == user_id)
+                     and (token_id is None or i.admitted_token == token_id))
         for lease in list(self.leases.values()):
             if (user_id is None or lease.user_id == user_id) and (
                     token_id is None or lease.token_id == token_id):
                 await self.release(lease.id)
         for instance in owned:
-            instance.refs.clear()
-            await self._stop_instance(instance)
+            await self._stop_instance(instance, clear_refs=True)
 
     async def reap(self):
-        now = self.clock()
         for lease in list(self.leases.values()):
-            if lease.ttl is not None and now - lease.touched >= lease.ttl:
-                await self.release(lease.id)
+            if self.lease_expired(lease):
+                await self.release(lease.id, if_expired=True)
         for instance in list(self.instances.values()):
             idle = float(instance.spec.config.get("idle_seconds", self.idle_seconds))
             if instance.phase == "draining" and instance.in_flight == 0:
                 await self._stop_instance(instance)
-            elif (instance.spec.mode == "lazy" and instance.in_flight == 0
-                  and instance.phase == "ready" and idle > 0
-                  and now - instance.last_activity >= idle):
-                instance.refs.clear()
-                await self._stop_instance(instance)
-        # Unidentified HTTP callers have retention leases rather than precise Agent sessions.
-        referenced = set().union(*(i.refs for i in self.instances.values())) if self.instances else set()
-        for lease in list(self.leases.values()):
-            # A fresh HTTP lease can be between creation and first acquisition.
-            # No instance reference yet does not make an active request expired.
-            if (lease.kind == "retention" and lease.id not in referenced
-                    and self.idle_seconds > 0 and now - lease.touched >= self.idle_seconds):
-                self.leases.pop(lease.id, None)
+            elif instance.spec.mode == "lazy" and idle > 0:
+                await self._stop_instance(instance, idle_seconds=idle,
+                                          expected_activity=instance.last_activity, clear_refs=True)
 
     def lease_status(self, *, user_id: str | None = None):
         """Copy runtime metadata without I/O, credentials or downstream startup."""
-        now, wall = self.clock(), time.time()
+        now = self.clock()
         bindings = {}
         for instance in self.instances.values():
             snapshot = {
@@ -704,17 +769,26 @@ class Runtime:
             if user_id is not None and lease.user_id != user_id:
                 continue
             idle = max(0., now - lease.touched)
-            remaining = None if lease.ttl is None else max(0., lease.ttl - idle)
-            expired = remaining is not None and remaining <= 0
+            ttl = self.lease_timeout(lease)
+            touched_at = lease.created + (lease.touched - lease.created_clock)
+            remaining = None if ttl is None else max(0., ttl - idle)
+            expired = self.lease_expired(lease, now=now)
             status = ("expired" if expired else "active" if lease.in_flight else
                       "expiring" if remaining is not None and remaining <= 15 else "idle")
             result.append({
                 "id": lease.id, "lease_id": lease.id,
                 "user_id": lease.user_id, "token_id": lease.token_id, "kind": lease.kind,
-                "created_at": lease.created, "touched_at": wall - idle, "idle_seconds": idle,
-                "ttl": lease.ttl, "expires_in": remaining,
-                "expires_at": None if lease.ttl is None else wall - idle + lease.ttl,
+                "created_at": lease.created, "touched_at": touched_at, "idle_seconds": idle,
+                "ttl": ttl, "expires_in": remaining,
+                "expires_at": None if ttl is None else touched_at + ttl,
                 "expired": expired, "status": status, "in_flight": lease.in_flight,
+                "bridge_heartbeat_seconds": lease.heartbeat_seconds if lease.kind == "bridge" else None,
+                "bridge_missed_heartbeats": (min(lease.missed_heartbeats,
+                    int(max(0, now - lease.heartbeat_tick) // lease.heartbeat_seconds))
+                    if lease.kind == "bridge" else None),
+                "bridge_disconnect_at": (lease.created + lease.heartbeat_tick - lease.created_clock
+                    + lease.heartbeat_seconds * lease.missed_heartbeats
+                    if lease.kind == "bridge" else None),
                 "instances": bindings.get(lease.id, []),
             })
         return result

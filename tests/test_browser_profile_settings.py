@@ -257,7 +257,7 @@ async def test_settings_about_helpers_and_responsive_title(running_gateway):
         await expect(page.locator('summary[aria-label="切换语言"]')).to_have_count(0)
         await page.wait_for_function("translationCalls.includes('stop') && translationCalls.includes('change:chinese_simplified')")
         await page.get_by_role("tab", name="运行与日志", exact=True).click()
-        await expect(page.get_by_text("设为 0 时不因空闲超时回收服务。", exact=True)).to_be_visible()
+        await expect(page.locator("#settings-hint-idle_seconds")).to_contain_text("0 表示不因空闲超时回收")
         await expect(page.get_by_text("设为 0 时无限保留；设为 7 时自动清理超过 7 天的日志。", exact=True)).to_be_visible()
         await page.get_by_role("tab", name="关于", exact=True).click()
         about = page.get_by_role("tabpanel", name="关于", exact=True)

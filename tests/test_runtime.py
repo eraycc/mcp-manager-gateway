@@ -73,7 +73,7 @@ async def test_releasing_one_agent_keeps_other_and_last_closes():
 async def test_idle_reclaims_despite_live_lease_then_restarts():
     now = [0.]
     fake = Fake()
-    runtime = Runtime(fake.connect, clock=lambda: now[0], idle_seconds=86400)
+    runtime = Runtime(fake.connect, clock=lambda: now[0], idle_seconds=86400, connection_ttl_seconds=0)
     lease = runtime.create_lease("u1", "t1")
     await runtime.call(spec(), lease.id, "echo", {})
     now[0] = 86401
@@ -132,8 +132,8 @@ async def test_user_isolation_and_disabled():
 async def test_expired_bridge_lease_releases_instances():
     now = [0.]
     fake = Fake()
-    runtime = Runtime(fake.connect, clock=lambda: now[0])
-    lease = runtime.create_lease("u", "t", ttl=90)
+    runtime = Runtime(fake.connect, clock=lambda: now[0], connection_ttl_seconds=90)
+    lease = runtime.create_lease("u", "t")
     await runtime.call(spec(), lease.id, "echo", {})
     now[0] = 91
     await runtime.reap()

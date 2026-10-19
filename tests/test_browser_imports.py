@@ -46,7 +46,7 @@ async def test_navigation_protocol_and_import_wizard(running_gateway, monkeypatc
         await page.get_by_role("button", name="登录", exact=True).click()
         await expect(page.get_by_role("heading", name="仪表盘", exact=True)).to_be_visible()
         await page.evaluate("window.dashboardMain=document.querySelector('main')")
-        async with httpx2.AsyncClient(headers={"Authorization":"Bearer "+token},trust_env=False) as http:  # noqa: SIM117 - client depends on HTTP context
+        async with httpx2.AsyncClient(timeout=35, headers={"Authorization":"Bearer "+token},trust_env=False) as http:  # noqa: SIM117 - client depends on HTTP context
             async with Client(streamable_http_client(url+"/mcp",http_client=http),cache=None) as client:
                 await client.call_tool("echo__echo",{"value":"dashboard-live"})
         await expect(page.locator(".stat strong").first).to_have_text("1",timeout=15000)

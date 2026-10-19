@@ -35,12 +35,12 @@ class CapacityFixture:
         return {"content": [{"type": "text", "text": server_id}]}
 
 
-def spec(server_id, *, concurrency=1):
+def spec(server_id, *, concurrency=1, mode="eager"):
     return ServerSpec(
         id=server_id,
         transport="stdio",
         config={"concurrency": concurrency, "queue_timeout": 1},
-        mode="eager",
+        mode=mode,
     )
 
 
@@ -181,7 +181,7 @@ async def test_instance_and_waiter_caps_are_hard_limits():
         ),
     )
     lease = runtime.create_lease("u1", "t1")
-    await runtime.call(spec("resident"), lease.id, "read", {"server": "resident"})
+    await runtime.call(spec("resident", mode="lazy"), lease.id, "read", {"server": "resident"})
     result = await runtime.call(spec("other"), lease.id, "read", {"server": "other"})
     assert result["content"][0]["text"] == "other"
     assert fixture.starts == ["resident", "other"]

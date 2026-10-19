@@ -296,17 +296,18 @@ async function settings(main,signal){
  main.append(title('系统设置','配置账户策略、匿名访问和运行维护。'));
  const original=await api('/settings',{signal});
  const fields={},form=el('form',{class:'stack settings-form'}),settingPanels=[],translation=translationSettings(original.translation_config),updateCheck=updateCheckSetting(original.update_auto_check);
- const hints={cors_origins:'每行填写一个来源，例如 https://app.example.com。默认 * 允许所有来源的外部网页使用访问令牌接入 MCP；填写具体来源可限制接入范围。仅适用于 MCP 调用和连接续期，管理控制台仍只允许同源访问。',allowed_hosts:'每行一个 Host、IP 或 Host:端口。* 和 0.0.0.0 均允许全部监听地址；默认 *。仅校验 MCP 与网关 API，控制面板继续使用现有同源规则。',idle_seconds:'设为 0 时不因空闲超时回收服务。',startup_failure_threshold:'连续启动失败达到此次数后标记 failed 并清空能力缓存。',log_retention_days:'设为 0 时无限保留；设为 7 时自动清理超过 7 天的日志。'};
- const defs=[['基本设置',[['title','站点名称','text'],['registration_enabled','允许注册','check'],['allowed_hosts','允许的监听 Host / IP 列表','hosts'],['jwt_days','登录有效期（天，0 为永不过期）','number'],['cors_origins','允许跨域接入的来源','origins']]],['运行与日志',[['idle_seconds','默认空闲回收时间（秒）','number'],['startup_failure_threshold','连续启动失败阈值','number'],['log_retention_days','日志保留天数（0 为无限）','number'],['refresh_enabled','定时刷新工具缓存','check'],['refresh_cron','刷新 Cron 表达式','text'],['timezone','时区','text']]]];
+ const hints={cors_origins:'每行填写一个来源，例如 https://app.example.com。默认 * 允许所有来源的外部网页使用访问令牌接入 MCP；填写具体来源可限制接入范围。仅适用于 MCP 调用和连接续期，管理控制台仍只允许同源访问。',allowed_hosts:'每行一个 Host、IP 或 Host:端口。* 和 0.0.0.0 均允许全部监听地址；默认 *。仅校验 MCP 与网关 API，控制面板继续使用现有同源规则。',idle_seconds:'管理 MCP 服务实例：实例无任何调用达到此时长后自动停止，仅对 lazy 生效，不看租期引用数；0 表示不因空闲超时回收。',connection_ttl_seconds:'管理连接/租期/会话：无心跳或 MCP 调用达到此时长后自动释放租期，包括 bridge；默认 43200 秒（12 小时），0 表示不自动释放到期租期，但 Bridge 仍独立检测失联。两项独立计时，eager 实例继续常驻。',bridge_heartbeat_seconds:'Bridge 发送心跳的间隔，默认 90 秒；与连接有效期独立，已有 Bridge 在下次心跳后采用新间隔。',bridge_missed_heartbeats:'连续缺失心跳达到此次数后判定失联并断开 Bridge，默认 3 次（90 秒间隔约 270 秒）；连接有效期为 0 时仍生效。',startup_failure_threshold:'连续启动失败达到此次数后标记 failed 并清空能力缓存。',log_retention_days:'设为 0 时无限保留；设为 7 时自动清理超过 7 天的日志。'};
+ const defs=[['基本设置',[['title','站点名称','text'],['registration_enabled','允许注册','check'],['allowed_hosts','允许的监听 Host / IP 列表','hosts'],['jwt_days','登录有效期（天，0 为永不过期）','number'],['cors_origins','允许跨域接入的来源','origins']]],['运行与日志',[['idle_seconds','默认空闲回收时间（秒）','number'],['connection_ttl_seconds','默认连接有效期（秒）','number'],['bridge_heartbeat_seconds','Bridge 默认心跳间隔（秒）','number'],['bridge_missed_heartbeats','Bridge 失联判定次数','number'],['startup_failure_threshold','连续启动失败阈值','number'],['log_retention_days','日志保留天数（0 为无限）','number'],['refresh_enabled','定时刷新工具缓存','check'],['refresh_cron','刷新 Cron 表达式','text'],['timezone','时区','text']]]];
  for(const [heading,list]of defs){
   const card=el('section',{class:'card'},el('h2',{},heading)),grid=el('div',{class:'form-grid settings-grid'});
   for(const[k,label,type]of list){
    const f=type==='check'?check(label,original[k]):field(label,['origins','hosts'].includes(type)?(original[k]??['*']).join('\n'):original[k],['origins','hosts'].includes(type)?'textarea':type,hints[k]||'');
    fields[k]=[f.input,type];
+   if(['idle_seconds','connection_ttl_seconds','bridge_heartbeat_seconds','bridge_missed_heartbeats'].includes(k))f.node.classList.add('span2');
    if(hints[k]){f.input.setAttribute('aria-label',label);const hint=f.node.querySelector('small');hint.id='settings-hint-'+k;f.input.setAttribute('aria-describedby',hint.id)}
    if(k==='title')f.node.classList.add('site-title-field');
    if(k==='jwt_days')f.node.classList.add('settings-duration');
-   if(type==='number'){f.input.min=k==='startup_failure_threshold'?1:0;f.input.required=true;if(k==='startup_failure_threshold')f.input.max=100}
+   if(type==='number'){f.input.min=['startup_failure_threshold','bridge_heartbeat_seconds','bridge_missed_heartbeats'].includes(k)?1:0;f.input.required=true;if(['startup_failure_threshold','bridge_missed_heartbeats'].includes(k))f.input.max=100;if(k==='bridge_heartbeat_seconds')f.input.max=86400}
    if(!['cors_origins','allowed_hosts'].includes(k))grid.append(f.node);
   }
   if(heading==='基本设置'){

@@ -19,6 +19,13 @@ function optionsFor(root,label,values,initialValue=''){
 }
 const localTime=value=>{if(!value)return '';const d=new Date(value);if(Number.isNaN(d.getTime()))return '';const pad=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes())};
 
+function instanceCell(instances=[]){
+ const many=instances.length>3;
+ return el('div',{class:'lease-instance-cell'},
+  el('div',{class:'lease-instances',tabindex:many?'0':null,role:many?'region':null,'aria-label':many?'引用 MCP 实例，可上下滚动':null},
+   instances.length?instances.map(i=>el('div',{class:'lease-instance-entry'},el('span',{class:'lease-instance-name',title:i.name||i.server_id},i.name||i.server_id),el('span',{class:'subtext'},i.isolation+' · '+i.phase+' · '+i.lease_count+' 个共享引用 · '+i.in_flight+' 个实例调用'))):el('span',{class:'muted'},'无绑定 / 未启动')),
+  el('span',{class:'lease-instance-hint muted'},many?'共 '+instances.length+' 个实例 · 上下滚动查看':''))
+}
 export async function leases(main,signal,actor){
  const isAdmin=actor.role==='admin',params=route().params;
  let reload=async()=>{},latestUsers=[],busy=false;
@@ -74,11 +81,11 @@ export async function leases(main,signal,actor){
   columns:[
    ['租期 ID',r=>el('div',{},el('span',{class:'code',title:r.id},r.id.slice(0,8)),button('复制 ID',async()=>{await navigator.clipboard.writeText(r.id);toast('已复制 ID')}))],
    ['调用方',r=>el('div',{},r.username,el('span',{class:'subtext'},r.token_name||'无令牌名称'),isAdmin&&r.user_id!==actor.id?el('span',{class:'subtext danger'},'他人租期'):null)],
-   ['引用 MCP / 实例',r=>r.instances?.length?el('div',{},r.instances.map(i=>el('div',{},i.name||i.server_id,el('span',{class:'subtext'},i.isolation+' · '+i.phase+' · '+i.lease_count+' 个共享引用 · '+i.in_flight+' 个实例调用')))):el('span',{class:'muted'},'无绑定 / 未启动')],
+   ['引用 MCP / 实例',r=>instanceCell(r.instances)],
    ['类型',r=>badge(r.kind)],
    ['状态',r=>el('div',{},badge(statusLabels[r.status]||r.status),el('span',{class:'subtext'},(r.in_flight||0)+' 个本租期调用'))],
    ['心跳时间',r=>el('div',{},date(r.touched_at),el('span',{class:'subtext'},Math.floor(r.idle_seconds||0)+' 秒前'))],
-   ['心跳到期',r=>r.expires_in==null?'无心跳到期时间':el('div',{},date(r.expires_at),el('span',{class:'subtext'},r.expired?'已到期':Math.ceil(r.expires_in)+' 秒后'))],
+   ['心跳结束时间',r=>el('div',{},r.expires_in==null?'不过期':date(r.expires_at),r.expires_in!=null?el('span',{class:'subtext'},r.expired?'已到期':Math.ceil(r.expires_in)+' 秒后'):null,r.kind==='bridge'&&r.bridge_disconnect_at?el('span',{class:'subtext'},'Bridge 失联判定：'+date(r.bridge_disconnect_at)+' · 已缺失 '+r.bridge_missed_heartbeats+' 次'):null)],
    ['创建时间',r=>date(r.created_at)]
   ],
   filters:[...(isAdmin?[['user_id','用户',[]]]:[]),['mcp_id','MCP',[]],

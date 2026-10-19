@@ -13,15 +13,18 @@ from mcp_manager.bridge import BridgeUpstream
 
 async def test_idle_session_reap_uses_config_and_closes_sdk_session(running_gateway):  # noqa: F811
     app, _web, url, token, _ = running_gateway
-    async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + token}, trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
+    async with httpx2.AsyncClient(timeout=35, headers={"Authorization": "Bearer " + token}, trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
         async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None, mode="legacy") as client:
             await client.list_tools()
             sid = next(iter(app.state.gateway.sessions))
             app.state.gateway.sessions[sid]["touched"] = time.monotonic() - 10
-            app.state.runtime.idle_seconds = 0
+            app.state.runtime.idle_seconds = 1
+            lease = app.state.runtime.leases[app.state.gateway.sessions[sid]["lease"]]
+            lease.touched -= 10
+            app.state.runtime.connection_ttl_seconds = 0
             await app.state.gateway.reap()
             assert sid in app.state.gateway.sessions
-            app.state.runtime.idle_seconds = 1
+            app.state.runtime.connection_ttl_seconds = 1
             await app.state.gateway.reap()
             assert sid not in app.state.gateway.sessions
             assert sid not in app.state.protocol.session_manager._server_instances
@@ -33,7 +36,7 @@ async def test_bridge_expired_lease_recovers_next_call_and_cleans_old_session(ru
     async with BridgeUpstream(url, token) as upstream:
         assert (await upstream.request("call_tool", "echo__echo", {"value": "first"})).content[0].text == "first"
         old = next(l for l in app.state.runtime.leases.values() if l.kind == "bridge")
-        old.touched -= 100
+        old.touched -= app.state.runtime.connection_ttl_seconds + 10
         # The first uncertain request is returned as an error, never replayed.
         with pytest.raises(Exception):  # noqa: B017 - SDK transport exception type is not stable
             await upstream.request("list_tools", cache_mode="bypass")
@@ -51,7 +54,7 @@ async def test_expired_token_prunes_session_after_lease_was_reaped(running_gatew
 
     app, web, url, token, _ = running_gateway
     token_id = (await web.get("/api/v1/tokens")).json()["items"][0]["id"]
-    async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + token}, trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
+    async with httpx2.AsyncClient(timeout=35, headers={"Authorization": "Bearer " + token}, trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
         async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None, mode="legacy") as client:
             await client.list_tools()
             sid = next(iter(app.state.gateway.sessions))
@@ -107,7 +110,7 @@ async def test_web_disconnect_removes_actual_sdk_session_and_runtime_refs(runnin
         response = await web.post("/gateway/v1/leases", headers=headers)
         lease_id = response.json()["id"]
         headers["X-MCP-Manager-Lease"] = lease_id
-    async with httpx2.AsyncClient(headers=headers, trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
+    async with httpx2.AsyncClient(timeout=35, headers=headers, trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
         async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None, mode="legacy") as client:
             await client.call_tool("echo__echo", {"value": "connection-management"})
             sid = next(iter(app.state.gateway.sessions))
@@ -120,4 +123,32 @@ async def test_web_disconnect_removes_actual_sdk_session_and_runtime_refs(runnin
             assert sid not in app.state.protocol.session_manager._server_instances
             assert selected not in app.state.runtime.leases
             assert bound["lease"] not in app.state.runtime.leases
+            assert not app.state.runtime.instances
+
+
+async def test_bridge_health_reap_closes_sdk_session_even_when_connection_ttl_zero(running_gateway):  # noqa: F811
+    app, web, url, token, _ = running_gateway
+    headers = {"Authorization": "Bearer " + token}
+    response = await web.post("/gateway/v1/leases", headers=headers)
+    data = response.json()
+    assert data["heartbeat_seconds"] == 90 and data["missed_heartbeats"] == 3
+    lease_id = data["id"]
+    headers["X-MCP-Manager-Lease"] = lease_id
+    response = await web.patch("/api/v1/settings", json={"bridge_heartbeat_seconds": 60, "bridge_missed_heartbeats": 4})
+    assert response.status_code == 200
+    heartbeat = await web.post("/gateway/v1/leases/" + lease_id + "/heartbeat", headers=headers)
+    assert heartbeat.json()["heartbeat_seconds"] == 60 and heartbeat.json()["missed_heartbeats"] == 4
+    snapshot = (await web.get("/api/v1/leases/" + lease_id)).json()
+    assert snapshot["bridge_disconnect_at"].endswith("+00:00")
+    async with httpx2.AsyncClient(timeout=35, headers=headers, trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
+        async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None, mode="legacy") as client:
+            await client.call_tool("echo__echo", {"value": "alive"})
+            sid = next(iter(app.state.gateway.sessions))
+            app.state.runtime.connection_ttl_seconds = 0
+            lease = app.state.runtime.leases[lease_id]
+            lease.heartbeat_tick -= 271
+            await app.state.gateway.reap()
+            assert lease_id not in app.state.runtime.leases
+            assert sid not in app.state.gateway.sessions
+            assert sid not in app.state.protocol.session_manager._server_instances
             assert not app.state.runtime.instances

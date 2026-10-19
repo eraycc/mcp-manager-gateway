@@ -81,7 +81,7 @@ async def test_runtime_exposes_public_lifecycle_boundary(monkeypatch):
     monkeypatch.setattr(runtime, "_available", available.append)
     await runtime.stop_instance(instance, force=True)
     runtime.mark_available(spec)
-    assert stopped == [(instance, {"force": True, "only_unreferenced": False})]
+    assert stopped == [(instance, {"force": True, "only_unreferenced": False, "clear_refs": False})]
     assert available == [spec]
 
 
@@ -207,3 +207,60 @@ def test_sse_buffer_replays_ids_and_formats_heartbeat():
     assert format_sse_heartbeat() == ": heartbeat\n\n"
 
 
+
+
+async def test_temporary_server_shutdown_does_not_close_another_servers_sse():
+    import asyncio
+    import socket
+
+    import httpx
+    import uvicorn
+    from sse_starlette.sse import EventSourceResponse
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+
+    resume = asyncio.Event()
+    async def events(_request):
+        async def stream():
+            yield {"data": "first"}
+            await resume.wait()
+            yield {"data": "second"}
+        return EventSourceResponse(stream())
+    async def health(_request):
+        return PlainTextResponse("ok")
+    servers, tasks, sockets, urls = [], [], [], []
+    try:
+        for endpoint in (events, health):
+            sock = socket.socket()
+            sock.bind(("127.0.0.1", 0))
+            sockets.append(sock)
+            urls.append("http://127.0.0.1:" + str(sock.getsockname()[1]))
+            app = Starlette(routes=[Route("/", endpoint)])
+            server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
+            servers.append(server)
+            tasks.append(asyncio.create_task(server.serve(sockets=[sock])))
+            for _ in range(100):
+                if server.started:
+                    break
+                await asyncio.sleep(.01)
+            assert server.started
+        async with (
+            httpx.AsyncClient(timeout=3, trust_env=False) as client,
+            client.stream("GET", urls[0]) as response,
+        ):
+            lines = response.aiter_lines()
+            assert await anext(lines) == "data: first"
+            servers[1].should_exit = True
+            await asyncio.wait_for(tasks[1], 3)
+            # The library's thread-wide shutdown watcher polls every .5s.
+            await asyncio.sleep(.6)
+            resume.set()
+            assert "data: second" in [line async for line in lines]
+    finally:
+        resume.set()
+        for server in servers:
+            server.should_exit = True
+        await asyncio.wait_for(asyncio.gather(*tasks), 5)
+        for sock in sockets:
+            sock.close()

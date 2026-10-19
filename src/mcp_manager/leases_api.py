@@ -56,7 +56,7 @@ async def snapshots(request, actor):
         row["token_name"] = None if anonymous or not token or token.user_id != row["user_id"] else token.name
         if anonymous:
             row["token_id"] = None
-        for key in ("created_at", "touched_at", "expires_at"):
+        for key in ("created_at", "touched_at", "expires_at", "bridge_disconnect_at"):
             row[key] = iso(row[key])
         row["can_disconnect"] = True
         for instance in row["instances"]:

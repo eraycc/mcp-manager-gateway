@@ -129,7 +129,7 @@ async def _concurrent_mcp_sample(server_count):
         started = time.perf_counter()
         server = f"mcp-{index:04d}"
         result = await runtime.call(
-            ServerSpec(id=server, transport="stdio", config={"concurrency": 4}, mode="eager"),
+            ServerSpec(id=server, transport="stdio", config={"concurrency": 4}, mode="lazy"),
             lease.id,
             "echo",
             {"server": server, "slow": index % 10 == 0},
