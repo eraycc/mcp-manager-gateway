@@ -143,6 +143,9 @@ async def test_bridge_health_reap_closes_sdk_session_even_when_connection_ttl_ze
     async with httpx2.AsyncClient(timeout=35, headers=headers, trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
         async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None, mode="legacy") as client:
             await client.call_tool("echo__echo", {"value": "alive"})
+            activity = (await web.get("/api/v1/leases/" + lease_id)).json()
+            assert activity["call_count"] == 1 and activity["in_flight"] == 0
+            assert activity["last_call_at"].endswith("+00:00")
             sid = next(iter(app.state.gateway.sessions))
             app.state.runtime.connection_ttl_seconds = 0
             lease = app.state.runtime.leases[lease_id]

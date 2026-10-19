@@ -24,7 +24,7 @@ function instanceCell(instances=[]){
  return el('div',{class:'lease-instance-cell'},
   el('div',{class:'lease-instances',tabindex:many?'0':null,role:many?'region':null,'aria-label':many?'引用 MCP 实例，可上下滚动':null},
    instances.length?instances.map(i=>el('div',{class:'lease-instance-entry'},el('span',{class:'lease-instance-name',title:i.name||i.server_id},i.name||i.server_id),el('span',{class:'subtext'},i.isolation+' · '+i.phase+' · '+i.lease_count+' 个共享引用 · '+i.in_flight+' 个实例调用'))):el('span',{class:'muted'},'无绑定 / 未启动')),
-  el('span',{class:'lease-instance-hint muted'},many?'共 '+instances.length+' 个实例 · 上下滚动查看':''))
+  instances.length>=3?el('span',{class:'lease-instance-hint muted'},'共 '+instances.length+' 个实例'+(many?' · 上下滚动查看':'')):null)
 }
 export async function leases(main,signal,actor){
  const isAdmin=actor.role==='admin',params=route().params;
@@ -83,7 +83,7 @@ export async function leases(main,signal,actor){
    ['调用方',r=>el('div',{},r.username,el('span',{class:'subtext'},r.token_name||'无令牌名称'),isAdmin&&r.user_id!==actor.id?el('span',{class:'subtext danger'},'他人租期'):null)],
    ['引用 MCP / 实例',r=>instanceCell(r.instances)],
    ['类型',r=>badge(r.kind)],
-   ['状态',r=>el('div',{},badge(statusLabels[r.status]||r.status),el('span',{class:'subtext'},(r.in_flight||0)+' 个本租期调用'))],
+   ['状态',r=>el('div',{class:'lease-activity',title:'当前执行数是瞬时值。累计仅统计本租期派发的下游业务调用（含失败尝试），目录搜索与维护刷新不计入；租期释放或网关重启后重置。'},el('div',{class:'lease-activity-summary'},badge(statusLabels[r.status]||r.status),el('span',{class:'subtext'},'累计下游调用 '+(r.call_count||0)+' 次')),el('span',{class:'subtext'},'当前执行 '+(r.in_flight||0)+' · 等待派发 '+(r.queued_calls||0)),el('span',{class:'subtext'},r.last_call_at?'最近调用 '+date(r.last_call_at):'尚无下游调用'))],
    ['心跳时间',r=>el('div',{},date(r.touched_at),el('span',{class:'subtext'},Math.floor(r.idle_seconds||0)+' 秒前'))],
    ['心跳结束时间',r=>el('div',{},r.expires_in==null?'不过期':date(r.expires_at),r.expires_in!=null?el('span',{class:'subtext'},r.expired?'已到期':Math.ceil(r.expires_in)+' 秒后'):null,r.kind==='bridge'&&r.bridge_disconnect_at?el('span',{class:'subtext'},'Bridge 失联判定：'+date(r.bridge_disconnect_at)+' · 已缺失 '+r.bridge_missed_heartbeats+' 次'):null)],
    ['创建时间',r=>date(r.created_at)]
@@ -91,7 +91,7 @@ export async function leases(main,signal,actor){
   filters:[...(isAdmin?[['user_id','用户',[]]]:[]),['mcp_id','MCP',[]],
    ['kind','类型',[['agent','agent'],['bridge','bridge'],['retention','retention']]],
    ['status','状态',Object.entries(statusLabels)],
-   ['sort','排序',[['touched_desc','最近活跃'],['created_desc','最近创建'],['ttl_asc','最快到期'],['in_flight_desc','调用最多']]]],
+   ['sort','排序',[['touched_desc','最近活跃'],['created_desc','最近创建'],['ttl_asc','最快到期'],['in_flight_desc','当前执行最多']]]],
   rowActions:r=>[button('详情',async()=>detail('租期详情',await api('/leases/'+encodeURIComponent(r.id),{signal}))),button('断开',()=>disconnect(r),'danger')],
   bulk:[['批量断开',batch]]
  });

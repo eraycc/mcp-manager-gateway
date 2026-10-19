@@ -179,12 +179,13 @@ dialog{max-width:calc(100vw - 28px);overflow:hidden}
 .service-capabilities{display:grid;gap:5px;max-width:260px;white-space:normal;overflow-wrap:anywhere}
 .service-capabilities .capability-summary{flex-direction:column;gap:2px}
 
-/* Lease rows keep a three-entry viewport and contain wheel/touch scrolling. */
+/* One/two entries size naturally; three entries cap the compact viewport. */
+.lease-activity-summary{display:flex;align-items:center;gap:6px}
 .lease-instance-cell{width:290px;max-width:290px}
-.lease-instances{height:144px;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;scrollbar-width:thin;scrollbar-color:var(--accent) var(--bg);border-radius:6px;background:var(--bg)}
-.lease-instance-entry{height:48px;padding:4px 8px;overflow:hidden;border-bottom:1px solid var(--line)}
-.lease-instance-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:20px}
-.lease-instance-entry .subtext{line-height:18px;max-width:100%}
-.lease-instance-hint{display:block;height:20px;line-height:20px;font-size:11px}
+.lease-instances{max-height:114px;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;scrollbar-width:thin;scrollbar-color:var(--accent) var(--bg);border-radius:6px;background:var(--bg)}
+.lease-instance-entry{height:38px;padding:2px 6px;overflow:hidden;border-bottom:1px solid var(--line)}
+.lease-instance-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:18px}
+.lease-instance-entry .subtext{line-height:14px;max-width:100%}
+.lease-instance-hint{display:block;height:16px;line-height:16px;margin-top:2px;font-size:11px}
 .lease-instances::-webkit-scrollbar{width:6px}
 .lease-instances::-webkit-scrollbar-thumb{background:var(--accent);border-radius:6px}

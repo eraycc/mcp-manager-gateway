@@ -222,6 +222,8 @@ class Lease:
     in_flight: int = 0
     created_clock: float = 0
     pending: int = 0
+    call_count: int = 0
+    last_call_tick: float | None = None
     heartbeat_tick: float = 0
     heartbeat_seconds: int = 90
     missed_heartbeats: int = 3
@@ -559,6 +561,9 @@ class Runtime:
             if method is None:
                 raise GatewayError("unsupported_operation", f"MCP does not support {operation}")
             timeout = float(spec.config.get("call_timeout", 60))
+            if business:
+                lease.call_count += 1
+                lease.last_call_tick = self.clock()
             return await asyncio.wait_for(method(*args), timeout)
         except GatewayError as exc:
             if (
@@ -773,7 +778,7 @@ class Runtime:
             touched_at = lease.created + (lease.touched - lease.created_clock)
             remaining = None if ttl is None else max(0., ttl - idle)
             expired = self.lease_expired(lease, now=now)
-            status = ("expired" if expired else "active" if lease.in_flight else
+            status = ("expired" if expired else "active" if lease.in_flight or lease.pending else
                       "expiring" if remaining is not None and remaining <= 15 else "idle")
             result.append({
                 "id": lease.id, "lease_id": lease.id,
@@ -782,6 +787,10 @@ class Runtime:
                 "ttl": ttl, "expires_in": remaining,
                 "expires_at": None if ttl is None else touched_at + ttl,
                 "expired": expired, "status": status, "in_flight": lease.in_flight,
+                "queued_calls": max(0, lease.pending - lease.in_flight),
+                "call_count": lease.call_count,
+                "last_call_at": (None if lease.last_call_tick is None else
+                                 lease.created + lease.last_call_tick - lease.created_clock),
                 "bridge_heartbeat_seconds": lease.heartbeat_seconds if lease.kind == "bridge" else None,
                 "bridge_missed_heartbeats": (min(lease.missed_heartbeats,
                     int(max(0, now - lease.heartbeat_tick) // lease.heartbeat_seconds))
