@@ -214,3 +214,78 @@ async def test_batch_revalidates_permissions_between_items(db_app, monkeypatch):
     assert response.status_code == 200, response.text
     assert response.json()["summary"] == {"total": 2, "ok": 1, "failed": 1}
     assert two.id in h.app.state.runtime.leases
+
+
+async def test_quick_calls_keep_history_per_lease_and_ignore_heartbeats_and_discovery(monkeypatch):
+    ticks = [10.]
+    monkeypatch.setattr("mcp_manager.runtime.time.time", lambda: 1000.)
+    fake = Fake()
+    runtime = Runtime(fake.connect, clock=lambda: ticks[0])
+    a, b = runtime.create_lease("alice", "one"), runtime.create_lease("alice", "two")
+    spec = ServerSpec("s", "stdio", {})
+    try:
+        await runtime.discover(spec, a.id)
+        runtime.heartbeat(a.id, "alice", "one")
+        first = runtime.lease_status()[0]
+        assert first["call_count"] == 0 and first["last_call_at"] is None
+        ticks[0] = 12
+        await runtime.call(spec, a.id, "echo", {})
+        await runtime.call(spec, b.id, "echo", {})
+        ticks[0] = 13
+        await runtime.call(spec, a.id, "echo", {})
+        ticks[0] = 20
+        rows = {r["id"]: r for r in runtime.lease_status()}
+        assert rows[a.id]["in_flight"] == 0 and rows[a.id]["status"] == "idle"
+        assert rows[a.id]["call_count"] == 2 and rows[b.id]["call_count"] == 1
+        assert rows[a.id]["last_call_at"] == 1003
+        ticks[0] = 30
+        runtime.heartbeat(a.id, "alice", "one")
+        assert runtime.lease_status()[0]["last_call_at"] == 1003
+    finally:
+        await runtime.close()
+
+
+async def test_waiting_call_is_active_but_cancelled_before_dispatch_does_not_count():
+    fake = Fake()
+    fake.block = True
+    runtime = Runtime(fake.connect)
+    a, b = runtime.create_lease("alice", "one"), runtime.create_lease("alice", "two")
+    spec = ServerSpec("s", "stdio", {})
+    active = asyncio.create_task(runtime.call(spec, a.id, "echo", {}))
+    queued = None
+    try:
+        await fake.entered.wait()
+        queued = asyncio.create_task(runtime.call(spec, b.id, "echo", {}))
+        for _ in range(100):
+            if b.pending:
+                break
+            await asyncio.sleep(0)
+        rows = {r["id"]: r for r in runtime.lease_status()}
+        assert rows[b.id]["status"] == "active"
+        assert rows[b.id]["queued_calls"] == 1 and rows[b.id]["in_flight"] == 0
+        assert rows[b.id]["call_count"] == 0 and rows[b.id]["last_call_at"] is None
+        queued.cancel()
+        await asyncio.gather(queued, return_exceptions=True)
+        after = next(r for r in runtime.lease_status() if r["id"] == b.id)
+        assert after["call_count"] == 0 and after["queued_calls"] == 0 and after["status"] == "idle"
+    finally:
+        fake.unblock.set()
+        await asyncio.gather(*(t for t in (active, queued) if t), return_exceptions=True)
+        await runtime.close()
+
+
+async def test_failed_dispatched_call_counts_once_without_replay():
+    from mcp_manager.runtime import GatewayError
+
+    fake = Fake()
+    fake.fail = True
+    runtime = Runtime(fake.connect)
+    lease = runtime.create_lease("alice", "one")
+    try:
+        with pytest.raises(GatewayError) as caught:
+            await runtime.call(ServerSpec("s", "stdio", {}), lease.id, "echo", {})
+        assert caught.value.code == "outcome_unknown"
+        assert runtime.lease_status()[0]["call_count"] == fake.calls == 1
+        assert runtime.lease_status()[0]["last_call_at"] is not None
+    finally:
+        await runtime.close()

@@ -40,29 +40,42 @@ async def test_top_action_menus_are_exclusive_and_dismiss_outside(runtime_browse
 
 
 @pytest.mark.asyncio
-async def test_lease_instance_cells_show_three_rows_and_scroll_locally(runtime_browser):
+async def test_lease_instance_cells_show_three_rows_and_scroll_locally(runtime_browser, tmp_path):
     page, url = runtime_browser
     def lease(index, count):
-        return {"id": str(index), "username": "alice", "kind": "retention",
+        return {"id": str(index), "username": "alice", "kind": "retention", "status": "idle",
                 "instances": [{"server_id": str(i), "name": "MCP " + str(i), "isolation": "service",
                                "phase": "ready", "lease_count": 1, "in_flight": 0} for i in range(count)]}
-    rows = [lease(1, 1), lease(3, 3), lease(4, 4), lease(10, 10)]
+    rows = [lease(0, 0), lease(1, 1), lease(2, 2), lease(3, 3), lease(4, 4), lease(10, 10)]
     await page.route("**/api/v1/leases?*", lambda r: r.fulfill(json={
         "items": rows, "total": len(rows), "mcp_refs": [], "user_refs": [],
         "visible_ids": [x["id"] for x in rows],
     }))
     await page.goto(url + "/#/leases")
     cells = page.locator(".lease-instances")
-    await expect(cells).to_have_count(4)
+    await expect(cells).to_have_count(6)
     metrics = await cells.evaluate_all("""nodes=>nodes.map(n=>({
       height:n.clientHeight,scroll:n.scrollHeight,overflow:getComputedStyle(n).overflowY,
       overscroll:getComputedStyle(n).overscrollBehaviorY
     }))""")
-    assert metrics[0]["height"] == metrics[1]["height"] == metrics[2]["height"] == metrics[3]["height"]
-    assert metrics[0]["scroll"] <= metrics[0]["height"] + 1
-    assert metrics[1]["scroll"] <= metrics[1]["height"] + 1
-    assert metrics[2]["scroll"] > metrics[2]["height"]
-    assert metrics[3]["overscroll"] in {"contain", "none"}
+    assert metrics[0]["height"] <= metrics[1]["height"]
+    assert metrics[1]["height"] < metrics[2]["height"] < metrics[3]["height"]
+    assert metrics[3]["height"] == metrics[4]["height"] == metrics[5]["height"]
+    assert metrics[3]["height"] <= 114
+    for metric in metrics[:4]:
+        assert metric["scroll"] <= metric["height"] + 1
+    assert metrics[4]["scroll"] > metrics[4]["height"]
+    assert metrics[5]["overscroll"] in {"contain", "none"}
+    await expect(page.locator(".lease-instance-hint").filter(has_text="上下滚动查看")).to_have_count(2)
+    heights = await page.locator(".lease-instance-cell").evaluate_all("nodes=>nodes.map(n=>n.clientHeight)")
+    assert heights[3] == heights[4] == heights[5] <= 132
+    row_heights = await cells.evaluate_all("nodes=>nodes.map(n=>n.closest(\'tr\').clientHeight)")
+    assert row_heights[1] < row_heights[2] < row_heights[3]
+    assert row_heights[3] == row_heights[4] == row_heights[5]
+    capture = tmp_path / "lease-instance-layout.png"
+    await expect(page.locator("#toast")).not_to_be_visible()
+    await page.screenshot(path=str(capture), full_page=True)
+    print("UI_CAPTURE " + str(capture))
     target = cells.last
     await target.focus()
     await page.keyboard.press("End")
@@ -87,6 +100,8 @@ async def test_runtime_setting_distinguishes_session_and_instance_and_persists_z
     heartbeat = page.get_by_label("Bridge 默认心跳间隔（秒）", exact=True)
     missed = page.get_by_label("Bridge 失联判定次数", exact=True)
     await expect(heartbeat).to_have_value("90")
+    await expect(page.locator("#settings-hint-bridge_heartbeat_seconds")).to_contain_text("stdio")
+    await expect(page.locator("#settings-hint-bridge_heartbeat_seconds")).to_contain_text("MMG")
     await expect(missed).to_have_value("3")
     assert (await heartbeat.bounding_box())["y"] > (await field.bounding_box())["y"]
     assert (await missed.bounding_box())["y"] > (await heartbeat.bounding_box())["y"]
@@ -100,3 +115,33 @@ async def test_runtime_setting_distinguishes_session_and_instance_and_persists_z
     await expect(page.get_by_label("默认连接有效期（秒）", exact=True)).to_have_value("0")
     await expect(page.get_by_label("Bridge 默认心跳间隔（秒）", exact=True)).to_have_value("60")
     await expect(page.get_by_label("Bridge 失联判定次数", exact=True)).to_have_value("4")
+
+
+@pytest.mark.asyncio
+async def test_lease_status_distinguishes_current_and_accumulated_calls(runtime_browser, tmp_path):
+    page, url = runtime_browser
+    rows = [
+        {"id": "quick", "username": "alice", "kind": "retention", "status": "idle",
+         "in_flight": 0, "queued_calls": 0, "call_count": 5, "last_call_at": "2026-10-20T00:01:02+00:00",
+         "instances": []},
+        {"id": "waiting", "username": "bob", "kind": "retention", "status": "active",
+         "in_flight": 0, "queued_calls": 1, "call_count": 0, "last_call_at": None, "instances": []},
+    ]
+    await page.route("**/api/v1/leases?*", lambda r: r.fulfill(json={
+        "items": rows, "total": len(rows), "visible_ids": [r["id"] for r in rows],
+        "mcp_refs": [], "user_refs": [],
+    }))
+    await page.goto(url + "/#/leases")
+    await expect(page.locator(".lease-activity")).to_have_count(2)
+    completed = page.locator(".lease-activity").first
+    await expect(completed).to_contain_text("当前执行 0")
+    await expect(completed).to_contain_text("累计下游调用 5 次")
+    await expect(completed).to_contain_text("最近调用")
+    waiting = page.locator(".lease-activity").last
+    await expect(waiting).to_contain_text("等待派发 1")
+    await expect(waiting).to_contain_text("尚无下游调用")
+    await completed.scroll_into_view_if_needed()
+    capture = tmp_path / "lease-call-status.png"
+    await expect(page.locator("#toast")).not_to_be_visible()
+    await page.screenshot(path=str(capture), full_page=True)
+    print("UI_CAPTURE " + str(capture))
