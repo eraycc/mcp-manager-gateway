@@ -115,7 +115,8 @@ async def test_retention_change_during_cleanup_is_applied_on_next_pass(retention
 async def test_idle_zero_keeps_business_instance_but_allows_lifecycle_cleanup(cleanup):
     clock = [0.0]
     connection = Connection()
-    runtime = Runtime(connection.connect, clock=lambda: clock[0], idle_seconds=0)
+    runtime = Runtime(connection.connect, clock=lambda: clock[0], idle_seconds=0,
+                      connection_ttl_seconds=90 if cleanup == "bridge_ttl" else 0)
     lease = runtime.create_lease("u", "t", ttl=90 if cleanup == "bridge_ttl" else None,
                                  kind="bridge" if cleanup == "bridge_ttl" else "agent")
     try:
@@ -142,7 +143,8 @@ async def test_idle_zero_keeps_business_instance_but_allows_lifecycle_cleanup(cl
 async def test_idle_zero_keeps_gateway_session_until_explicit_close():
     clock = [0.0]
     connection = Connection()
-    runtime = Runtime(connection.connect, clock=lambda: clock[0], idle_seconds=0)
+    runtime = Runtime(connection.connect, clock=lambda: clock[0], idle_seconds=0,
+                      connection_ttl_seconds=0)
     gateway = Gateway(SimpleNamespace(state=SimpleNamespace(runtime=runtime)))
     lease = runtime.create_lease("anonymous", "client", kind="retention")
     gateway.sessions["sid"] = {"owner": ("anonymous", "client"), "lease": lease.id, "touched": -10**9}

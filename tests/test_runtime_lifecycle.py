@@ -215,18 +215,19 @@ async def test_startup_timeout_closes_owner_when_discovery_never_returns():
 
 
 @pytest.mark.asyncio
-async def test_expired_eager_session_closes_its_connection():
+async def test_expired_eager_session_releases_lease_but_keeps_instance():
     now = [0.]
     connection = Connection()
-    runtime = Runtime(connection.connect, clock=lambda: now[0])
-    lease = runtime.create_lease("u", "t", ttl=90)
+    runtime = Runtime(connection.connect, clock=lambda: now[0], connection_ttl_seconds=90)
+    lease = runtime.create_lease("u", "t")
     try:
         await runtime.call(ServerSpec("s", "stdio", {}, mode="eager", isolation="session"),
                            lease.id, "call", {})
         now[0] = 91.
         await runtime.reap()
-        assert connection.closed == 1
-        assert runtime.instances == {}
+        assert connection.closed == 0
+        assert len(runtime.instances) == 1
+        assert next(iter(runtime.instances.values())).refs == set()
         assert runtime.leases == {}
     finally:
         await runtime.close()

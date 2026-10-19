@@ -21,7 +21,8 @@ USER = Depends(current_user)
 ADMIN = Depends(admin_user)
 DEFAULTS = {"title": "MCP Manager", "registration_enabled": True, "jwt_days": 30,
             "token_auth_enabled": True, "anonymous_scope_mode": "selected", "anonymous_mcp_ids": [],
-            "idle_seconds": 86400, "refresh_enabled": False, "refresh_cron": "0 3 * * *",
+            "idle_seconds": 86400, "connection_ttl_seconds": 43200, "refresh_enabled": False, "refresh_cron": "0 3 * * *",
+            "bridge_heartbeat_seconds": 90, "bridge_missed_heartbeats": 3,
             "startup_failure_threshold": 3, "timezone": "Asia/Shanghai",
             "log_retention_days": 0, "cors_origins": ["*"], "allowed_hosts": ["*"],
             "update_auto_check": True, "translation_config": DEFAULT_TRANSLATION_CONFIG}
@@ -279,6 +280,12 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
     for key in ("jwt_days", "idle_seconds", "log_retention_days"):
         if not isinstance(result[key], (int, float)) or isinstance(result[key], bool) or result[key] < 0:
             raise HTTPException(422, key + " must be nonnegative")
+    connection_ttl = result["connection_ttl_seconds"]
+    if type(connection_ttl) is not int or not 0 <= connection_ttl <= 2**31 - 1:
+        raise HTTPException(422, "connection_ttl_seconds must be an integer from 0 to 2147483647")
+    for key, maximum in (("bridge_heartbeat_seconds", 86400), ("bridge_missed_heartbeats", 100)):
+        if type(result[key]) is not int or not 1 <= result[key] <= maximum:
+            raise HTTPException(422, key + " must be an integer from 1 to " + str(maximum))
     threshold = result["startup_failure_threshold"]
     if not isinstance(threshold, int) or isinstance(threshold, bool) or not 1 <= threshold <= 100:
         raise HTTPException(422, "startup_failure_threshold must be an integer from 1 to 100")
@@ -306,6 +313,9 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
     request.app.state.cors_origins = result["cors_origins"]
     request.app.state.allowed_hosts = result["allowed_hosts"]
     request.app.state.runtime.idle_seconds = result["idle_seconds"]
+    request.app.state.runtime.connection_ttl_seconds = result["connection_ttl_seconds"]
+    request.app.state.runtime.bridge_heartbeat_seconds = result["bridge_heartbeat_seconds"]
+    request.app.state.runtime.bridge_missed_heartbeats = result["bridge_missed_heartbeats"]
     request.app.state.catalog.startup_failure_threshold = result["startup_failure_threshold"]
     request.app.state.logs.timezone = ZoneInfo(result["timezone"])
     request.app.state.refresh_next = None

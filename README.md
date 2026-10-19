@@ -54,7 +54,7 @@ For Web integrations with large catalogs, use [capability summary pages and exac
 
 ### Observe and release active connections
 
-The **Connections** page lists your business leases and their MCP instances; administrators can manage other users' leases. It supports filters, safe JSON details, confirmed single/batch disconnects, and five-second refresh that pauses in hidden tabs. Disconnect releases a permit and its sessions: unreferenced lazy/session instances drain and stop, while shared or eager instances can remain. Clients can reconnect; this does not revoke credentials. See [Connection management](wiki/guides/manage-connections.md).
+The **Connections** page lists your business leases and their MCP instances; administrators can manage other users' leases. It supports filters, safe JSON details, confirmed single/batch disconnects, and five-second refresh that pauses in hidden tabs. Disconnect releases a permit and its sessions: unreferenced lazy instances drain and stop; eager instances remain, including session-isolated instances. Clients can reconnect; this does not revoke credentials. Settings provide independent instance idle reclamation and business lease validity (default 43,200 seconds; 0 disables lease expiry). Bridge heartbeats default to 90 seconds, with disconnection after three missed intervals even when lease expiry is disabled. See [Connection management](wiki/guides/manage-connections.md).
 
 ### Agent proposals with human approval
 

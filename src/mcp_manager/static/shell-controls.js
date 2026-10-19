@@ -62,6 +62,28 @@ function accountMenu(me,isAdmin,onLogout){
  return box;
 }
 
+let menuEventsInstalled=false;
+function coordinateMenus(actions){
+ if(!menuEventsInstalled){
+  document.addEventListener('click',event=>{
+   for(const menu of document.querySelectorAll('.top-actions details.action-menu[open]')){
+    if(!menu.contains(event.target))menu.open=false
+   }
+  },true);
+  document.addEventListener('keydown',event=>{
+   if(event.key!=='Escape')return;
+   const menus=[...document.querySelectorAll('.top-actions details.action-menu[open]')];
+   if(menus.length){menus.forEach(menu=>{menu.open=false});menus.at(-1).querySelector('summary')?.focus();event.preventDefault()}
+  });
+  menuEventsInstalled=true
+ }
+ for(const menu of actions.querySelectorAll('details.action-menu'))menu.setAttribute('name','mmg-top-actions');
+ actions.addEventListener('toggle',event=>{
+  if(!event.target.open)return;
+  for(const other of actions.querySelectorAll('details.action-menu'))if(other!==event.target)other.open=false
+ },true);
+ return actions
+}
 export function topActions({me,isAdmin,translationConfig,onLogout,onRefresh}){
- return el('div',{class:'top-actions'},translationConfig.enabled?languageMenu(translationConfig):null,themeMenu(onRefresh),accountMenu(me,isAdmin,onLogout));
+ return coordinateMenus(el('div',{class:'top-actions'},translationConfig.enabled?languageMenu(translationConfig):null,themeMenu(onRefresh),accountMenu(me,isAdmin,onLogout)));
 }

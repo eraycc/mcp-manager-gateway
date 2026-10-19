@@ -162,8 +162,11 @@ async def create_lease(request: Request):
     client_secret = secrets.token_urlsafe(32) if user is None else None
     identity = owner(user, token, request) if user else (
         "anonymous", hashlib.sha256(client_secret.encode()).hexdigest())
-    lease = request.app.state.runtime.create_lease(*identity, ttl=90, kind="bridge")
-    result = {"id": lease.id, "heartbeat_seconds": 30, "expires_in": 90}
+    runtime = request.app.state.runtime
+    lease = runtime.create_lease(*identity, kind="bridge")
+    ttl = runtime.lease_timeout(lease)
+    result = {"id": lease.id, "heartbeat_seconds": runtime.bridge_heartbeat_seconds,
+              "missed_heartbeats": runtime.bridge_missed_heartbeats, "expires_in": ttl}
     if client_secret:
         result["client_secret"] = client_secret
     return result
@@ -173,7 +176,8 @@ async def create_lease(request: Request):
 async def heartbeat(lease_id: str, request: Request):
     user, token, _ = await authenticate_token(request)
     request.app.state.runtime.heartbeat(lease_id, *owner(user, token, request))
-    return {"ok": True}
+    return {"ok": True, "heartbeat_seconds": request.app.state.runtime.bridge_heartbeat_seconds,
+            "missed_heartbeats": request.app.state.runtime.bridge_missed_heartbeats}
 
 
 @router.delete("/leases/{lease_id}")
@@ -258,7 +262,6 @@ class Gateway:
 
     async def reap(self):
         runtime = self.app.state.runtime
-        idle = runtime.idle_seconds
         sessions = list(self.sessions.items())
         retention = list(self.retention.items())
         identities = {bound["owner"] for _, bound in sessions} | {identity for identity, _ in retention}
@@ -281,17 +284,17 @@ class Gateway:
                     and identity not in valid):
                 self.retention.pop(identity, None)
                 await runtime.release(lease_id)
-        active = {lease_id for instance in runtime.instances.values() if instance.in_flight
-                  for lease_id in instance.refs}
         for sid, bound in list(self.sessions.items()):
-            if (idle > 0 and bound["lease"] not in active and bound.get("explicit_lease") not in active
-                    and time.monotonic() - bound.get("touched", 0) >= idle):
-                await self.close_session(sid)
+            lease_id = bound.get("explicit_lease") or bound["lease"]
+            lease = runtime.leases.get(lease_id)
+            if (self.sessions.get(sid) is bound
+                    and (lease is None or runtime.lease_expired(lease))):
+                await self.disconnect_lease(lease_id)
         for key, lease_id in list(self.retention.items()):
             lease = runtime.leases.get(lease_id)
-            if lease and idle > 0 and lease_id not in active and runtime.clock() - lease.touched >= idle:
-                await runtime.release(lease_id)
-            if lease_id not in runtime.leases:
+            if lease and runtime.lease_expired(lease):
+                await runtime.release(lease_id, if_expired=True)
+            if lease_id not in runtime.leases and self.retention.get(key) == lease_id:
                 self.retention.pop(key, None)
 
     async def principal(self, request, *, target_id=None):
@@ -358,7 +361,6 @@ class Gateway:
                 raise HTTPException(403, "MCP session belongs to another principal")
             lease = runtime.leases.get(bound["lease"])
             if lease:
-                lease.touched = runtime.clock()
                 return lease
             lease = runtime.create_lease(*identity, kind="retention")
             bound["lease"] = lease.id
@@ -368,7 +370,6 @@ class Gateway:
         if not lease:
             lease = runtime.create_lease(*identity, kind="retention")
             self.retention[key] = lease.id
-        lease.touched = runtime.clock()
         return lease
 
     async def list_tools(self, ctx, params):

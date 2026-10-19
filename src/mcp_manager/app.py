@@ -33,7 +33,7 @@ from .jobs import Jobs
 from .logs import LogStore
 from .oauth import OAuth
 from .oauth import router as oauth_router
-from .runtime import GatewayError, Runtime, RuntimeCapacity
+from .runtime import GatewayError, Lease, Runtime, RuntimeCapacity
 from .storage_maintenance import StorageMaintenance
 from .transports import connect, load_transport_plugins
 
@@ -116,14 +116,18 @@ async def _revoke_leases(app):
 
 
 async def _clean_instances(app):
-    """Stop eager personal instances whose owner lost access."""
+    """Revalidate detached personal/session instances, including their token scope."""
     state = app.state
     instances = list(state.runtime.instances.values())
     ownership = {
         instance.key: (
             instance.spec.credential_owner
             if instance.spec.credential_owner not in {"", "service"}
-            else instance.key[-1] if instance.spec.isolation == "user" else None
+            else instance.key[-1] if instance.spec.isolation == "user"
+            else instance.admitted_user if instance.spec.isolation == "session"
+            and instance.admitted_user != "anonymous"
+            and not (instance.admitted_user == "system"
+                     and instance.admitted_token in {"maintenance", "test", "diagnostic"}) else None
         )
         for instance in instances
     }
@@ -135,9 +139,25 @@ async def _clean_instances(app):
                 await session.scalars(select(User).where(User.id.in_(owners)))
             ).all()
         } if owners else {}
+    session_instances = [i for i in instances if i.spec.isolation == "session"]
+    authorization = await batch_authorization_state(state.db, [
+        Lease(i.generation, i.admitted_user, i.admitted_token, None, 0)
+        for i in session_instances
+    ])
+    anonymous_allowed = (await _anonymous_allowed(app)
+                         if any(i.admitted_user == "anonymous" for i in session_instances) else set())
     for instance in instances:
+        denied_session = False
+        if instance.spec.isolation == "session":
+            if instance.admitted_user == "anonymous":
+                denied_session = instance.spec.id not in anonymous_allowed
+            elif instance.generation in authorization:
+                allowed = authorization[instance.generation]
+                denied_session = allowed is None or instance.spec.id not in allowed
         owner = ownership[instance.key]
         if not owner:
+            if denied_session:
+                await state.runtime.stop_instance(instance, clear_refs=True)
             continue
         user = users.get(owner)
         denied = (
@@ -147,14 +167,13 @@ async def _clean_instances(app):
                 and instance.spec.id not in user.mcp_ids
             )
         )
-        if denied:
-            instance.refs.clear()
-            await state.runtime.stop_instance(instance)
+        if denied or denied_session:
+            await state.runtime.stop_instance(instance, clear_refs=True)
             if instance.spec.credential_owner:
                 state.runtime.credential_versions[(instance.spec.id, owner)] = None
 
 
-async def _restrict_anonymous(app):
+async def _anonymous_allowed(app):
     state = app.state
     anonymous_allowed = set()
     if not await get_setting(state.db, "token_auth_enabled", True):
@@ -165,6 +184,12 @@ async def _restrict_anonymous(app):
             anonymous_allowed &= set(
                 await get_setting(state.db, "anonymous_mcp_ids", [])
             )
+    return anonymous_allowed
+
+
+async def _restrict_anonymous(app):
+    state = app.state
+    anonymous_allowed = await _anonymous_allowed(app)
     for lease in list(state.runtime.leases.values()):
         if lease.user_id == "anonymous":
             await state.runtime.restrict_lease(lease.id, anonymous_allowed)
@@ -324,6 +349,9 @@ def create_app(config=None):
             from zoneinfo import ZoneInfo
             state.logs.timezone = ZoneInfo(await get_setting(state.db, "timezone", "Asia/Shanghai"))
             state.runtime.idle_seconds = await get_setting(state.db, "idle_seconds", 86400)
+            state.runtime.connection_ttl_seconds = await get_setting(state.db, "connection_ttl_seconds", 43200)
+            state.runtime.bridge_heartbeat_seconds = await get_setting(state.db, "bridge_heartbeat_seconds", 90)
+            state.runtime.bridge_missed_heartbeats = await get_setting(state.db, "bridge_missed_heartbeats", 3)
             state.catalog.startup_failure_threshold = await get_setting(
                 state.db, "startup_failure_threshold", 3
             )

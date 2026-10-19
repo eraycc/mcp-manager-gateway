@@ -57,7 +57,7 @@ async def gateway_client(transport, url, token):
         async with Client(source, cache=None) as client:
             yield client
     else:
-        async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + token}, trust_env=False) as http:  # noqa: SIM117 - client depends on HTTP context
+        async with httpx2.AsyncClient(timeout=35, headers={"Authorization": "Bearer " + token}, trust_env=False) as http:  # noqa: SIM117 - client depends on HTTP context
             async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None) as client:
                 yield client
 

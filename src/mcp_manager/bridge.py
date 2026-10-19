@@ -40,16 +40,23 @@ class BridgeUpstream:
             await self.queue.put(None)
         await asyncio.gather(self.task, return_exceptions=True)
 
-    async def heartbeat(self, http, lease_id, seconds):
+    async def heartbeat(self, http, lease_id, seconds, missed_heartbeats=3):
+        failures = 0
         while True:
             await asyncio.sleep(seconds)
             try:
                 response = await http.post("/gateway/v1/leases/" + lease_id + "/heartbeat")
                 response.raise_for_status()
+                settings = response.json() if response.content else {}
+                seconds = settings.get("heartbeat_seconds", seconds)
+                missed_heartbeats = settings.get("missed_heartbeats", missed_heartbeats)
+                failures = 0
             except httpx.HTTPError:
                 # Keep retrying heartbeats; the next business request gets a fresh
                 # lease and MCP connection. Never replay a request already sent.
-                self.stale = True
+                failures += 1
+                if failures >= missed_heartbeats:
+                    self.stale = True
 
     @contextlib.asynccontextmanager
     async def connection(self):
@@ -63,7 +70,8 @@ class BridgeUpstream:
             if lease.get("client_secret"):
                 headers["X-MCP-Manager-Client"] = lease["client_secret"]
                 lease_http.headers["X-MCP-Manager-Client"] = lease["client_secret"]
-            task = asyncio.create_task(self.heartbeat(lease_http, lease_id, lease.get("heartbeat_seconds", 30)))
+            task = asyncio.create_task(self.heartbeat(
+                lease_http, lease_id, lease.get("heartbeat_seconds", 90), lease.get("missed_heartbeats", 3)))
             try:
                 async with (
                     httpx2.AsyncClient(

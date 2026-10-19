@@ -18,6 +18,10 @@ def isolated_sse_shutdown(monkeypatch):
     from sse_starlette.sse import AppStatus
 
     monkeypatch.setattr(AppStatus, "should_exit", False)
+    # Multiple temporary Uvicorn servers can share one loop. The SSE library's
+    # thread-wide watcher otherwise broadcasts one server's exit to the others.
+    # Test clients close their own streams before fixture teardown.
+    monkeypatch.setattr(AppStatus, "enable_automatic_graceful_drain", False)
 
 
 def select_backends(values, required=False):
