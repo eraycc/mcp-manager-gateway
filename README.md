@@ -52,6 +52,10 @@ Each agent connects to MMG instead of carrying dozens of independent MCP definit
 
 For Web integrations with large catalogs, use [capability summary pages and exact definitions](wiki/reference/catalog-api.md). Capability cards wrap long descriptions, URLs, and identifiers within their borders on desktop and mobile. Scheduled refresh retries enabled lazy/eager services even after a manual stop or startup failure and publishes the paged catalog. Stopping a service forcibly closes its current instances without disabling it or blocking later calls; a later call restarts a lazy/eager service, and an eager service then stays running. A failed refresh empties the catalog and persists its error for agents and the console; it never disables an enabled service. Catalog queries remain read-only. Explicit exact calls may rediscover current contracts before validation and execution. Approved proposals discard diagnostic catalog entries and, like rejected proposals, no longer show the diagnostic catalog button. Approval tests support a bounded summary response; legacy full-list responses have explicit size limits. Agent service summaries include a bounded tool-name preview; enumerate `gateway_search_tools` for the full catalog. Exact calls use indexed routes and reuse schema validators.
 
+### Observe and release active connections
+
+The **Connections** page lists your business leases and their MCP instances; administrators can manage other users' leases. It supports filters, safe JSON details, confirmed single/batch disconnects, and five-second refresh that pauses in hidden tabs. Disconnect releases a permit and its sessions: unreferenced lazy/session instances drain and stop, while shared or eager instances can remain. Clients can reconnect; this does not revoke credentials. See [Connection management](wiki/guides/manage-connections.md).
+
 ### Agent proposals with human approval
 
 The recommended migration path is not to rebuild every MCP by hand. Give a trusted administrator token permission to submit MCP proposals, then ask an agent to:

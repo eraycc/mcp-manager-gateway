@@ -218,6 +218,8 @@ class Lease:
     ttl: float | None
     touched: float
     kind: str = "agent"
+    created: float = field(default_factory=time.time)
+    in_flight: int = 0
 
 
 @dataclass
@@ -509,6 +511,7 @@ class Runtime:
             if business:
                 instance.last_activity = self.clock()
             dispatched = True
+            lease.in_flight += 1
             method = getattr(instance.connection, operation, None)
             if method is None and operation == "ingest_catalog":
                 from .transports import DiscoveryBudget, ingest_capabilities
@@ -550,6 +553,8 @@ class Runtime:
             code = "outcome_unknown" if business else "connection_error"
             raise GatewayError(code, str(exc) or "Downstream did not return a result") from exc
         finally:
+            if dispatched:
+                lease.in_flight -= 1
             if acquired and instance is not None:
                 instance.semaphore.release()
             if waiting and instance is not None:
@@ -680,6 +685,39 @@ class Runtime:
             if (lease.kind == "retention" and lease.id not in referenced
                     and self.idle_seconds > 0 and now - lease.touched >= self.idle_seconds):
                 self.leases.pop(lease.id, None)
+
+    def lease_status(self, *, user_id: str | None = None):
+        """Copy runtime metadata without I/O, credentials or downstream startup."""
+        now, wall = self.clock(), time.time()
+        bindings = {}
+        for instance in self.instances.values():
+            snapshot = {
+                "server_id": instance.spec.id, "generation": instance.generation,
+                "phase": instance.phase, "mode": instance.spec.mode,
+                "isolation": instance.spec.isolation, "lease_count": len(instance.refs),
+                "in_flight": instance.in_flight, "waiters": instance.waiters,
+            }
+            for lease_id in instance.refs:
+                bindings.setdefault(lease_id, []).append(snapshot.copy())
+        result = []
+        for lease in self.leases.values():
+            if user_id is not None and lease.user_id != user_id:
+                continue
+            idle = max(0., now - lease.touched)
+            remaining = None if lease.ttl is None else max(0., lease.ttl - idle)
+            expired = remaining is not None and remaining <= 0
+            status = ("expired" if expired else "active" if lease.in_flight else
+                      "expiring" if remaining is not None and remaining <= 15 else "idle")
+            result.append({
+                "id": lease.id, "lease_id": lease.id,
+                "user_id": lease.user_id, "token_id": lease.token_id, "kind": lease.kind,
+                "created_at": lease.created, "touched_at": wall - idle, "idle_seconds": idle,
+                "ttl": lease.ttl, "expires_in": remaining,
+                "expires_at": None if lease.ttl is None else wall - idle + lease.ttl,
+                "expired": expired, "status": status, "in_flight": lease.in_flight,
+                "instances": bindings.get(lease.id, []),
+            })
+        return result
 
     def capacity_status(self):
         active_instances = [

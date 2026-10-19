@@ -183,14 +183,12 @@ async def release(lease_id: str, request: Request):
     lease = runtime.leases.get(lease_id)
     if lease and (lease.user_id, lease.token_id) != owner(user, token, request):
         raise HTTPException(403, "Lease belongs to a different caller")
-    await runtime.release(lease_id)
     gateway = request.app.state.gateway
-    for sid, bound in list(gateway.sessions.items()):
-        if bound.get("explicit_lease") == lease_id:
-            if bound["owner"] != owner(user, token, request):
-                raise HTTPException(403, "Lease belongs to a different caller")
-            await gateway.close_session(sid)
-    return {"ok": True}
+    for bound in gateway.sessions.values():
+        if (lease_id in {bound.get("explicit_lease"), bound.get("lease")}
+                and bound["owner"] != owner(user, token, request)):
+            raise HTTPException(403, "Lease belongs to a different caller")
+    return await gateway.disconnect_lease(lease_id)
 
 
 class Gateway:
@@ -213,6 +211,41 @@ class Gateway:
                 response = await client.delete("/mcp", headers={"Mcp-Session-Id": sid})
                 if response.status_code not in {200, 204, 404}:
                     response.raise_for_status()
+
+    async def disconnect_lease(self, lease_id):
+        """Release a permit and its session bindings; never replay failed cleanup."""
+        runtime = self.app.state.runtime
+        released = lease_id in runtime.leases
+        sessions = [(sid, bound) for sid, bound in self.sessions.items()
+                    if lease_id in {bound.get("lease"), bound.get("explicit_lease")}]
+        targets = {lease_id} | {bound["lease"] for _, bound in sessions}
+        affected = [i for i in runtime.instances.values() if i.refs & targets]
+        # Revoke routing before the first await: a request must not recreate a lease
+        # through the session being disconnected.
+        for sid, _ in sessions:
+            self.sessions.pop(sid, None)
+        for key, value in list(self.retention.items()):
+            if value in targets:
+                self.retention.pop(key, None)
+        for target in targets:
+            await runtime.release(target)
+        cleanup_ok = True
+        for sid, _ in sessions:
+            try:
+                await self.close_session(sid)
+            except Exception:  # noqa: BLE001 - SDK cleanup failed after revocation; never retry or expose secrets
+                cleanup_ok = False
+        instances = []
+        for instance in affected:
+            outcome = ("stopped" if instance.closed.is_set() else
+                       "shared" if instance.refs else
+                       "draining" if instance.phase in {"draining", "stopping"} else "kept_alive")
+            instances.append({
+                "server_id": instance.spec.id, "generation": instance.generation,
+                "outcome": outcome, "lease_count": len(instance.refs),
+            })
+        return {"ok": cleanup_ok, "released": released, "already_released": not released,
+                "session_cleanup_ok": cleanup_ok, "instances": instances}
 
     async def revoke(self, *, token_id):
         for sid, bound in list(self.sessions.items()):

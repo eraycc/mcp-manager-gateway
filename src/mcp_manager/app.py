@@ -13,7 +13,16 @@ from filelock import FileLock, Timeout
 from jsonschema import ValidationError
 from sqlalchemy import select
 
-from . import catalog_api, credentials_api, embedding_api, identity, operations_api, proposals, storage_api
+from . import (
+    catalog_api,
+    credentials_api,
+    embedding_api,
+    identity,
+    leases_api,
+    operations_api,
+    proposals,
+    storage_api,
+)
 from .catalog import Catalog
 from .config import PACKAGE_ROOT, Settings
 from .credentials import CredentialStore
@@ -386,6 +395,7 @@ def create_app(config=None):
         catalog_api.router,
         credentials_api.router,
         operations_api.router,
+        leases_api.router,
         storage_api.router,
         oauth_router,
         embedding_api.router,
