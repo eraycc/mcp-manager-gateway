@@ -14,6 +14,7 @@
 ### 管理员
 
 - [服务管理与测试](guides/manage-services.md)
+- [连接管理与租期断开](guides/manage-connections.md)
 - [配置与数据目录](operations/configuration.md)
 - [控制台外观、翻译与版本提醒](guides/interface-translation-and-updates.md)
 - [SQLite 与 MySQL 部署、迁移和备份](database-deployment.md)

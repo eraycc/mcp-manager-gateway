@@ -96,3 +96,28 @@ async def test_reap_does_not_revoke_session_created_during_permission_query(monk
     await gateway.reap()
     assert closed == []
     assert set(gateway.sessions) == {"existing", "new"}
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_web_disconnect_removes_actual_sdk_session_and_runtime_refs(running_gateway, explicit):  # noqa: F811
+    app, web, url, token, _ = running_gateway
+    headers = {"Authorization": "Bearer " + token}
+    lease_id = None
+    if explicit:
+        response = await web.post("/gateway/v1/leases", headers=headers)
+        lease_id = response.json()["id"]
+        headers["X-MCP-Manager-Lease"] = lease_id
+    async with httpx2.AsyncClient(headers=headers, trust_env=False) as http:  # noqa: SIM117 - MCP client depends on HTTP context
+        async with Client(streamable_http_client(url + "/mcp", http_client=http), cache=None, mode="legacy") as client:
+            await client.call_tool("echo__echo", {"value": "connection-management"})
+            sid = next(iter(app.state.gateway.sessions))
+            bound = app.state.gateway.sessions[sid]
+            selected = lease_id or bound["lease"]
+            response = await web.post("/api/v1/leases/" + selected + "/disconnect")
+            assert response.status_code == 200, response.text
+            assert response.json()["ok"]
+            assert sid not in app.state.gateway.sessions
+            assert sid not in app.state.protocol.session_manager._server_instances
+            assert selected not in app.state.runtime.leases
+            assert bound["lease"] not in app.state.runtime.leases
+            assert not app.state.runtime.instances

@@ -119,7 +119,12 @@ async def test_profile_hides_disabled_services(running_gateway):
 @pytest.mark.asyncio
 async def test_profile_noncurrent_session_revoke_and_permanent_delete(running_gateway):
     _app, _web, url, _token, _row = running_gateway
-    async with httpx.AsyncClient(base_url=url, trust_env=False, headers={"User-Agent": "Session QA device"}) as other:
+    # Browser actions can cross Uvicorn's idle keep-alive deadline. Keep the cookie
+    # session, but open a fresh TCP connection for each security assertion.
+    async with httpx.AsyncClient(
+        base_url=url, trust_env=False, headers={"User-Agent": "Session QA device"},
+        limits=httpx.Limits(max_keepalive_connections=0),
+    ) as other:
         assert (await other.post("/api/v1/auth/login", json={"username": "admin", "password": "password12345"})).status_code == 200
         async with async_playwright() as pw:
             executable = "C:/Program Files/Google/Chrome/Application/chrome.exe"
