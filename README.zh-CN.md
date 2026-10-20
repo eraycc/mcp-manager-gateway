@@ -2,11 +2,14 @@
 
 > 让 MCP 像 Skills 一样按需发现、按需启动：Agent 只看见一个稳定入口，需要时再找到并调用真正的工具。
 
-[![PyPI](https://img.shields.io/pypi/v/mcp-manager-gateway)](https://pypi.org/project/mcp-manager-gateway/)
-[![Python](https://img.shields.io/pypi/pyversions/mcp-manager-gateway)](https://pypi.org/project/mcp-manager-gateway/)
-[![License](https://img.shields.io/github/license/eraycc/mcp-manager-gateway)](LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/mcp-manager-gateway?label=PyPI)](https://pypi.org/project/mcp-manager-gateway/)
+[![Python](https://img.shields.io/pypi/pyversions/mcp-manager-gateway?label=Python)](https://pypi.org/project/mcp-manager-gateway/)
+[![License](https://img.shields.io/github/license/eraycc/mcp-manager-gateway?label=License)](https://github.com/eraycc/mcp-manager-gateway/blob/master/LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/eraycc/mcp-manager-gateway?label=Release)](https://github.com/eraycc/mcp-manager-gateway/releases)
+[![Docker Hub](https://img.shields.io/docker/v/eraycc/mcp-manager-gateway?label=Docker%20Hub)](https://hub.docker.com/r/eraycc/mcp-manager-gateway)
+[![GHCR](https://img.shields.io/badge/GHCR-eraycc%2Fmcp--manager--gateway-blue)](https://ghcr.io/eraycc/mcp-manager-gateway)
 
-[English](README.md) | 简体中文 | [完整公开文档与运维指南](wiki/README.md)
+[English](https://github.com/eraycc/mcp-manager-gateway/blob/master/README.md) | 简体中文 | [完整公开文档与运维指南](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/README.md)
 
 MCP 很有用，但 MCP 越配越多以后，问题也会一起放大：
 
@@ -50,11 +53,11 @@ MCP Manager Gateway
 
 每个 Agent 只连接 MMG，不再分别维护几十份 MCP 配置。服务、凭据、权限和运行状态由网关集中管理；同一套 MCP 可以安全地分配给不同用户和 Token。
 
-大目录的 Web 集成请使用[能力摘要分页与精确详情](wiki/reference/catalog-api.md)。能力卡片中的长描述、URL 和标识符会在卡片边界内自动换行，适配桌面与手机。定时刷新会重试已手动停止或启动失败的按需、常驻服务，并发布分页目录。停止仅强制关闭当前运行实例，不禁用服务，也不阻止后续调用；后续调用会重新启动按需或常驻服务，常驻服务启动后继续运行。刷新失败即清空工具目录，原因持久化并向 Agent 和控制台展示，不禁用服务；目录查询保持只读，显式精确调用可先重新发现当前定义，再校验和执行。审批通过时清理测试目录条目，已通过、已拒绝记录均不再显示测试能力目录按钮。审批测试支持有界摘要响应；旧全量列表接口有明确的大小限制。Agent 服务摘要提供有界工具名称预览，完整目录通过 `gateway_search_tools` 分页遍历；精确调用走索引路由并复用 Schema 校验器。
+大目录的 Web 集成请使用[能力摘要分页与精确详情](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/reference/catalog-api.md)。能力卡片中的长描述、URL 和标识符会在卡片边界内自动换行，适配桌面与手机。定时刷新会重试已手动停止或启动失败的按需、常驻服务，并发布分页目录。停止仅强制关闭当前运行实例，不禁用服务，也不阻止后续调用；后续调用会重新启动按需或常驻服务，常驻服务启动后继续运行。刷新失败即清空工具目录，原因持久化并向 Agent 和控制台展示，不禁用服务；目录查询保持只读，显式精确调用可先重新发现当前定义，再校验和执行。审批通过时清理测试目录条目，已通过、已拒绝记录均不再显示测试能力目录按钮。审批测试支持有界摘要响应；旧全量列表接口有明确的大小限制。Agent 服务摘要提供有界工具名称预览，完整目录通过 `gateway_search_tools` 分页遍历；精确调用走索引路由并复用 Schema 校验器。
 
 ### 观察与释放活跃连接
 
-**连接管理**列出当前用户的业务租期及其引用的多个 MCP 实例；管理员也可以管理他人租期。支持筛选、安全 JSON 详情、确认后单条/批量断开及每 5 秒刷新，隐藏标签页暂停刷新。每条租期区分当前执行、等待派发、累计下游调用与最近派发时间，快速调用完成后仍能看到累计记录；实例列 1～2 项自然增高，3 项及以上采用紧凑封顶高度，超过 3 项可内部滚动。断开释放许可与关联会话：无引用的 lazy 实例排空后停止，eager 实例保留，包括按会话隔离的实例。客户端仍可重新连接，断开不会撤销凭据。系统设置独立管理实例空闲回收和业务租期有效期（默认 43200 秒，0 关闭到期释放）。Bridge 指将 MMG 以 stdio 模式接入客户端的桥接程序，默认每 90 秒心跳，连续缺失 3 次即断开，租期有效期为 0 时仍检测失联。参见[连接管理指南](wiki/guides/manage-connections.md)。
+**连接管理**列出当前用户的业务租期及其引用的多个 MCP 实例；管理员也可以管理他人租期。支持筛选、安全 JSON 详情、确认后单条/批量断开及每 5 秒刷新，隐藏标签页暂停刷新。每条租期区分当前执行、等待派发、累计下游调用与最近派发时间，快速调用完成后仍能看到累计记录；实例列 1～2 项自然增高，3 项及以上采用紧凑封顶高度，超过 3 项可内部滚动。断开释放许可与关联会话：无引用的 lazy 实例排空后停止，eager 实例保留，包括按会话隔离的实例。客户端仍可重新连接，断开不会撤销凭据。系统设置独立管理实例空闲回收和业务租期有效期（默认 43200 秒，0 关闭到期释放）。Bridge 指将 MMG 以 stdio 模式接入客户端的桥接程序，默认每 90 秒心跳，连续缺失 3 次即断开，租期有效期为 0 时仍检测失联。参见[连接管理指南](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/manage-connections.md)。
 
 ### Agent 提议，人类审批
 
@@ -108,6 +111,44 @@ mmg
 mmg serve --port 8766
 ~~~
 
+### 使用 Docker 部署（从镜像仓库拉取）
+
+两个镜像仓库发布同一套多架构镜像（`linux/amd64`、`linux/arm64`）：
+
+- **Docker Hub** — `eraycc/mcp-manager-gateway` — <https://hub.docker.com/r/eraycc/mcp-manager-gateway>
+- **GitHub Container Registry (GHCR)** — `ghcr.io/eraycc/mcp-manager-gateway` — <https://ghcr.io/eraycc/mcp-manager-gateway>
+
+从 Docker Hub 拉取并运行：
+
+~~~console
+docker pull eraycc/mcp-manager-gateway:latest
+docker run -d --name mmg \
+  -p 127.0.0.1:8765:8765 \
+  -v mmg-data:/data \
+  eraycc/mcp-manager-gateway
+~~~
+
+从 GHCR 拉取并运行：
+
+~~~console
+docker pull ghcr.io/eraycc/mcp-manager-gateway:latest
+docker run -d --name mmg \
+  -p 127.0.0.1:8765:8765 \
+  -v mmg-data:/data \
+  ghcr.io/eraycc/mcp-manager-gateway
+~~~
+
+生产环境建议固定到具体版本：
+
+~~~console
+docker run -d --name mmg \
+  -p 127.0.0.1:8765:8765 \
+  -v mmg-data:/data \
+  eraycc/mcp-manager-gateway:1.3.9
+~~~
+
+数据保存在容器内 `/data` 目录；请挂载到命名卷或宿主机目录。Compose 文件与生产环境说明见 [部署与升级](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/deployment-and-upgrades.md)。
+
 ## 把 Agent 接到 MMG
 
 先在 Web 控制台中创建访问 Token。个人中心会根据当前地址生成可直接复制的 HTTP、stdio、Codex 和通用客户端配置。
@@ -149,7 +190,7 @@ Authorization: Bearer mcpm_你的Token
 
 > 读取我当前客户端中的 MCP 配置，转换为 MMG 提议并批量提交。不要修改原配置；等待我在控制台审核、测试和批准后，再检查迁移状态。只有在我明确同意后，才能删除旧 MCP 配置，只保留 MMG。
 
-更完整的 Agent 操作约束见 [AGENTS.md](AGENTS.md)。
+更完整的 Agent 操作约束见 [AGENTS.md](https://github.com/eraycc/mcp-manager-gateway/blob/master/AGENTS.md)。
 
 ### 3. Agent 提交标准提议
 
@@ -196,7 +237,7 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 
 保留备份，不删除无关配置，不删除 MMG 自身。完成后，每个 Agent 只需保留一个网关入口。
 
-详细导入规则见 [迁移已有 MCP](wiki/guides/migrate-mcps.md)。
+详细导入规则见 [迁移已有 MCP](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/migrate-mcps.md)。
 
 ## Agent 如何渐进式使用工具
 
@@ -213,15 +254,15 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 
 一个可靠的 Agent 不应猜测工具名或参数：先搜索 MCP，再搜索工具，最后使用返回的精确名称调用。搜索和目录分页不会唤醒 `lazy` 服务。
 
-[渐进式发现](wiki/concepts/progressive-discovery.md)解释了搜索、分页、完整 Schema 与精确路由的契约。
+[渐进式发现](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/concepts/progressive-discovery.md)解释了搜索、分页、完整 Schema 与精确路由的契约。
 
 ## 管理能力概览
 
-控制台支持确认后导出全部服务的脱敏 JSON 配置；MCP 服务、审批、访问令牌、调用日志和用户列表支持跨页勾选与批量操作。服务列表的“能力列表”和个人资料的“可访问的服务”显示缓存中的工具、资源、提示词及资源模板数量，个人资料同时显示服务描述。管理员和普通用户均可在个人资料中配置、修改按用户隔离服务的 Bearer、Basic、API Key 和个人独享 OAuth 凭据，保存后仍保留编辑入口。已完成认证的 HTTP 类用户隔离服务支持在凭据或 OAuth 授权弹窗中手动刷新本人的能力缓存。管理员服务列表显示当前管理员的能力或未认证状态，以及有访问权的启用用户中的已认证人数。详见[服务管理与测试](wiki/guides/manage-services.md)。
+控制台支持确认后导出全部服务的脱敏 JSON 配置；MCP 服务、审批、访问令牌、调用日志和用户列表支持跨页勾选与批量操作。服务列表的“能力列表”和个人资料的“可访问的服务”显示缓存中的工具、资源、提示词及资源模板数量，个人资料同时显示服务描述。管理员和普通用户均可在个人资料中配置、修改按用户隔离服务的 Bearer、Basic、API Key 和个人独享 OAuth 凭据，保存后仍保留编辑入口。已完成认证的 HTTP 类用户隔离服务支持在凭据或 OAuth 授权弹窗中手动刷新本人的能力缓存。管理员服务列表显示当前管理员的能力或未认证状态，以及有访问权的启用用户中的已认证人数。详见[服务管理与测试](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/manage-services.md)。
 
 - **多种接入方式**：stdio、Streamable HTTP、旧 SSE、REST 转 MCP；
 - **自动目录刷新**：新增、导入、审批通过与复制服务后自动尝试刷新分页能力目录，成功后直接显示；
-- **统一导入导出**：通用 JSON、Codex TOML、Claude、DSH Cordis/registry；导出采用通用 `mcpServers` 连接字段，MMG 专用设置保存在版本化的 `config` 扩展中，支持完整重新导入（[格式说明](wiki/reference/catalog-api.md#service-configuration-export)）；
+- **统一导入导出**：通用 JSON、Codex TOML、Claude、DSH Cordis/registry；导出采用通用 `mcpServers` 连接字段，MMG 专用设置保存在版本化的 `config` 扩展中，支持完整重新导入（[格式说明](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/reference/catalog-api.md#service-configuration-export)）；
 - **授权边界**：用户、Token、匿名范围和 MCP 分配相互独立；
 - **OAuth 隔离**：个人凭据、能力目录和运行实例按用户隔离；
 - **生命周期**：`lazy`、`eager`、`disabled`，支持失败状态与恢复；
@@ -233,7 +274,7 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 - **工具检索**：关键词、拼写模糊匹配，以及可选的 OpenAI 兼容 embedding；
 - **安全审批**：Agent 提议、配置编辑、真实测试、批准或拒绝；
 - **数据后端**：默认 SQLite，也支持 MySQL；
-- **存储治理**：主 SQLite 与日志索引分别配置启动回收阈值，提供手动释放数据库空间，不自动过期有效缓存或索引（[说明](wiki/database-deployment.md#数据库空间治理)）。
+- **存储治理**：主 SQLite 与日志索引分别配置启动回收阈值，提供手动释放数据库空间，不自动过期有效缓存或索引（[说明](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/database-deployment.md#数据库空间治理)）。
 
 ## 控制台多语言
 
@@ -246,11 +287,11 @@ MMG 支持可选的浏览器端界面翻译：
 
 右上角选择的目标语言会持久化保存在当前浏览器中，并优先于系统默认值。只要全局翻译仍处于开启状态，后续再次打开或登录 MMG 时就会自动应用上次选择的语言。系统默认目标语言只用于没有本地选择的浏览器，因此不同浏览器可以各自选择。
 
-浏览器翻译可能会把页面文字发送给所配置的翻译服务。包含敏感业务内容的部署应使用经过审核的私有服务，或保持翻译关闭。通道、忽略规则、缓存清理和版本检测说明见[控制台外观、翻译与版本提醒](wiki/guides/interface-translation-and-updates.md)。
+浏览器翻译可能会把页面文字发送给所配置的翻译服务。包含敏感业务内容的部署应使用经过审核的私有服务，或保持翻译关闭。通道、忽略规则、缓存清理和版本检测说明见[控制台外观、翻译与版本提醒](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/interface-translation-and-updates.md)。
 
 ## 配置与数据
 
-环境变量优先于用户目录中的 `.env`。源码目录和当前工作目录下的 `.env` 不会被自动读取。完整示例见 [.env.example](.env.example)。
+环境变量优先于用户目录中的 `.env`。源码目录和当前工作目录下的 `.env` 不会被自动读取。完整示例见 [.env.example](https://github.com/eraycc/mcp-manager-gateway/blob/master/.env.example)。
 
 常用配置：
 
@@ -274,7 +315,7 @@ docker compose up --build -d
 
 默认仅绑定 `127.0.0.1:8765`，数据保存到命名卷 `mcp-manager-data`。远程或生产环境建议使用 HTTPS 反向代理，并设置正确的 `PUBLIC_URL` 与 `COOKIE_SECURE=true`。
 
-MMG 当前按单节点、单网关运行时设计。不要用多个 worker 或多个副本共享同一套下游进程调度。SQLite、MySQL 8.4 Compose、数据库互转与完整备份说明见 [SQLite 与 MySQL 部署](wiki/database-deployment.md)。
+MMG 当前按单节点、单网关运行时设计。不要用多个 worker 或多个副本共享同一套下游进程调度。SQLite、MySQL 8.4 Compose、数据库互转与完整备份说明见 [SQLite 与 MySQL 部署](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/database-deployment.md)。
 
 ## 升级与维护
 
@@ -290,9 +331,9 @@ pip install --upgrade mcp-manager-gateway
 
 源码和 Docker 用户应分别使用 Git + uv 或重新构建/拉取镜像。`mmg upgrade` 只执行数据库 Schema 迁移，不会更新软件包；服务启动通常会自动完成数据库初始化。
 
-完整升级矩阵见 [部署与升级](wiki/operations/deployment-and-upgrades.md)。
+完整升级矩阵见 [部署与升级](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/deployment-and-upgrades.md)。
 
-仅启动后的首次后台维护清理历史缓存残留；运行期间随 MCP 删除、能力成功更新或 embedding 模型变化执行针对性同步，不做每小时缓存扫描，也没有向量 TTL 或条目数量淘汰。未变化工具复用同作用域的既有向量，不重复请求模型；禁用服务和发现失败作用域保持不动。旧 `jobs/jobs.jsonl` 不再读取或导入，也不会自动删除。详情见 [缓存与历史残留](wiki/operations/backup-and-migration.md#缓存与历史残留)。
+仅启动后的首次后台维护清理历史缓存残留；运行期间随 MCP 删除、能力成功更新或 embedding 模型变化执行针对性同步，不做每小时缓存扫描，也没有向量 TTL 或条目数量淘汰。未变化工具复用同作用域的既有向量，不重复请求模型；禁用服务和发现失败作用域保持不动。旧 `jobs/jobs.jsonl` 不再读取或导入，也不会自动删除。详情见 [缓存与历史残留](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/backup-and-migration.md#缓存与历史残留)。
 
 常用维护命令：
 
@@ -317,13 +358,13 @@ uv build
 - 前端静态资源：`src/mcp_manager/static/`
 - 数据库迁移：`src/mcp_manager/migrations/`
 - 测试：`tests/`
-- 传输插件说明：[传输插件](wiki/development/transport-plugins.md)
-- 运行时设计：[运行时与生命周期](wiki/concepts/runtime-and-lifecycle.md)
-- 开发与验证：[参与开发](wiki/development/contributing.md)
-- CLI 参考：[命令行参考](wiki/reference/cli.md)
-- 数据库部署：[SQLite 与 MySQL 部署、迁移和备份](wiki/database-deployment.md)
+- 传输插件说明：[传输插件](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/development/transport-plugins.md)
+- 运行时设计：[运行时与生命周期](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/concepts/runtime-and-lifecycle.md)
+- 开发与验证：[参与开发](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/development/contributing.md)
+- CLI 参考：[命令行参考](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/reference/cli.md)
+- 数据库部署：[SQLite 与 MySQL 部署、迁移和备份](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/database-deployment.md)
 
-完整公开文档见 [Wiki 首页](wiki/README.md)。运行实例的 OpenAPI 页面位于 `http://<MMG_HOST>:<PORT>/docs`。
+完整公开文档见 [Wiki 首页](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/README.md)。运行实例的 OpenAPI 页面位于 `http://<MMG_HOST>:<PORT>/docs`。
 
 ## 安全边界
 
@@ -337,6 +378,6 @@ MCP 配置可以启动本地进程、访问网络和读取数据，应当视为�
 
 ## License
 
-Copyright 2026 eraycc. Licensed under the [Apache License 2.0](LICENSE).
+Copyright 2026 eraycc. Licensed under the [Apache License 2.0](https://github.com/eraycc/mcp-manager-gateway/blob/master/LICENSE).
 
 大目录可用 `gateway_search_tools` 的 `names_only: true` 渐进获取名称摘要，不读取 Schema；调用前应去掉该参数，按精确名称查询完整定义。跟随 `next_cursor` 时保持原查询不变。原生工具/资源/提示词/模板列表与 `gateway_list_resources` 均分页；整个 MCP JSON-RPC 响应按 1 MiB 预算计入文本与结构化内容的重复占用。单个完整契约超限明确返回 `catalog_entry_too_large`，不截断 Schema。失败服务保留状态和原因，但不展示可执行工具；关键词搜索支持有界的单字符拼写容错，精确调用仍严格匹配名称。
