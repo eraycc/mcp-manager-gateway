@@ -1,4 +1,4 @@
-import{el,button,check,dialog}from './core.js';
+import{el,button,check,dialog,field}from './core.js';
 
 const UPDATE_CACHE_KEY='mcp-update-state';
 const UPDATE_NOTICE_KEY='mcp-update-notice';
@@ -58,11 +58,16 @@ export function maybeNotifyUpdate(state){
  return true;
 }
 
-export function updateCheckSetting(enabled=true){
+export function updateCheckSetting(enabled=true,intervalSeconds=86400){
  const control=check('自动检测更新',enabled);
+ const interval=field('自动检测间隔（秒）',intervalSeconds,'number','默认 86400 秒（24 小时），至少 1 秒。控制上次获取的 PyPI 最新版本信息的缓存有效时长；距上次成功检查超过此间隔后，下次登录或刷新才联网，否则读取缓存。手动“检查更新”始终强制联网，不受此间隔影响。关闭自动检测时仍可修改并保存间隔；该间隔仅在开启自动检测时生效。');
+ interval.input.min=1;interval.input.max=2147483647;interval.input.step=1;interval.input.required=true;
+ interval.input.setAttribute('aria-label','自动检测间隔（秒）');
+ const hint=interval.node.querySelector('small');hint.id='settings-hint-update_check_interval_seconds';interval.input.setAttribute('aria-describedby',hint.id);
  return{
-  node:el('section',{class:'update-setting stack'},control.node,el('small',{class:'muted'},'开启后登录时自动通过 PyPI 检查；关闭后仍可使用“检查更新”。')),
+  node:el('section',{class:'update-setting stack'},control.node,interval.node),
   value:()=>control.input.checked,
+  intervalValue:()=>Number(interval.input.value),
  };
 }
 

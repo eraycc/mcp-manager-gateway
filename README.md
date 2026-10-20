@@ -236,7 +236,7 @@ Browser translation can send visible page text to the configured translation pro
 - call logs, audit logs, background jobs, caches, and failure diagnostics;
 - light, dark, and system themes;
 - optional translation with provider and ignore-rule controls;
-- optional PyPI update detection, with automatic checks enabled by default and manual checks always available;
+- optional PyPI update detection: the About page's automatic check interval sets the lifetime of cached PyPI latest-version information, defaulting to 86,400 seconds (24 hours). After that time has elapsed since the last successful check, the next login or refresh queries PyPI; otherwise it reads the cache. Manual checks always query PyPI. The interval remains editable and can be saved when automatic checks are disabled;
 - keyword and fuzzy tool search, with optional OpenAI-compatible embeddings;
 - SQLite by default and optional MySQL;
 - independent threshold-based startup compaction and manual space reclamation for file-backed SQLite databases, without expiring valid data ([storage maintenance](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/database-deployment.md#数据库空间治理)).

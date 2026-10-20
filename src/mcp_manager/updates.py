@@ -5,12 +5,12 @@ from datetime import UTC, datetime, timedelta
 import httpx
 
 from .about import VERSION
-from .database import SystemSetting
+from .database import SystemSetting, get_setting
 
 PYPI_JSON_URL = "https://pypi.org/pypi/mcp-manager-gateway/json"
 PYPI_PROJECT_URL = "https://pypi.org/project/mcp-manager-gateway/"
 RELEASES_URL = "https://github.com/eraycc/mcp-manager-gateway/releases"
-AUTO_CHECK_INTERVAL = timedelta(days=7)
+DEFAULT_AUTO_CHECK_INTERVAL_SECONDS = 86400
 
 
 def _version_key(value):
@@ -42,12 +42,12 @@ async def fetch_latest_release():
     return {"version": version, "pypi_url": PYPI_PROJECT_URL, "releases_url": RELEASES_URL}
 
 
-def _checked_recently(state, now):
+def _checked_recently(state, now, interval_seconds):
     try:
         checked = datetime.fromisoformat(state.get("checked_at", ""))
         if checked.tzinfo is None:
             checked = checked.replace(tzinfo=UTC)
-        return now - checked <= AUTO_CHECK_INTERVAL
+        return now - checked <= timedelta(seconds=interval_seconds)
     except (TypeError, ValueError):
         return False
 
@@ -95,9 +95,10 @@ async def update_status(db, user_id, *, force=False):
     state = await read_update_state(db, user_id)
     current = public_update_state(state)
     now = datetime.now(UTC)
-    local_version_changed = state.get("current_version") != VERSION
-    if not force and not local_version_changed and _checked_recently(state, now):
-        return current
+    if not force:
+        interval = await get_setting(db, "update_check_interval_seconds", DEFAULT_AUTO_CHECK_INTERVAL_SECONDS)
+        if _checked_recently(state, now, interval):
+            return current
     try:
         release = await fetch_latest_release()
     except (httpx.HTTPError, RuntimeError, ValueError) as exc:
@@ -107,7 +108,7 @@ async def update_status(db, user_id, *, force=False):
         "latest_version": release["version"],
         "pypi_url": release["pypi_url"],
         "releases_url": release["releases_url"],
-        "checked_at": now.isoformat(),
+        "checked_at": datetime.now(UTC).isoformat(),
     })
     await write_update_state(db, user_id, state)
     return public_update_state(state)

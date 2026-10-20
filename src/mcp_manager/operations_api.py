@@ -14,7 +14,7 @@ from .catalog import web_authorizer
 from .database import ApiToken, SystemSetting, get_setting, invalidate_setting_cache
 from .identity import admin_user, current_user, effective_mcp_ids
 from .translation import DEFAULT_TRANSLATION_CONFIG, normalize_translation_config
-from .updates import cached_update_status, ignore_update, update_status
+from .updates import DEFAULT_AUTO_CHECK_INTERVAL_SECONDS, cached_update_status, ignore_update, update_status
 
 router = APIRouter(prefix="/api/v1")
 USER = Depends(current_user)
@@ -25,7 +25,8 @@ DEFAULTS = {"title": "MCP Manager", "registration_enabled": True, "jwt_days": 30
             "bridge_heartbeat_seconds": 90, "bridge_missed_heartbeats": 3,
             "startup_failure_threshold": 3, "timezone": "Asia/Shanghai",
             "log_retention_days": 0, "cors_origins": ["*"], "allowed_hosts": ["*"],
-            "update_auto_check": True, "translation_config": DEFAULT_TRANSLATION_CONFIG}
+            "update_auto_check": True, "update_check_interval_seconds": DEFAULT_AUTO_CHECK_INTERVAL_SECONDS,
+            "translation_config": DEFAULT_TRANSLATION_CONFIG}
 FILTERS = {"q", "username", "user_id", "token_id", "mcp_id", "tool_name", "status", "source",
            "from_time", "to_time"}
 
@@ -288,6 +289,9 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
     for key in ("jwt_days", "idle_seconds", "log_retention_days"):
         if not isinstance(result[key], (int, float)) or isinstance(result[key], bool) or result[key] < 0:
             raise HTTPException(422, key + " must be nonnegative")
+    update_interval = result["update_check_interval_seconds"]
+    if type(update_interval) is not int or not 1 <= update_interval <= 2**31 - 1:
+        raise HTTPException(422, "update_check_interval_seconds must be an integer from 1 to 2147483647")
     connection_ttl = result["connection_ttl_seconds"]
     if type(connection_ttl) is not int or not 0 <= connection_ttl <= 2**31 - 1:
         raise HTTPException(422, "connection_ttl_seconds must be an integer from 0 to 2147483647")

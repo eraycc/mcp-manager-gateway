@@ -7,14 +7,19 @@ import pytest
 from mcp_manager.app import create_app
 from mcp_manager.config import Settings
 from mcp_manager.translation import DEFAULT_TRANSLATION_CONFIG, normalize_translation_config
-from mcp_manager.updates import AUTO_CHECK_INTERVAL, is_newer, read_update_state, write_update_state
+from mcp_manager.updates import (
+    DEFAULT_AUTO_CHECK_INTERVAL_SECONDS,
+    is_newer,
+    read_update_state,
+    write_update_state,
+)
 
 
 def test_version_comparison_and_translation_normalization():
     assert is_newer("1.0.11", "1.0.10")
     assert not is_newer("1.0.10", "1.0.10")
     assert not is_newer("1.0.9", "1.0.10")
-    assert AUTO_CHECK_INTERVAL == timedelta(days=7)
+    assert DEFAULT_AUTO_CHECK_INTERVAL_SECONDS == 86400
     config = normalize_translation_config({
         "enabled": True,
         "local_language": "chinese_simplified",
@@ -113,7 +118,11 @@ async def test_update_state_is_cached_ignored_and_force_refreshed(tmp_path, monk
 
         monkeypatch.setattr("mcp_manager.updates.VERSION", "10.1.0")
         after_local_upgrade = (await web.get("/api/v1/update-status")).json()
-        assert after_local_upgrade["latest_version"] == "10.2.0"
+        assert after_local_upgrade["latest_version"] == "10.1.0"
+        assert after_local_upgrade["update_available"] is False
+        assert len(calls) == 3
+        forced_after_upgrade = (await web.post("/api/v1/update-status/check")).json()
+        assert forced_after_upgrade["latest_version"] == "10.2.0"
         assert len(calls) == 4
 
 
