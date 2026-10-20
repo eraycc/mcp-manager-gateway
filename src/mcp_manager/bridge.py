@@ -40,22 +40,24 @@ class BridgeUpstream:
             await self.queue.put(None)
         await asyncio.gather(self.task, return_exceptions=True)
 
-    async def heartbeat(self, http, lease_id, seconds, missed_heartbeats=3):
+    async def heartbeat(self, http, lease_id, seconds, missed_heartbeats=3, detection_enabled=True):
         failures = 0
         while True:
-            await asyncio.sleep(seconds)
+            # Zero disables detection, but renewal/configuration sync must continue.
+            await asyncio.sleep(seconds if seconds > 0 else 90)
             try:
                 response = await http.post("/gateway/v1/leases/" + lease_id + "/heartbeat")
                 response.raise_for_status()
                 settings = response.json() if response.content else {}
                 seconds = settings.get("heartbeat_seconds", seconds)
+                detection_enabled = settings.get("heartbeat_detection_enabled", detection_enabled)
                 missed_heartbeats = settings.get("missed_heartbeats", missed_heartbeats)
                 failures = 0
             except httpx.HTTPError:
                 # Keep retrying heartbeats; the next business request gets a fresh
                 # lease and MCP connection. Never replay a request already sent.
                 failures += 1
-                if failures >= missed_heartbeats:
+                if detection_enabled and failures >= missed_heartbeats:
                     self.stale = True
 
     @contextlib.asynccontextmanager
@@ -71,7 +73,8 @@ class BridgeUpstream:
                 headers["X-MCP-Manager-Client"] = lease["client_secret"]
                 lease_http.headers["X-MCP-Manager-Client"] = lease["client_secret"]
             task = asyncio.create_task(self.heartbeat(
-                lease_http, lease_id, lease.get("heartbeat_seconds", 90), lease.get("missed_heartbeats", 3)))
+                lease_http, lease_id, lease.get("heartbeat_seconds", 90), lease.get("missed_heartbeats", 3),
+                detection_enabled=lease.get("heartbeat_detection_enabled", True)))
             try:
                 async with (
                     httpx2.AsyncClient(

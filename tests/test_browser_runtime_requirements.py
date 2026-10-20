@@ -100,6 +100,9 @@ async def test_runtime_setting_distinguishes_session_and_instance_and_persists_z
     heartbeat = page.get_by_label("Bridge 默认心跳间隔（秒）", exact=True)
     missed = page.get_by_label("Bridge 失联判定次数", exact=True)
     await expect(heartbeat).to_have_value("90")
+    await expect(heartbeat).to_have_attribute("min", "0")
+    await expect(page.locator("#settings-hint-bridge_heartbeat_seconds")).to_contain_text("0 表示禁用")
+    await expect(page.locator("#settings-hint-bridge_heartbeat_seconds")).to_contain_text("仍每 90 秒续期")
     await expect(page.locator("#settings-hint-bridge_heartbeat_seconds")).to_contain_text("stdio")
     await expect(page.locator("#settings-hint-bridge_heartbeat_seconds")).to_contain_text("MMG")
     await expect(missed).to_have_value("3")
@@ -115,6 +118,13 @@ async def test_runtime_setting_distinguishes_session_and_instance_and_persists_z
     await expect(page.get_by_label("默认连接有效期（秒）", exact=True)).to_have_value("0")
     await expect(page.get_by_label("Bridge 默认心跳间隔（秒）", exact=True)).to_have_value("60")
     await expect(page.get_by_label("Bridge 失联判定次数", exact=True)).to_have_value("4")
+    await heartbeat.fill("0")
+    async with page.expect_response(lambda r: "/api/v1/settings" in r.url and r.request.method == "PATCH") as pending:
+        await page.get_by_role("button", name="保存设置", exact=True).click()
+    assert (await pending.value).status == 200
+    await page.reload()
+    await expect(heartbeat).to_have_value("0")
+    await expect(page.locator("#settings-hint-bridge_missed_heartbeats")).to_contain_text("大于 0")
 
 
 @pytest.mark.asyncio
@@ -124,7 +134,8 @@ async def test_lease_status_distinguishes_current_and_accumulated_calls(runtime_
         {"id": "quick", "username": "alice", "kind": "retention", "status": "idle",
          "in_flight": 0, "queued_calls": 0, "call_count": 5, "last_call_at": "2026-10-20T00:01:02+00:00",
          "instances": []},
-        {"id": "waiting", "username": "bob", "kind": "retention", "status": "active",
+        {"id": "waiting", "username": "bob", "kind": "bridge", "status": "active",
+         "bridge_heartbeat_seconds": 0, "bridge_disconnect_at": None,
          "in_flight": 0, "queued_calls": 1, "call_count": 0, "last_call_at": None, "instances": []},
     ]
     await page.route("**/api/v1/leases?*", lambda r: r.fulfill(json={
@@ -140,6 +151,7 @@ async def test_lease_status_distinguishes_current_and_accumulated_calls(runtime_
     waiting = page.locator(".lease-activity").last
     await expect(waiting).to_contain_text("等待派发 1")
     await expect(waiting).to_contain_text("尚无下游调用")
+    await expect(page.locator("tbody tr").filter(has_text="bob")).to_contain_text("Bridge 心跳检测已禁用")
     await completed.scroll_into_view_if_needed()
     capture = tmp_path / "lease-call-status.png"
     await expect(page.locator("#toast")).not_to_be_visible()
