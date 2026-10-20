@@ -159,7 +159,7 @@ def owner(user, token, request=None):
 def bridge_heartbeat_policy(runtime):
     # Keep renewal/configuration sync bounded, including for older Bridge clients.
     return {"heartbeat_seconds": runtime.bridge_heartbeat_seconds or 90,
-            "heartbeat_detection_enabled": runtime.bridge_heartbeat_seconds > 0,
+            "heartbeat_detection_enabled": runtime.bridge_missed_heartbeats > 0,
             "missed_heartbeats": runtime.bridge_missed_heartbeats}
 
 
