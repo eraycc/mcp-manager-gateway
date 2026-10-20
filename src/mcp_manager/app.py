@@ -350,8 +350,12 @@ def create_app(config=None):
             state.logs.timezone = ZoneInfo(await get_setting(state.db, "timezone", "Asia/Shanghai"))
             state.runtime.idle_seconds = await get_setting(state.db, "idle_seconds", 86400)
             state.runtime.connection_ttl_seconds = await get_setting(state.db, "connection_ttl_seconds", 43200)
-            state.runtime.bridge_heartbeat_seconds = await get_setting(state.db, "bridge_heartbeat_seconds", 90)
-            state.runtime.bridge_missed_heartbeats = await get_setting(state.db, "bridge_missed_heartbeats", 3)
+            bridge_settings = operations_api.normalize_bridge_settings({
+                "bridge_heartbeat_seconds": await get_setting(state.db, "bridge_heartbeat_seconds", 90),
+                "bridge_missed_heartbeats": await get_setting(state.db, "bridge_missed_heartbeats", 3),
+            })
+            state.runtime.bridge_heartbeat_seconds = bridge_settings["bridge_heartbeat_seconds"]
+            state.runtime.bridge_missed_heartbeats = bridge_settings["bridge_missed_heartbeats"]
             state.catalog.startup_failure_threshold = await get_setting(
                 state.db, "startup_failure_threshold", 3
             )

@@ -253,11 +253,19 @@ async def ignore_update_status(request: Request, user=USER):
     return result
 
 
+def normalize_bridge_settings(values):
+    # Compatibility with the former interval=0 switch. Do not normalize PATCH
+    # input: new zero intervals must fail validation.
+    if type(values.get("bridge_heartbeat_seconds")) is int and values["bridge_heartbeat_seconds"] == 0:
+        return values | {"bridge_heartbeat_seconds": 90, "bridge_missed_heartbeats": 0}
+    return values
+
+
 @router.get("/settings")
 async def settings(request: Request, user=ADMIN):
     async with request.app.state.db.session() as s:
         rows = (await s.scalars(select(SystemSetting).where(SystemSetting.key.in_(list(DEFAULTS))))).all()
-    return DEFAULTS | {r.key: r.value for r in rows}
+    return normalize_bridge_settings(DEFAULTS | {r.key: r.value for r in rows})
 
 
 @router.patch("/settings")
@@ -283,7 +291,7 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
     connection_ttl = result["connection_ttl_seconds"]
     if type(connection_ttl) is not int or not 0 <= connection_ttl <= 2**31 - 1:
         raise HTTPException(422, "connection_ttl_seconds must be an integer from 0 to 2147483647")
-    for key, minimum, maximum in (("bridge_heartbeat_seconds", 0, 86400), ("bridge_missed_heartbeats", 1, 100)):
+    for key, minimum, maximum in (("bridge_heartbeat_seconds", 1, 86400), ("bridge_missed_heartbeats", 0, 100)):
         if type(result[key]) is not int or not minimum <= result[key] <= maximum:
             raise HTTPException(422, key + " must be an integer from " + str(minimum) + " to " + str(maximum))
     threshold = result["startup_failure_threshold"]
@@ -302,6 +310,11 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
     CronTrigger.from_crontab(result["refresh_cron"], timezone=result["timezone"])
     async with request.app.state.db.locked() as s:
         user = await web_authorizer(request)(s)
+        interval = await s.get(SystemSetting, "bridge_heartbeat_seconds")
+        # Normalize only a still-legacy pair, under the write lock. Unrelated
+        # PATCHes must not overwrite concurrent changes to the heartbeat policy.
+        if interval is not None and type(interval.value) is int and interval.value == 0:
+            data = {"bridge_heartbeat_seconds": 90, "bridge_missed_heartbeats": 0} | data
         for key, value in data.items():
             row = await s.get(SystemSetting, key)
             if row:

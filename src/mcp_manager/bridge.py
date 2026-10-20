@@ -43,7 +43,7 @@ class BridgeUpstream:
     async def heartbeat(self, http, lease_id, seconds, missed_heartbeats=3, detection_enabled=True):
         failures = 0
         while True:
-            # Zero disables detection, but renewal/configuration sync must continue.
+            # Retain a bounded renewal interval for legacy or malformed zero packets.
             await asyncio.sleep(seconds if seconds > 0 else 90)
             try:
                 response = await http.post("/gateway/v1/leases/" + lease_id + "/heartbeat")
@@ -57,7 +57,7 @@ class BridgeUpstream:
                 # Keep retrying heartbeats; the next business request gets a fresh
                 # lease and MCP connection. Never replay a request already sent.
                 failures += 1
-                if detection_enabled and failures >= missed_heartbeats:
+                if detection_enabled and missed_heartbeats > 0 and failures >= missed_heartbeats:
                     self.stale = True
 
     @contextlib.asynccontextmanager

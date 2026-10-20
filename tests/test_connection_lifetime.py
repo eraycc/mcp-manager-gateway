@@ -343,7 +343,7 @@ async def test_bridge_heartbeat_settings_are_validated_persisted_and_advertised(
     for key, value in values.items():
         assert (await h.web.get("/api/v1/settings")).json()[key] == value
         assert getattr(h.app.state.runtime, key) == value
-        for bad in (-1, True, 1.5, "10", 2**31) + ((0,) if key == "bridge_missed_heartbeats" else ()):
+        for bad in (-1, True, 1.5, "10", 2**31) + ((0,) if key == "bridge_heartbeat_seconds" else ()):
             assert (await h.web.patch("/api/v1/settings", json={key: bad})).status_code == 422
 
 

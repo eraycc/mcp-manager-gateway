@@ -85,7 +85,7 @@ export async function leases(main,signal,actor){
    ['类型',r=>badge(r.kind)],
    ['状态',r=>el('div',{class:'lease-activity',title:'当前执行数是瞬时值。累计仅统计本租期派发的下游业务调用（含失败尝试），目录搜索与维护刷新不计入；租期释放或网关重启后重置。'},el('div',{class:'lease-activity-summary'},badge(statusLabels[r.status]||r.status),el('span',{class:'subtext'},'累计下游调用 '+(r.call_count||0)+' 次')),el('span',{class:'subtext'},'当前执行 '+(r.in_flight||0)+' · 等待派发 '+(r.queued_calls||0)),el('span',{class:'subtext'},r.last_call_at?'最近调用 '+date(r.last_call_at):'尚无下游调用'))],
    ['心跳时间',r=>el('div',{},date(r.touched_at),el('span',{class:'subtext'},Math.floor(r.idle_seconds||0)+' 秒前'))],
-   ['心跳结束时间',r=>el('div',{},r.expires_in==null?'不过期':date(r.expires_at),r.expires_in!=null?el('span',{class:'subtext'},r.expired?'已到期':Math.ceil(r.expires_in)+' 秒后'):null,r.kind==='bridge'&&r.bridge_disconnect_at?el('span',{class:'subtext'},'Bridge 失联判定：'+date(r.bridge_disconnect_at)+' · 已缺失 '+r.bridge_missed_heartbeats+' 次'):r.kind==='bridge'&&r.bridge_heartbeat_seconds===0?el('span',{class:'subtext'},'Bridge 心跳检测已禁用'):null)],
+   ['心跳结束时间',r=>el('div',{},r.expires_in==null?'不过期':date(r.expires_at),r.expires_in!=null?el('span',{class:'subtext'},r.expired?'已到期':Math.ceil(r.expires_in)+' 秒后'):null,r.kind==='bridge'&&r.bridge_disconnect_at?el('span',{class:'subtext'},'Bridge 失联判定：'+date(r.bridge_disconnect_at)+' · 已缺失 '+r.bridge_missed_heartbeats+' 次'):r.kind==='bridge'&&r.bridge_heartbeat_detection_enabled===false?el('span',{class:'subtext'},'Bridge 失联检测已禁用'):null)],
    ['创建时间',r=>date(r.created_at)]
   ],
   filters:[...(isAdmin?[['user_id','用户',[]]]:[]),['mcp_id','MCP',[]],
