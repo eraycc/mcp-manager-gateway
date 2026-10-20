@@ -156,6 +156,13 @@ def owner(user, token, request=None):
     return "anonymous", secrets.token_urlsafe(24)
 
 
+def bridge_heartbeat_policy(runtime):
+    # Keep renewal/configuration sync bounded, including for older Bridge clients.
+    return {"heartbeat_seconds": runtime.bridge_heartbeat_seconds or 90,
+            "heartbeat_detection_enabled": runtime.bridge_heartbeat_seconds > 0,
+            "missed_heartbeats": runtime.bridge_missed_heartbeats}
+
+
 @router.post("/leases")
 async def create_lease(request: Request):
     user, token, _ = await authenticate_token(request)
@@ -165,8 +172,7 @@ async def create_lease(request: Request):
     runtime = request.app.state.runtime
     lease = runtime.create_lease(*identity, kind="bridge")
     ttl = runtime.lease_timeout(lease)
-    result = {"id": lease.id, "heartbeat_seconds": runtime.bridge_heartbeat_seconds,
-              "missed_heartbeats": runtime.bridge_missed_heartbeats, "expires_in": ttl}
+    result = {"id": lease.id, **bridge_heartbeat_policy(runtime), "expires_in": ttl}
     if client_secret:
         result["client_secret"] = client_secret
     return result
@@ -176,8 +182,7 @@ async def create_lease(request: Request):
 async def heartbeat(lease_id: str, request: Request):
     user, token, _ = await authenticate_token(request)
     request.app.state.runtime.heartbeat(lease_id, *owner(user, token, request))
-    return {"ok": True, "heartbeat_seconds": request.app.state.runtime.bridge_heartbeat_seconds,
-            "missed_heartbeats": request.app.state.runtime.bridge_missed_heartbeats}
+    return {"ok": True, **bridge_heartbeat_policy(request.app.state.runtime)}
 
 
 @router.delete("/leases/{lease_id}")

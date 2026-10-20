@@ -303,12 +303,19 @@ class Runtime:
             return self.connection_ttl_seconds or None
         return lease.ttl
 
+    def bridge_heartbeat_interval(self, lease: Lease):
+        if lease.kind != "bridge" or self.bridge_heartbeat_seconds == 0:
+            return 0
+        # Disabled clients still renew every 90 seconds. On re-enable, keep that
+        # window until they receive the new policy, without exempting dead clients.
+        return lease.heartbeat_seconds or 90
+
     def lease_expired(self, lease: Lease, *, now=None):
         ttl = self.lease_timeout(lease)
         tick = self.clock() if now is None else now
         inactive = ttl is not None and tick - lease.touched >= ttl
-        lost_bridge = (lease.kind == "bridge" and tick - lease.heartbeat_tick
-                       >= lease.heartbeat_seconds * lease.missed_heartbeats)
+        interval = self.bridge_heartbeat_interval(lease)
+        lost_bridge = interval > 0 and tick - lease.heartbeat_tick >= interval * lease.missed_heartbeats
         return not lease.in_flight and not lease.pending and (inactive or lost_bridge)
 
     def check_lease(self, lease_id: str, user_id: str | None = None,
@@ -778,6 +785,7 @@ class Runtime:
             touched_at = lease.created + (lease.touched - lease.created_clock)
             remaining = None if ttl is None else max(0., ttl - idle)
             expired = self.lease_expired(lease, now=now)
+            interval = self.bridge_heartbeat_interval(lease)
             status = ("expired" if expired else "active" if lease.in_flight or lease.pending else
                       "expiring" if remaining is not None and remaining <= 15 else "idle")
             result.append({
@@ -791,13 +799,13 @@ class Runtime:
                 "call_count": lease.call_count,
                 "last_call_at": (None if lease.last_call_tick is None else
                                  lease.created + lease.last_call_tick - lease.created_clock),
-                "bridge_heartbeat_seconds": lease.heartbeat_seconds if lease.kind == "bridge" else None,
+                "bridge_heartbeat_seconds": interval if lease.kind == "bridge" else None,
                 "bridge_missed_heartbeats": (min(lease.missed_heartbeats,
-                    int(max(0, now - lease.heartbeat_tick) // lease.heartbeat_seconds))
-                    if lease.kind == "bridge" else None),
+                    int(max(0, now - lease.heartbeat_tick) // interval))
+                    if interval else None),
                 "bridge_disconnect_at": (lease.created + lease.heartbeat_tick - lease.created_clock
-                    + lease.heartbeat_seconds * lease.missed_heartbeats
-                    if lease.kind == "bridge" else None),
+                    + interval * lease.missed_heartbeats
+                    if interval else None),
                 "instances": bindings.get(lease.id, []),
             })
         return result

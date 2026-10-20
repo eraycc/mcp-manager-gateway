@@ -283,9 +283,9 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
     connection_ttl = result["connection_ttl_seconds"]
     if type(connection_ttl) is not int or not 0 <= connection_ttl <= 2**31 - 1:
         raise HTTPException(422, "connection_ttl_seconds must be an integer from 0 to 2147483647")
-    for key, maximum in (("bridge_heartbeat_seconds", 86400), ("bridge_missed_heartbeats", 100)):
-        if type(result[key]) is not int or not 1 <= result[key] <= maximum:
-            raise HTTPException(422, key + " must be an integer from 1 to " + str(maximum))
+    for key, minimum, maximum in (("bridge_heartbeat_seconds", 0, 86400), ("bridge_missed_heartbeats", 1, 100)):
+        if type(result[key]) is not int or not minimum <= result[key] <= maximum:
+            raise HTTPException(422, key + " must be an integer from " + str(minimum) + " to " + str(maximum))
     threshold = result["startup_failure_threshold"]
     if not isinstance(threshold, int) or isinstance(threshold, bool) or not 1 <= threshold <= 100:
         raise HTTPException(422, "startup_failure_threshold must be an integer from 1 to 100")
