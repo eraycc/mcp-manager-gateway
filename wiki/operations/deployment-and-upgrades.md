@@ -40,7 +40,10 @@ docker compose up -d
 - `/mcp`；
 - `/gateway/v1`；
 - `/api`；
-- Web 控制台静态资源。
+- Web 控制台静态资源；
+- 使用 CIMD 时，公开 `/oauth/client-metadata.json`，并保证浏览器可访问 OAuth 回调。
+
+Nginx 与 `PUBLIC_URL` 的完整示例见 [OAuth 与公网 HTTPS](../guides/oauth.md#公网-https-与-nginx)。
 
 ## 软件包升级
 

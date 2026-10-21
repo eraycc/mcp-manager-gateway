@@ -557,44 +557,53 @@ class Catalog:
     async def spec(self, row, user_id=None):
         if row.mode == "disabled":
             raise GatewayError("disabled", "MCP is disabled; repair configuration or authorization, then enable it")
-        if self.credentials is None:
-            config = self.unseal(row.config)
-        else:
-            config = await self.credentials.materialize(row, user_id)
-        auth = config.get("auth", {})
-        auth_type = auth.get("type", "none")
-        if auth_type == "oauth" and self.oauth is not None:
-            await self.oauth.credentials(row, user_id)
-            config = await self.credentials.materialize(row, user_id)
+
+        def build(config, epoch=None):
             auth = config.get("auth", {})
-        if auth_type == "oauth" and not auth.get("access_token"):
-            raise GatewayError(
-                "auth_required", "Complete OAuth authorization in the Web console"
-            )
-        owner = (
-            credential_owner(row.isolation, user_id)
-            if auth_type in PERSONAL_AUTH_TYPES
-            else ""
-        )
-        scope = (
-            hashlib.sha256(
-                json.dumps(auth, sort_keys=True, ensure_ascii=False).encode()
-            ).hexdigest()[:16]
-            if owner
-            else ""
-        )
-        if owner:
-            self.runtime.credential_versions[(row.id, owner)] = scope
-        return ServerSpec(
-            row.id,
-            row.transport,
-            config,
-            row.mode,
-            row.isolation,
-            row.revision,
-            scope,
-            owner,
-        )
+            owner = credential_owner(row.isolation, user_id) if auth.get("type") in PERSONAL_AUTH_TYPES else ""
+            binding = auth if epoch is None else {"auth": auth, "oauth_epoch": epoch}
+            scope = hashlib.sha256(json.dumps(binding, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16] if owner else ""
+            if owner:
+                self.runtime.credential_versions[(row.id, owner)] = scope
+            return ServerSpec(row.id, row.transport, config, row.mode, row.isolation, row.revision, scope, owner, epoch)
+
+        config = self.unseal(row.config) if self.credentials is None else await self.credentials.materialize(row, user_id)
+        auth = config.get("auth", {})
+        if auth.get("type") == "oauth" and self.oauth is not None:
+            from .oauth import token_from_auth
+
+            value, epoch = await self.oauth.credentials(row, user_id, with_epoch=True)
+            async with self.db.locked() as session:
+                server = await session.get(McpServer, row.id)
+                owner = credential_owner(row.isolation, user_id)
+                payload = await self.credentials.load(row.id, owner, session=session)
+                config = await self.credentials.materialize(row, user_id, session=session)
+                if (not server or server.revision != row.revision
+                        or payload.get("oauth_epoch", 0) != epoch
+                        or payload.get("oauth_state", {}).get("status") == "needs_reauth"
+                        or token_from_auth(config.get("auth", {})) != value):
+                    raise GatewayError("credential_changed", "OAuth authorization changed; retry after reauthorization")
+                from .environment import connection_config
+
+                # Freeze expanded destinations before a queued call can observe changed environment variables.
+                config = connection_config(config)
+                config_payload = await self.credentials.load(row.id, self.oauth.config_owner(row, user_id), session=session)
+                registration = config_payload.get("oauth_registration", {})
+                if registration:
+                    from .oauth_config import callback_uri, registration_fingerprint
+                    from .oauth_discovery import canonical_resource
+
+                    resource = config.get("url", "")
+                    if resource and row.transport in {"streamable-http", "sse"}:
+                        resource = canonical_resource(resource)
+                    fingerprint = registration_fingerprint(
+                        config.get("auth", {}), resource, callback_uri(self.config.public_url))
+                    if registration.get("config_fingerprint") != fingerprint:
+                        raise GatewayError("credential_changed", "OAuth resource changed while preparing the connection")
+                return build(config, epoch)
+        if auth.get("type") == "oauth" and not auth.get("access_token"):
+            raise GatewayError("auth_required", "Complete OAuth authorization in the Web console")
+        return build(config)
 
     @staticmethod
     def validate_metadata(values, partial=False):

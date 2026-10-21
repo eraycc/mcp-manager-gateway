@@ -289,6 +289,12 @@ MMG 支持可选的浏览器端界面翻译：
 
 浏览器翻译可能会把页面文字发送给所配置的翻译服务。包含敏感业务内容的部署应使用经过审核的私有服务，或保持翻译关闭。通道、忽略规则、缓存清理和版本检测说明见[控制台外观、翻译与版本提醒](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/interface-translation-and-updates.md)。
 
+## OAuth 客户端注册
+
+远程 HTTP/SSE OAuth 支持预注册（Client ID 必填、Secret 可选）与自动模式：优先 CIMD；只有授权服务器未声明支持 CIMD 且提供注册端点时，才尝试显式开启的 DCR 回退。进入 OAuth 弹窗后点击“开始授权”或“重新授权”才发起流程；仅打开弹窗不会注册客户端或联系授权服务器。
+
+CIMD 需要稳定的公网 HTTPS `PUBLIC_URL`，可通过 Nginx 反向代理本机 8765 端口实现。MMG 在 `/oauth/client-metadata.json` 发布不含凭据的元数据，管理界面仍可限制访问。Token 过期最多自动刷新一次；刷新失败或下游返回 HTTP 401 后，需用户明确重新授权，不自动重放业务调用。参见 [OAuth 与公网 HTTPS 配置指南](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/oauth.md)。
+
 ## 配置与数据
 
 环境变量优先于用户目录中的 `.env`。源码目录和当前工作目录下的 `.env` 不会被自动读取。完整示例见 [.env.example](https://github.com/eraycc/mcp-manager-gateway/blob/master/.env.example)。

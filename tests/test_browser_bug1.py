@@ -73,7 +73,11 @@ async def test_oauth_profile_only_oauth_and_disconnect(bug1_browser):
         ]})
     await page.route("**/api/v1/mcps/credentials/status-batch", credential_status)
     await page.route("**/api/v1/mcps/oauth/oauth/status", lambda r: r.fulfill(json={"authorized": True, "scope": "user"}))
-    await page.route("**/api/v1/mcps/oauth/oauth/start", lambda r: r.fulfill(json={"authorization_url": "https://example.com/authorize"}))
+    starts = []
+    async def start(route):
+        starts.append(route.request.method)
+        await route.fulfill(json={"authorization_url": "https://example.com/authorize"})
+    await page.route("**/api/v1/mcps/oauth/oauth/start", start)
     disconnected = []
     async def disconnect(route):
         disconnected.append(route.request.method)
@@ -85,7 +89,10 @@ async def test_oauth_profile_only_oauth_and_disconnect(bug1_browser):
     dialog = page.get_by_role("dialog", name="授权服务", exact=True)
     button = dialog.get_by_role("button", name="断开 OAuth 授权", exact=True)
     await expect(button).to_have_class("danger")
+    assert starts == []
+    await dialog.get_by_role("button", name="重新授权", exact=True).click()
     await expect(dialog.get_by_role("link", name="打开授权页面")).to_be_visible()
+    assert starts == ["POST"]
     await button.click()
     await page.get_by_role("button", name="确认执行", exact=True).click()
     await expect(button).to_have_count(0)
@@ -93,12 +100,16 @@ async def test_oauth_profile_only_oauth_and_disconnect(bug1_browser):
     await page.route("**/api/v1/mcps/oauth/oauth/status", lambda r: r.fulfill(json={"authorized": False, "scope": "user"}))
     await page.get_by_role("button", name="授权", exact=True).click()
     await expect(page.get_by_role("button", name="断开 OAuth 授权", exact=True)).to_have_count(0)
+    await expect(page.get_by_role("link", name="打开授权页面")).to_have_count(0)
+    await page.get_by_role("button", name="开始授权", exact=True).click()
     await expect(page.get_by_role("link", name="打开授权页面")).to_be_visible()
     await page.get_by_role("dialog").get_by_role("button", name="关闭", exact=True).click()
     await page.route("**/api/v1/mcps/oauth/oauth/status", lambda r: r.fulfill(json={"authorized": True, "scope": "user"}))
     await page.evaluate("async()=>{const m=await import('/mcps.js');await m.oauthDialog({id:'oauth'},false)}")
     await expect(page.get_by_role("dialog")).to_contain_text("当前登录用户已完成 OAuth 授权")
     await expect(page.get_by_role("button", name="断开 OAuth 授权", exact=True)).to_have_count(1)
+    await expect(page.get_by_role("link", name="打开授权页面")).to_have_count(0)
+    await page.get_by_role("button", name="重新授权", exact=True).click()
     await expect(page.get_by_role("link", name="打开授权页面")).to_have_count(1)
 
 

@@ -27,7 +27,8 @@ OAUTH_TEST_MESSAGE = "OAuth 类型需要在审批通过并授权后验证"
 def validate_proposal_oauth(auth):
     if auth.get("type") != "oauth":
         return
-    for field in ("authorization_url", "token_url", "client_id", "client_secret"):
+    fields = ("client_id",) if auth.get("auth_mode", "manual") == "manual" else ()
+    for field in fields:
         if not isinstance(auth.get(field), str) or not auth[field].strip():
             raise HTTPException(422, "OAuth " + field + " is required")
 

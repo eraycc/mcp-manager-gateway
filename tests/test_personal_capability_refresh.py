@@ -236,7 +236,9 @@ async def test_oauth_refresh_handles_token_renewal_before_publishing(tmp_path, o
                 scope = await app.state.catalog.index_scope(row, reader["id"])
                 summary = (await app.state.catalog.index.get_summaries([scope]))[row.id]
                 assert summary["cache_status"] == "error"
-                assert "OAuth renewal failed" in summary["cache_error"]
+                assert summary["cache_error_code"] == "auth_required"
+                assert "重新授权" in summary["cache_error"]
+                assert "OAuth renewal failed" not in summary["cache_error"]
 
 
 async def test_agent_start_failures_and_scheduled_recovery_are_user_scoped(tmp_path):

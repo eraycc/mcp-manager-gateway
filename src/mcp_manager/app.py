@@ -32,6 +32,7 @@ from .job_store import JobStore
 from .jobs import Jobs
 from .logs import LogStore
 from .oauth import OAuth
+from .oauth import public_router as oauth_public_router
 from .oauth import router as oauth_router
 from .runtime import GatewayError, Lease, Runtime, RuntimeCapacity
 from .storage_maintenance import StorageMaintenance
@@ -331,6 +332,7 @@ def create_app(config=None):
         state.runtime.on_starting = state.catalog.connection_starting
         state.runtime.on_connect = state.catalog.connection_ready
         state.runtime.on_start_failure = state.catalog.start_failed
+        state.runtime.on_auth_failure = state.oauth.mark_reauth_spec
         state.refresh_next = None
         state.retention_next = 0
         state.cache_cleanup_done = False
@@ -430,6 +432,7 @@ def create_app(config=None):
         leases_api.router,
         storage_api.router,
         oauth_router,
+        oauth_public_router,
         embedding_api.router,
         proposals.router,
     ):

@@ -208,6 +208,7 @@ class ServerSpec:
     revision: int = 1
     credential_scope: str = ""
     credential_owner: str = ""
+    credential_epoch: int | None = None
 
 
 @dataclass
@@ -282,6 +283,7 @@ class Runtime:
         self.on_connect = None
         self.on_starting = None
         self.on_start_failure = None
+        self.on_auth_failure = None
         self._closing = False
         self.versions: dict[str, int] = {}
         self.credential_versions: dict[tuple, str | None] = {}
@@ -360,6 +362,10 @@ class Runtime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 -- transport boundary normalizes plugin failures.
+            if (self.on_auth_failure is not None and instance.spec.config.get("auth", {}).get("type") == "oauth"
+                    and oauth_http_401(exc)):
+                await self.on_auth_failure(instance.spec)
+                exc = GatewayError("auth_required", "授权已失效，请重新授权；本次不会自动重放调用")
             code = getattr(
                 exc,
                 "code",
@@ -573,6 +579,9 @@ class Runtime:
                 lease.last_call_tick = self.clock()
             return await asyncio.wait_for(method(*args), timeout)
         except GatewayError as exc:
+            if (dispatched and self.on_auth_failure is not None and spec.config.get("auth", {}).get("type") == "oauth"
+                    and oauth_http_401(exc)):
+                await self.on_auth_failure(spec)
             if (
                 instance is not None
                 and exc.code in {
@@ -588,6 +597,10 @@ class Runtime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if (self.on_auth_failure is not None and spec.config.get("auth", {}).get("type") == "oauth"
+                    and oauth_http_401(exc)):
+                await self.on_auth_failure(spec)
+                raise GatewayError("auth_required", "授权已失效，请重新授权；本次不会自动重放调用") from exc
             if not dispatched:
                 if instance is not None:
                     instance.refs.discard(lease_id)
@@ -847,3 +860,19 @@ class Runtime:
         self.leases.clear()
         await asyncio.gather(*(self._stop_instance(i, force=True)
                                for i in list(self.instances.values())))
+
+
+def oauth_http_401(error):
+    """Find an explicit HTTP 401 through SDK task-group/cause wrappers."""
+    pending, visited = [error], set()
+    while pending:
+        item = pending.pop()
+        if id(item) in visited:
+            continue
+        visited.add(id(item))
+        if (getattr(item, "oauth_http_401", False)
+                or getattr(getattr(item, "response", None), "status_code", None) == 401):
+            return True
+        pending.extend(getattr(item, "exceptions", ()))
+        pending.extend(value for value in (getattr(item, "__cause__", None), getattr(item, "__context__", None)) if value)
+    return False
