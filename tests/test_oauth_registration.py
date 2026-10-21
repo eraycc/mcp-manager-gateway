@@ -1,6 +1,8 @@
 """Explicit authorization chooses pre-registration, CIMD, then opted-in DCR."""
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
+
 
 async def server(h, auth=None):
     return await h.app.state.catalog.create({
@@ -25,10 +27,12 @@ def discovery(monkeypatch, *, cimd):
     return calls
 
 
-async def test_cimd_is_preferred_and_public_metadata_has_no_credentials(db_app, monkeypatch):
+@pytest.mark.parametrize("callback_path", ["/api/v1/oauth/callback", "/callback"])
+async def test_cimd_is_preferred_and_public_metadata_has_no_credentials(db_app, monkeypatch, callback_path):
     calls = discovery(monkeypatch, cimd=True)
     db_app.app.state.config.public_url = "https://gateway.example.com"
-    row = await server(db_app)
+    row = await server(db_app, {"type": "oauth", "auth_mode": "auto", "allow_dcr": True,
+                               "client_name": "Codex", "callback_path": callback_path})
     response = await db_app.web.post(f"/api/v1/mcps/{row.id}/oauth/start")
     assert response.status_code == 200, response.text
     params = parse_qs(urlsplit(response.json()["authorization_url"]).query)
@@ -38,14 +42,17 @@ async def test_cimd_is_preferred_and_public_metadata_has_no_credentials(db_app, 
     document = await db_app.web.get("/oauth/client-metadata.json")
     assert document.status_code == 200
     assert document.json()["client_id"] == params["client_id"][0]
+    assert params["redirect_uri"] == ["https://gateway.example.com" + callback_path]
+    assert params["redirect_uri"][0] in document.json()["redirect_uris"]
     assert document.headers["cache-control"].startswith("public")
     assert "client_secret" not in document.text and "access_token" not in document.text
 
     async def exchange(auth, data):
         assert data["resource"] == "https://mcp.test/mcp"
+        assert data["redirect_uri"] == "https://gateway.example.com" + callback_path
         return {"access_token": "cimd-access", "expires_at": None}
     monkeypatch.setattr(db_app.app.state.oauth, "exchange", exchange)
-    callback = await db_app.web.get("/api/v1/oauth/callback", params={
+    callback = await db_app.web.get(callback_path, params={
         "state": params["state"][0], "code": "code", "iss": "https://auth.test"})
     assert callback.status_code == 303, callback.text
     status = (await db_app.web.get(f"/api/v1/mcps/{row.id}/oauth/status")).json()

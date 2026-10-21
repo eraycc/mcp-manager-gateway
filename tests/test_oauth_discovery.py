@@ -61,7 +61,8 @@ async def test_cimd_metadata_is_public_information_and_requires_https_public_url
 
     document = client_metadata("https://gateway.example.com")
     assert document["client_id"] == "https://gateway.example.com/oauth/client-metadata.json"
-    assert document["redirect_uris"] == ["https://gateway.example.com/api/v1/oauth/callback"]
+    assert document["redirect_uris"] == ["https://gateway.example.com/api/v1/oauth/callback",
+                                         "https://gateway.example.com/callback"]
     assert not any("secret" in key or "token" in key and key != "token_endpoint_auth_method" for key in document)
     for url in ("http://127.0.0.1:8765", "https://localhost", "https://192.168.1.2"):
         with pytest.raises(GatewayError):

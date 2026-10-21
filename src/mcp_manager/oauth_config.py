@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 from .runtime import GatewayError
 
 CLIENT_METADATA_PATH = "/oauth/client-metadata.json"
+DEFAULT_CALLBACK_PATH = "/api/v1/oauth/callback"
+CALLBACK_PATHS = (DEFAULT_CALLBACK_PATH, "/callback")
 TOKEN_FIELDS = {"access_token", "refresh_token", "expires_at", "expires_in", "granted_scope", "id_token", "token_type"}
 
 
@@ -41,18 +43,20 @@ def oauth_url(value, *, public=False):
     return parsed
 
 
-def callback_uri(public_url, auth=None, resource=""):
-    """Keep existing callbacks except Figma's restricted local DCR path."""
-    parsed = urlsplit(public_url)
-    loopback = parsed.hostname == "localhost"
+def callback_path(auth):
+    path = auth.get("callback_path", DEFAULT_CALLBACK_PATH)
+    if not isinstance(path, str) or path not in CALLBACK_PATHS:
+        raise ValueError("OAuth callback_path must be /api/v1/oauth/callback or /callback")
+    return path
+
+
+def callback_uri(public_url, auth=None):
+    """Build a same-origin callback using the explicitly configured handler path."""
     try:
-        loopback = loopback or ipaddress.ip_address(parsed.hostname or "").is_loopback
-    except ValueError:
-        pass
-    compatible = (resource == "https://mcp.figma.com/mcp"
-                  and (auth or {}).get("auth_mode") in {"auto", "dcr"}
-                  and parsed.scheme == "http" and loopback)
-    return public_url.rstrip("/") + ("/callback" if compatible else "/api/v1/oauth/callback")
+        path = callback_path(auth or {})
+    except ValueError as exc:
+        raise GatewayError("oauth_configuration_required", str(exc)) from None
+    return public_url.rstrip("/") + path
 
 
 def client_metadata(public_url):
@@ -64,7 +68,8 @@ def client_metadata(public_url):
         raise GatewayError("oauth_configuration_required", str(exc)) from None
     identity = public_url.rstrip("/") + CLIENT_METADATA_PATH
     return {"client_id": identity, "client_name": "MCP Manager Gateway",
-            "redirect_uris": [callback_uri(public_url)], "grant_types": ["authorization_code"],
+            "redirect_uris": [callback_uri(public_url, {"callback_path": path}) for path in CALLBACK_PATHS],
+            "grant_types": ["authorization_code"],
             "response_types": ["code"], "token_endpoint_auth_method": "none"}
 
 
@@ -84,6 +89,7 @@ def registration_fingerprint(auth, resource, redirect_uri):
 
 
 def validate_oauth(auth, transport):
+    callback_path(auth)
     mode = auth.get("auth_mode")
     if mode is None:
         # Preserve historical token-only / manually configured OAuth records.
@@ -134,6 +140,8 @@ def validate_oauth(auth, transport):
 def comparable_settings(auth):
     """Treat explicit defaults as equivalent to legacy pre-registration settings."""
     value = {key: item for key, item in auth.items() if key not in TOKEN_FIELDS and key != "config_isolation"}
+    if value.get("callback_path") == DEFAULT_CALLBACK_PATH:
+        value.pop("callback_path")
     value.setdefault("auth_mode", "manual")
     if value["auth_mode"] == "dcr":
         value["auth_mode"], value["allow_dcr"] = "auto", True

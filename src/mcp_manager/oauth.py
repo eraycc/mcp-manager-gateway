@@ -236,7 +236,7 @@ class OAuth:
         payload = await self.credential_store.load(row.id, self.config_owner(row, user_id))
         registration = payload.get("oauth_registration", {})
         resource = self.resource(row)
-        fingerprint = registration_fingerprint(auth, resource, callback_uri(self.catalog.config.public_url, auth, resource))
+        fingerprint = registration_fingerprint(auth, resource, callback_uri(self.catalog.config.public_url, auth))
         if registration.get("config_fingerprint") == fingerprint:
             from .oauth_discovery import auth_method
 
@@ -255,7 +255,7 @@ class OAuth:
         token_owner = credential_owner(row.isolation, user_id)
         lock = "registration:" + self.credential_store.key(row.id, config_owner)
         resource = self.resource(row)
-        redirect_uri = callback_uri(self.catalog.config.public_url, auth, resource)
+        redirect_uri = callback_uri(self.catalog.config.public_url, auth)
         fingerprint = registration_fingerprint(auth, resource, redirect_uri)
         async with self.locks.setdefault(lock, asyncio.Lock()):
             payload = await self.credential_store.load(row.id, config_owner)
@@ -509,7 +509,7 @@ async def start(server_id: str, request: Request, user=USER):
         verifier = secrets.token_urlsafe(48)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
         nonce = secrets.token_urlsafe(32)
-        callback_url = callback_uri(app.config.public_url, auth, app.oauth.resource(row))
+        callback_url = callback_uri(app.config.public_url, auth)
         app.oauth.pending = {key: value for key, value in app.oauth.pending.items() if value["expires"] > time.time()}
         app.oauth.pending[nonce] = {
             "server_id": server_id, "user_id": user.id, "session_id": request.state.session_id,
@@ -568,7 +568,7 @@ async def callback(
         payload = await app.credentials.load(row.id, owner, session=session)
         if (configuration_fingerprint(auth) != pending["fingerprint"] or payload.get("oauth_epoch", 0) != pending["epoch"]
                 or (pending["auth"].get("resource") or "") != app.oauth.resource(row)
-                or pending["redirect_uri"] != callback_uri(app.config.public_url, auth, app.oauth.resource(row))):
+                or pending["redirect_uri"] != callback_uri(app.config.public_url, auth)):
             raise HTTPException(
                 409, "OAuth configuration changed; restart authorization"
             )
@@ -597,7 +597,7 @@ async def callback(
             or pending["session_id"] != request.state.session_id
             or configuration_fingerprint(auth) != pending["fingerprint"]
             or (pending["auth"].get("resource") or "") != app.oauth.resource(row)
-            or pending["redirect_uri"] != callback_uri(app.config.public_url, auth, app.oauth.resource(row))
+            or pending["redirect_uri"] != callback_uri(app.config.public_url, auth)
         ):
             raise HTTPException(403, "OAuth state is invalid or expired")
         owner = await app.credentials.save_oauth_token(

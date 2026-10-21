@@ -14,7 +14,7 @@ MMG 作为 OAuth 客户端访问下游 MCP；这与 Agent 登录 MMG 所使用�
 
 DCR 是可选兼容机制，默认关闭。服务器已声明 CIMD 时，即使 MMG 的公网地址未配置好，也会提示修复 PUBLIC_URL，不降级到 DCR。客户端名称仅影响 DCR 注册请求的显示名称；填写 Codex 不会取得官方 Codex 客户端的身份或特权。
 
-切换模式会清除不适用的 Client ID/Secret 和客户端名称，保留用户选择的 Token 端点认证方式。新增、编辑、审批与个人独享配置均可设置以下选项：
+切换模式会清除不适用的 Client ID/Secret 和客户端名称，保留用户选择的 Token 端点认证方式和回调路径。新增、编辑、审批与个人独享配置均可设置以下选项：
 
 | Token 端点认证方式 | 预注册 | 自动注册 |
 | --- | --- | --- |
@@ -29,7 +29,11 @@ DCR 返回的 Client ID、Secret、认证方式和可选 Secret 有效期按配�
 
 Figma 的限定兼容：当发现的 issuer、资源、注册端点和 Token 端点均为其已知官方地址，且已协商 Secret 认证、注册响应却声明 none 并返回 Secret 时，MMG 按请求的 Secret 认证方式处理。其他服务器的矛盾响应不套用此规则。Figma 场景可以选择 client_secret_post；名称、端点、回调、权限及用户授权仍须由服务器接受，实际联调成功才代表可用。
 
-Figma 的本地回调：使用 HTTP 回环地址（localhost、127.0.0.1 或 ::1）访问 MMG 时，Figma 自动注册改用同源、同端口的 `/callback`，例如 `http://127.0.0.1:8765/callback`。Figma 可能拒绝 `/api/v1/oauth/callback` 并返回 `invalid_redirect_uri`；手动填写授权、Token、注册或 Issuer URL 不会改变这个回调地址。其他 MCP、预注册客户端及公网 HTTPS 的回调路径保持原有规则。
+OAuth 回调路径可在服务编辑、提议审批和个人凭据配置中选择，配置字段为 `auth.callback_path`。默认 `/api/v1/oauth/callback`，可选 `/callback`；MMG 使用 `PUBLIC_URL + 所选路径` 生成完整回调地址，预注册、CIMD 和 DCR 均遵循此设置，不再按服务 URL 自动切换。
+
+OAuth 回调路径。大多数服务使用默认的 `/api/v1/oauth/callback`；Figma 等部分远程 MCP 服务要求使用 `/callback`，若授权时提示 `invalid_redirect_uri`，请切换到 `/callback` 重试。
+
+更改路径会清除对应配置作用域内的旧注册信息和 Token，并作废待处理授权；保存后重新开始授权。共享配置变更会影响共享此配置的用户，个人配置只影响本人。预注册客户端还须同步更新服务端登记的回调地址。仅接受上述两个已实现的路径，不接受完整外部 URL、任意路径、查询参数或片段。未配置与显式选择默认路径等价。
 
 `/callback` 与原回调共用登录用户、会话、state、PKCE、issuer、资源及授权代次校验；使用与 PUBLIC_URL 相同的主机名登录，避免切换 localhost 与 127.0.0.1 导致会话丢失。注册、授权链接、交换授权码和缓存绑定使用同一回调地址，不在失败后悄悄更换地址重试。
 
@@ -90,7 +94,7 @@ server {
 
     location / {
         # 如需限制管理访问，在此加入 VPN / 来源限制；
-        # 保证授权用户浏览器可访问 /api/v1/oauth/callback。
+        # 保证授权用户浏览器可访问 /api/v1/oauth/callback 和 /callback。
         proxy_pass http://127.0.0.1:8765;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -110,6 +114,6 @@ server {
 https://mmg.example.com/oauth/client-metadata.json
 ~~~
 
-返回 JSON 中 client_id 必须与上述 URL 完全一致，redirect_uris 应包含 https://mmg.example.com/api/v1/oauth/callback。文档只包含公开客户端元数据，不包含 Client Secret、用户 Token 或 MMG 管理凭据。PUBLIC_URL 无法从外网访问、证书不被信任、或下游授权服务器不支持 CIMD 时，仍应选择预注册或符合条件的 DCR。
+返回 JSON 中 client_id 必须与上述 URL 完全一致，redirect_uris 同时声明 https://mmg.example.com/api/v1/oauth/callback 和 https://mmg.example.com/callback，使授权服务器可校验所选路径。文档只包含公开客户端元数据，不包含 Client Secret、用户 Token 或 MMG 管理凭据。PUBLIC_URL 无法从外网访问、证书不被信任、或下游授权服务器不支持 CIMD 时，仍应选择预注册或符合条件的 DCR。
 
 协议依据：[MCP 授权规范](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)、[客户端注册](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/client-registration)、[RFC 7591](https://www.rfc-editor.org/rfc/rfc7591.html)。
