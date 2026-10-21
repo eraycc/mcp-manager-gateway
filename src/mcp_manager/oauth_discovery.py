@@ -198,23 +198,72 @@ def auth_method(auth, metadata):
     supported = metadata.get("token_endpoint_auth_methods_supported")
     if method is None:
         method = ("client_secret_basic" if supported and "client_secret_basic" in supported else "client_secret_post") if auth.get("client_secret") else "none"
+    if not isinstance(method, str) or method not in {"none", "client_secret_basic", "client_secret_post"}:
+        raise GatewayError("oauth_configuration_required", "Unsupported token authentication method")
     if supported is not None and method not in supported:
         raise GatewayError("oauth_configuration_required", "OAuth server does not support the configured token authentication method")
+    if method != "none":
+        import time
+
+        secret = auth.get("client_secret")
+        expiry = auth.get("client_secret_expires_at", 0)
+        if not isinstance(secret, str) or not secret.strip():
+            raise GatewayError("oauth_configuration_required", "注册未返回有效的 Client Secret，无法使用所选 Token 认证方式；请重新授权或使用预注册")
+        if type(expiry) is not int or expiry < 0 or expiry and expiry <= time.time():
+            raise GatewayError("oauth_configuration_required", "注册的 Client Secret 已过期或有效期无效，请重新授权")
+    elif auth.get("client_secret"):
+        raise GatewayError("oauth_configuration_required", "none authentication cannot send a Client Secret")
     return method
+
+
+def registration_method(auth, metadata):
+    """Choose the requested DCR method before a generated secret exists."""
+    supported = metadata.get("token_endpoint_auth_methods_supported")
+    chosen = auth.get("token_endpoint_auth_method")
+    if chosen is None:
+        chosen = next((method for method in ("none", "client_secret_post", "client_secret_basic")
+                       if supported is None or method in supported), None)
+    if not isinstance(chosen, str) or chosen not in {"none", "client_secret_basic", "client_secret_post"} or supported is not None and chosen not in supported:
+        raise GatewayError("oauth_configuration_required", "OAuth server does not support the configured token authentication method")
+    return chosen
+
+
+def figma_registration(context):
+    """Narrow compatibility for Figma's contradictory public registration response."""
+    return (context.get("issuer_url") == "https://api.figma.com"
+            and context.get("resource") == "https://mcp.figma.com/mcp"
+            and context.get("registration_url") == "https://api.figma.com/v1/oauth/mcp/register"
+            and context.get("token_url") == "https://api.figma.com/v1/oauth/token")
 
 
 async def register(context, client_name, redirect_uri):
     from .oauth_config import local_host
 
+    requested = context.get("token_endpoint_auth_method", "none")
     body = {"client_name": client_name, "redirect_uris": [redirect_uri],
-            "grant_types": ["authorization_code"], "response_types": ["code"],
-            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+            "token_endpoint_auth_method": requested,
             "application_type": "native" if local_host(urlsplit(redirect_uri).hostname or "") else "web"}
     async with http_client() as client:
         value = await json_request(client, context["registration_url"], context["resource"], data=body)
     identity = value.get("client_id")
     if not isinstance(identity, str) or not identity.strip() or len(identity) > 4096:
         raise GatewayError("oauth_registration_failed", "DCR response contains no valid Client ID")
-    if value.get("token_endpoint_auth_method", "none") != "none":
-        raise GatewayError("oauth_registration_failed", "DCR server did not accept public-client authentication")
-    return identity
+    method = value.get("token_endpoint_auth_method", requested)
+    if not isinstance(method, str) or method not in {"none", "client_secret_basic", "client_secret_post"}:
+        raise GatewayError("oauth_registration_failed", "DCR response contains an unsupported token authentication method")
+    if (method == "none" and requested != "none" and value.get("client_secret")
+            and figma_registration(context)):
+        method = requested
+    if context.get("token_auth_method_explicit") and method != requested:
+        raise GatewayError("oauth_registration_failed", "服务器返回的 Token 认证方式与所选方式不一致，请调整配置后重新授权")
+    result = {"client_id": identity, "token_endpoint_auth_method": method}
+    if method != "none":
+        result["client_secret"] = value.get("client_secret")
+        if "client_secret_expires_at" in value:
+            result["client_secret_expires_at"] = value["client_secret_expires_at"]
+    try:
+        auth_method(result, context)
+    except GatewayError as exc:
+        raise GatewayError("oauth_registration_failed", str(exc)) from None
+    return result

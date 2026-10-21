@@ -19,7 +19,7 @@ def discovery(monkeypatch, *, cimd):
                 "resource": resource, "cimd_supported": cimd, "scopes": ["read"], "iss_required": True}
     async def register(context, name, redirect):
         calls.append((name, redirect))
-        return "registered-client"
+        return {"client_id": "registered-client", "token_endpoint_auth_method": context.get("token_endpoint_auth_method", "none")}
     monkeypatch.setattr(oauth_discovery, "discover", discover)
     monkeypatch.setattr(oauth_discovery, "register", register)
     return calls
