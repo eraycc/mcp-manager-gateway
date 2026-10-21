@@ -12,7 +12,7 @@ export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=tru
   [['pre_registration','预注册（手动 Client ID / Secret）'],...(allowAutomatic?[
    ['prefer_cimd_fallback_dcr','自动（优先 CIMD，失败回退 DCR）'],
    ['cimd_only','自动（仅 CIMD）'],['dcr_only','自动（仅 DCR）']]:[])]);
- const modeHelp=el('div',{class:'stack muted span2'},
+ const modeHelp=el('div',{class:'stack muted span2',style:'gap:0'},
   ...[
    '预注册：手动填写已在目标服务注册的 Client ID / Secret，不发起自动注册。',
    'CIMD：客户端元数据文档，用一个 HTTPS URL 作为客户端标识。MMG 使用托管的 /oauth/client-metadata.json，需要稳定、可公开访问的 HTTPS PUBLIC_URL，可在启动时通过环境变量设置。',
