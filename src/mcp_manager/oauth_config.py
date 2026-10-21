@@ -41,8 +41,18 @@ def oauth_url(value, *, public=False):
     return parsed
 
 
-def callback_uri(public_url):
-    return public_url.rstrip("/") + "/api/v1/oauth/callback"
+def callback_uri(public_url, auth=None, resource=""):
+    """Keep existing callbacks except Figma's restricted local DCR path."""
+    parsed = urlsplit(public_url)
+    loopback = parsed.hostname == "localhost"
+    try:
+        loopback = loopback or ipaddress.ip_address(parsed.hostname or "").is_loopback
+    except ValueError:
+        pass
+    compatible = (resource == "https://mcp.figma.com/mcp"
+                  and (auth or {}).get("auth_mode") in {"auto", "dcr"}
+                  and parsed.scheme == "http" and loopback)
+    return public_url.rstrip("/") + ("/callback" if compatible else "/api/v1/oauth/callback")
 
 
 def client_metadata(public_url):

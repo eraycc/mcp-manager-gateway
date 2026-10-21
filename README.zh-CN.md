@@ -295,7 +295,7 @@ MMG 支持可选的浏览器端界面翻译：
 
 CIMD 需要稳定的公网 HTTPS `PUBLIC_URL`，可通过 Nginx 反向代理本机 8765 端口实现。MMG 在 `/oauth/client-metadata.json` 发布不含凭据的元数据，管理界面仍可限制访问。Token 过期最多自动刷新一次；刷新失败或下游返回 HTTP 401 后，需用户明确重新授权，不自动重放业务调用。参见 [OAuth 与公网 HTTPS 配置指南](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/oauth.md)。
 
-两种注册模式均可设置 Token 端点认证方式：自动选择、none、client_secret_basic 或 client_secret_post。自动 DCR 按服务器能力协商，并加密保存注册返回的 Secret，供交换和刷新使用。CIMD 当前使用 none；显式选择不兼容的认证方式时会明确提示。Figma 已知注册响应的限定兼容行为见上述 OAuth 指南。
+两种注册模式均可设置 Token 端点认证方式：自动选择、none、client_secret_basic 或 client_secret_post。自动 DCR 按服务器能力协商，并加密保存注册返回的 Secret，供交换和刷新使用。CIMD 当前使用 none；显式选择不兼容的认证方式时会明确提示。Figma 已知注册响应的限定兼容行为见上述 OAuth 指南。本地 Figma 自动注册使用同源 `/callback`；其他服务及预注册客户端保持 `/api/v1/oauth/callback`。DCR 失败会显示已知服务端错误码，不回显响应正文或密钥。
 
 ## 配置与数据
 

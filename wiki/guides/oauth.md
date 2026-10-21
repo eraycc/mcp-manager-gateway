@@ -29,6 +29,12 @@ DCR 返回的 Client ID、Secret、认证方式和可选 Secret 有效期按配�
 
 Figma 的限定兼容：当发现的 issuer、资源、注册端点和 Token 端点均为其已知官方地址，且已协商 Secret 认证、注册响应却声明 none 并返回 Secret 时，MMG 按请求的 Secret 认证方式处理。其他服务器的矛盾响应不套用此规则。Figma 场景可以选择 client_secret_post；名称、端点、回调、权限及用户授权仍须由服务器接受，实际联调成功才代表可用。
 
+Figma 的本地回调：使用 HTTP 回环地址（localhost、127.0.0.1 或 ::1）访问 MMG 时，Figma 自动注册改用同源、同端口的 `/callback`，例如 `http://127.0.0.1:8765/callback`。Figma 可能拒绝 `/api/v1/oauth/callback` 并返回 `invalid_redirect_uri`；手动填写授权、Token、注册或 Issuer URL 不会改变这个回调地址。其他 MCP、预注册客户端及公网 HTTPS 的回调路径保持原有规则。
+
+`/callback` 与原回调共用登录用户、会话、state、PKCE、issuer、资源及授权代次校验；使用与 PUBLIC_URL 相同的主机名登录，避免切换 localhost 与 127.0.0.1 导致会话丢失。注册、授权链接、交换授权码和缓存绑定使用同一回调地址，不在失败后悄悄更换地址重试。
+
+注册失败时，提示保留 HTTP 状态并仅显示允许的 OAuth 错误码（如 `invalid_redirect_uri`、`invalid_client_metadata`），不回显任意 error_description、响应正文或密钥。Figma 的服务器准入规则仍适用；DCR 成功只代表客户端已注册，仍需在浏览器完成用户授权。
+
 ## 发现、授权与缓存
 
 Scopes 用于指定申请的访问权限，多个值按 OAuth 2.0 标准以空格分隔，例如 `mcp:connect profile:read`；实际值以服务提供方要求为准。`mcp:connect` 是 Figma 等服务的常见值，可自行修改；进入端点自动发现流程时，留空则使用发现的权限信息，不强制给所有 MCP 填入相同值。

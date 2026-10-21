@@ -213,7 +213,7 @@ class CredentialStore:
             # Resource changes clear registration in persist_config; listing never opens service configs.
             resource = registration.get("resource", "")
             registered = registration.get("config_fingerprint") == registration_fingerprint(
-                config, resource, callback_uri(self.catalog.config.public_url))
+                config, resource, callback_uri(self.catalog.config.public_url, config, resource))
             configured_client = (bool(registration.get("auth", {}).get("client_id")) if registered else
                 all(isinstance(config.get(key), str) and config[key]
                     for key in ("authorization_url", "token_url", "client_id")))
