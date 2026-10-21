@@ -73,8 +73,37 @@ def client_metadata(public_url):
             "response_types": ["code"], "token_endpoint_auth_method": "none"}
 
 
+REGISTRATION_MODES = {"pre_registration", "prefer_cimd_fallback_dcr", "cimd_only", "dcr_only"}
+
+
+def registration_policy(auth):
+    """Interpret legacy records without silently enabling DCR for old automatic clients."""
+    mode = auth.get("auth_mode")
+    if mode == "manual":
+        return "pre_registration"
+    if mode == "auto":
+        return "prefer_cimd_fallback_dcr" if auth.get("allow_dcr") is True else "cimd_only"
+    if mode == "dcr":
+        return "dcr_only"
+    if mode is None:
+        # Historical endpoint/token-only OAuth was pre-registered.
+        return "pre_registration"
+    return mode
+
+
+def normalize_registration(auth):
+    """Canonicalize explicit settings on save; keep historical token-only records valid."""
+    value = dict(auth)
+    if value.get("auth_mode") is not None:
+        value["auth_mode"] = registration_policy(value)
+        value.pop("allow_dcr", None)
+        if allows_dcr(value):
+            value.setdefault("client_name", "Codex")
+    return value
+
+
 def allows_dcr(auth):
-    return auth.get("auth_mode") == "dcr" or auth.get("allow_dcr") is True
+    return registration_policy(auth) in {"prefer_cimd_fallback_dcr", "dcr_only"}
 
 
 def configuration_fingerprint(auth):
@@ -88,6 +117,18 @@ def registration_fingerprint(auth, resource, redirect_uri):
     return configuration_fingerprint({"auth": base, "resource": resource, "redirect_uri": redirect_uri})
 
 
+def registration_matches(registration, auth, resource, redirect_uri):
+    """Accept equivalent old DCR bindings while still checking resource and callback."""
+    expected = registration_fingerprint(auth, resource, redirect_uri)
+    if registration.get("config_fingerprint") == expected:
+        return True
+    if registration_policy(auth) == "dcr_only" and registration.get("mode") == "dcr":
+        # Old forced DCR records used the auto+allow_dcr representation in fingerprints.
+        legacy = auth | {"auth_mode": "auto", "allow_dcr": True}
+        return registration.get("config_fingerprint") == registration_fingerprint(legacy, resource, redirect_uri)
+    return False
+
+
 def validate_oauth(auth, transport):
     callback_path(auth)
     mode = auth.get("auth_mode")
@@ -99,13 +140,14 @@ def validate_oauth(auth, transport):
             if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
                 raise ValueError("OAuth " + key + " must be an HTTP(S) URL without credentials")
         return
-    if mode not in {"manual", "auto", "dcr"}:
-        raise ValueError("OAuth auth_mode must be manual or auto")
-    if mode in {"auto", "dcr"} and transport not in {"streamable-http", "http", "sse"}:
+    mode = registration_policy(auth)
+    if not isinstance(mode, str) or mode not in REGISTRATION_MODES:
+        raise ValueError("OAuth auth_mode must be pre_registration, prefer_cimd_fallback_dcr, cimd_only or dcr_only")
+    if mode != "pre_registration" and transport not in {"streamable-http", "http", "sse"}:
         raise ValueError("CIMD/DCR is supported only for remote HTTP/SSE MCP servers")
     if "allow_dcr" in auth and type(auth["allow_dcr"]) is not bool:
         raise ValueError("OAuth allow_dcr must be a boolean")
-    if mode == "manual":
+    if mode == "pre_registration":
         if not isinstance(auth.get("client_id"), str) or not auth["client_id"].strip():
             raise ValueError("OAuth Client ID is required for pre-registration")
         if auth.get("client_name") or auth.get("allow_dcr"):
@@ -113,11 +155,10 @@ def validate_oauth(auth, transport):
     else:
         if auth.get("client_id") or auth.get("client_secret"):
             raise ValueError("OAuth automatic mode cannot contain manual Client ID/Secret")
-        if allows_dcr(auth) and (not isinstance(auth.get("client_name"), str)
-                                or not 1 <= len(auth["client_name"].strip()) <= 128):
+        name = auth.get("client_name", "Codex")
+        if allows_dcr(auth) and (not isinstance(name, str) or not 1 <= len(name.strip()) <= 128):
             raise ValueError("OAuth DCR client_name is required (1..128 characters)")
-        if not allows_dcr(auth) and auth.get("client_name"):
-            raise ValueError("OAuth client_name is only used by DCR")
+        # CIMD-only ignores a retained display name; no client_name is sent in authorization.
     if "client_secret" in auth and not isinstance(auth["client_secret"], str):
         raise ValueError("OAuth Client Secret must be a string")
     method = auth.get("token_endpoint_auth_method")
@@ -125,7 +166,7 @@ def validate_oauth(auth, transport):
         raise ValueError("Unsupported OAuth token_endpoint_auth_method")
     if method == "none" and auth.get("client_secret"):
         raise ValueError("OAuth none authentication cannot send a Client Secret")
-    if mode == "manual" and method in {"client_secret_basic", "client_secret_post"} and not auth.get("client_secret"):
+    if mode == "pre_registration" and method in {"client_secret_basic", "client_secret_post"} and not auth.get("client_secret"):
         raise ValueError("OAuth client_secret authentication requires a Client Secret")
     for key in ("authorization_url", "token_url", "registration_url", "issuer_url"):
         if auth.get(key):
@@ -142,9 +183,17 @@ def comparable_settings(auth):
     value = {key: item for key, item in auth.items() if key not in TOKEN_FIELDS and key != "config_isolation"}
     if value.get("callback_path") == DEFAULT_CALLBACK_PATH:
         value.pop("callback_path")
-    value.setdefault("auth_mode", "manual")
-    if value["auth_mode"] == "dcr":
-        value["auth_mode"], value["allow_dcr"] = "auto", True
+    policy = registration_policy(value)
+    # Retain legacy fingerprint representations for equivalent manual/auto configurations.
+    value["auth_mode"] = {"pre_registration": "manual", "prefer_cimd_fallback_dcr": "auto",
+                          "cimd_only": "auto"}.get(policy, policy)
+    value.pop("allow_dcr", None)
+    if policy == "prefer_cimd_fallback_dcr":
+        value["allow_dcr"] = True
+    if policy in {"prefer_cimd_fallback_dcr", "dcr_only"}:
+        value.setdefault("client_name", "Codex")
+    if policy == "cimd_only":
+        value.pop("client_name", None)
     for key in ("client_secret", "client_name", "issuer_url", "registration_url", "authorization_url", "token_url", "scopes", "allow_dcr"):
         if not value.get(key):
             value.pop(key, None)

@@ -27,24 +27,25 @@ async def test_oauth_mode_clears_hidden_credentials_and_secret_is_optional(runti
     await expect(hint).to_have_text("用于声明申请的权限范围，多个权限用空格分隔（如 read write mcp:connect）。留空时由服务器发现信息自动确定；Figma 等远程 MCP 通常填 mcp:connect。")
     await expect(hint).to_be_visible()
     await expect(hint.locator("br")).to_have_count(1)
-    await expect(mode).to_have_value("manual")
+    await expect(mode).to_have_value("pre_registration")
     await expect(identity).to_have_attribute("required", "")
     assert not await secret.evaluate("(n)=>n.required")
-    await mode.select_option("auto")
+    await mode.select_option("prefer_cimd_fallback_dcr")
     await expect(identity).not_to_be_visible()
     await expect(identity).to_have_value("")
     await expect(secret).to_have_value("")
-    await page.get_by_label("允许 DCR 回退（仅服务器不支持 CIMD 时）", exact=True).check()
+    await expect(page.get_by_role("checkbox")).to_have_count(0)
     await expect(name).to_be_visible()
     await expect(name).to_have_value("Codex")
     automatic = await page.evaluate("oauthForm.value()")
-    assert automatic["allow_dcr"] and automatic["client_name"] == "Codex"
+    assert automatic["auth_mode"] == "prefer_cimd_fallback_dcr" and automatic["client_name"] == "Codex"
+    assert "allow_dcr" not in automatic
     assert automatic["callback_path"] == "/callback"
     assert "client_id" not in automatic and "client_secret" not in automatic
     await name.fill("My MMG")
-    await mode.select_option("manual")
+    await mode.select_option("pre_registration")
     await expect(name).not_to_be_visible()
-    await expect(name).to_have_value("")
+    await expect(name).to_be_disabled()
     await identity.fill("public-client")
     await scopes.fill("mcp:connect profile:read")
     manual = await page.evaluate("oauthForm.value()")
@@ -100,33 +101,71 @@ async def test_token_method_is_submitted_by_server_proposal_and_personal_forms(r
 
     await page.route("**/api/v1/mcps/method-test**", respond)
     await page.route("**/api/v1/mcp-proposals/method-test**", respond)
-    for kind in ("server", "proposal", "personal"):
+    await page.route("**/api/v1/mcps", respond)
+    for kind in ("create", "server", "proposal", "personal"):
         await page.evaluate("""async(kind)=>{
           const m=await import('/mcps.js');
           const service={id:'method-test',name:'Method test',transport:'streamable-http',revision:1};
-          if(kind==='server')await m.mcpEditor(service);
+          if(kind==='create')await m.mcpEditor();
+          else if(kind==='server')await m.mcpEditor(service);
           else if(kind==='proposal')await m.proposalEditor(service);
           else await m.credentialDialog(service);
         }""", kind)
         dialog = page.get_by_role("dialog")
+        if kind == "create":
+            await dialog.get_by_label("服务名称", exact=True).fill("New OAuth")
+            await dialog.get_by_label("传输协议", exact=True).select_option("streamable-http")
+            await dialog.get_by_label("服务 URL", exact=True).fill("https://mcp.test/mcp")
+            await dialog.get_by_label("认证方式", exact=True).select_option("oauth")
+            await expect(dialog.get_by_label("OAuth 客户端注册方式", exact=True)).to_have_value("prefer_cimd_fallback_dcr")
         if kind == "personal":
-            await dialog.get_by_label("OAuth 客户端注册方式", exact=True).select_option("auto")
-            await dialog.get_by_label("允许 DCR 回退（仅服务器不支持 CIMD 时）", exact=True).check()
+            await dialog.get_by_label("OAuth 客户端注册方式", exact=True).select_option("prefer_cimd_fallback_dcr")
         method = dialog.get_by_label("Token 端点认证方式", exact=True)
         await expect(method).to_be_visible()
         await expect(method).to_be_enabled()
-        if kind != "personal":
+        if kind in {"server", "proposal"}:
             await expect(method).to_have_value("client_secret_post")
         await method.select_option("client_secret_basic")
         callback = dialog.get_by_label("OAuth 回调路径", exact=True)
-        await expect(callback).to_have_value("/api/v1/oauth/callback" if kind == "personal" else "/callback")
+        await expect(callback).to_have_value("/api/v1/oauth/callback" if kind in {"personal", "create"} else "/callback")
         await callback.select_option("/callback")
-        label = "保存修改" if kind == "server" else "保存审批配置" if kind == "proposal" else "保存"
+        label = {"create": "创建服务", "server": "保存修改", "proposal": "保存审批配置", "personal": "保存"}[kind]
         await dialog.get_by_role("button", name=label, exact=True).click()
         await expect(dialog).to_have_count(0)
         body = submitted[-1][1]
         auth = body["auth"] if kind == "personal" else body["config"]["auth"]
-        assert auth["auth_mode"] == "auto" and auth["token_endpoint_auth_method"] == "client_secret_basic"
+        assert auth["auth_mode"] == "prefer_cimd_fallback_dcr" and auth["token_endpoint_auth_method"] == "client_secret_basic"
         assert auth["callback_path"] == "/callback"
         assert "client_id" not in auth and "client_secret" not in auth
-    assert len(submitted) == 3
+    assert len(submitted) == 4
+
+
+async def test_default_and_legacy_modes_share_four_options_and_ignore_inactive_fields(runtime_browser):
+    page, _ = runtime_browser
+    for initial, expected in [
+        ({}, "prefer_cimd_fallback_dcr"),
+        ({"auth_mode": "manual", "client_id": "manual"}, "pre_registration"),
+        ({"auth_mode": "auto", "allow_dcr": False}, "cimd_only"),
+        ({"auth_mode": "auto", "allow_dcr": True}, "prefer_cimd_fallback_dcr"),
+        ({"auth_mode": "dcr"}, "dcr_only"),
+    ]:
+        await page.evaluate("""async(initial)=>{
+          const {oauthFields}=await import('/oauth-fields.js');
+          window.oauthForm=oauthFields(initial);
+          document.querySelector('main').replaceChildren(oauthForm.node);
+        }""", initial)
+        mode = page.get_by_label("OAuth 客户端注册方式", exact=True)
+        await expect(mode).to_have_value(expected)
+        await expect(mode.locator("option")).to_have_count(4)
+        await expect(page.get_by_role("checkbox")).to_have_count(0)
+        value = await page.evaluate("oauthForm.value()")
+        assert value["auth_mode"] == expected and "allow_dcr" not in value
+        await mode.select_option("cimd_only")
+        await expect(page.get_by_label("客户端名称（client_name）", exact=True)).not_to_be_visible()
+        value = await page.evaluate("oauthForm.value()")
+        assert not {"client_id", "client_secret", "client_name", "allow_dcr"} & value.keys()
+        await mode.select_option("dcr_only")
+        await page.get_by_label("客户端名称（client_name）", exact=True).fill("Custom DCR")
+        await mode.select_option("prefer_cimd_fallback_dcr")
+        assert (await page.evaluate("oauthForm.value()"))["client_name"] == "Custom DCR"
+        await expect(page.get_by_text("DCR：动态客户端注册，MMG 直接向服务器注册并获取 Client ID/Secret，不需要公网地址。", exact=True)).to_be_visible()

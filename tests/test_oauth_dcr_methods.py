@@ -160,8 +160,8 @@ async def test_cimd_rejects_explicit_secret_method_without_falling_back_to_dcr(d
 
     calls = discovery(monkeypatch, cimd=True)
     db_app.app.state.config.public_url = "https://gateway.example.com"
-    row = await server(db_app, {"type": "oauth", "auth_mode": "auto", "allow_dcr": True,
-        "client_name": "Codex", "token_endpoint_auth_method": "client_secret_post"})
+    row = await server(db_app, {"type": "oauth", "auth_mode": "cimd_only",
+        "token_endpoint_auth_method": "client_secret_post"})
     response = await db_app.web.post(f"/api/v1/mcps/{row.id}/oauth/start")
     assert response.status_code == 502 and "CIMD" in response.text and "none" in response.text
     assert not calls

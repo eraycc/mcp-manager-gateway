@@ -77,12 +77,13 @@ async def test_dcr_is_opt_in_and_registration_is_reused(db_app, monkeypatch):
     assert payload["oauth_registration"]["auth"]["client_id"] == "registered-client"
 
 
-async def test_cimd_support_without_public_https_does_not_silently_use_dcr(db_app, monkeypatch):
+async def test_cimd_support_without_public_https_falls_back_when_allowed(db_app, monkeypatch):
     calls = discovery(monkeypatch, cimd=True)
     row = await server(db_app)
     response = await db_app.web.post(f"/api/v1/mcps/{row.id}/oauth/start")
-    assert response.status_code != 200 and "PUBLIC_URL" in response.text
-    assert calls == []
+    assert response.status_code == 200, response.text
+    assert parse_qs(urlsplit(response.json()["authorization_url"]).query)["client_id"] == ["registered-client"]
+    assert len(calls) == 1
 
 
 async def test_no_dcr_without_opt_in_and_manual_public_client_skips_registration(db_app, monkeypatch):

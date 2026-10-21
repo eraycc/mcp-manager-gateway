@@ -293,11 +293,11 @@ MMG 支持可选的浏览器端界面翻译：
 
 ## OAuth 客户端注册
 
-远程 HTTP/SSE OAuth 支持预注册（Client ID 必填、Secret 可选）与自动模式：优先 CIMD；只有授权服务器未声明支持 CIMD 且提供注册端点时，才尝试显式开启的 DCR 回退。进入 OAuth 弹窗后点击“开始授权”或“重新授权”才发起流程；仅打开弹窗不会注册客户端或联系授权服务器。
+远程 HTTP/SSE OAuth 使用单一四态注册方式：预注册（Client ID 必填、Secret 可选）、优先 CIMD 且失败回退 DCR（新表单默认）、仅 CIMD、仅 DCR。优先模式在 CIMD 前置条件不满足，或经校验的授权响应明确拒绝客户端或元数据时回退 DCR；DCR 仍需服务器提供注册端点。旧配置保留原有选择策略。进入 OAuth 弹窗后点击“开始授权”或“重新授权”才发起流程；仅打开弹窗不会注册客户端或联系授权服务器。
 
 CIMD 需要稳定的公网 HTTPS `PUBLIC_URL`，可通过 Nginx 反向代理本机 8765 端口实现。MMG 在 `/oauth/client-metadata.json` 发布不含凭据的元数据，管理界面仍可限制访问。Token 过期最多自动刷新一次；刷新失败或下游返回 HTTP 401 后，需用户明确重新授权，不自动重放业务调用。参见 [OAuth 与公网 HTTPS 配置指南](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/oauth.md)。
 
-两种注册模式均可设置 Token 端点认证方式：自动选择、none、client_secret_basic 或 client_secret_post。自动 DCR 按服务器能力协商，并加密保存注册返回的 Secret，供交换和刷新使用。CIMD 当前使用 none；显式选择不兼容的认证方式时会明确提示。Figma 已知注册响应的限定兼容行为见上述 OAuth 指南。OAuth 表单支持选择回调路径：默认 `/api/v1/oauth/callback`，Figma 等服务可选 `/callback`。预注册和自动模式均使用 `PUBLIC_URL` 拼接所选路径；更改后会清除相关旧注册与 Token，并要求重新授权，不再按服务 URL 自动选择回调路径。DCR 失败会显示已知服务端错误码，不回显响应正文或密钥。
+四种注册方式均可设置 Token 端点认证方式：自动选择、none、client_secret_basic 或 client_secret_post。自动 DCR 按服务器能力协商，并加密保存注册返回的 Secret，供交换和刷新使用。CIMD 当前使用 none；显式选择 Secret 方式时，优先模式回退 DCR，仅 CIMD 模式提示不兼容。回退最多启动一次新的 state/PKCE 授权流程；用户拒绝、state/issuer 校验失败及结果不明的 Token 请求不会触发回退。若服务商停留在错误页且未回调 MMG，请切换“仅 DCR”重试。Figma 已知注册响应的限定兼容行为见上述 OAuth 指南。OAuth 表单支持选择回调路径：默认 `/api/v1/oauth/callback`，Figma 等服务可选 `/callback`。预注册和自动模式均使用 `PUBLIC_URL` 拼接所选路径；更改后会清除相关旧注册与 Token，并要求重新授权，不再按服务 URL 自动选择回调路径。DCR 失败会显示已知服务端错误码，不回显响应正文或密钥。
 
 ## 配置与数据
 

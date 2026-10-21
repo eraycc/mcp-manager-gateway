@@ -15,6 +15,7 @@ from .catalog import masked, restore, validate_slug, web_authorizer
 from .database import ApiToken, McpProposal, McpServer, User, now
 from .diagnostics import safe_gateway_error
 from .identity import admin_user, expired
+from .oauth_config import normalize_registration, registration_policy
 from .runtime import GatewayError, ServerSpec
 from .transports import validate_service_config
 
@@ -27,7 +28,7 @@ OAUTH_TEST_MESSAGE = "OAuth 类型需要在审批通过并授权后验证"
 def validate_proposal_oauth(auth):
     if auth.get("type") != "oauth":
         return
-    fields = ("client_id",) if auth.get("auth_mode", "manual") == "manual" else ()
+    fields = ("client_id",) if registration_policy(auth) == "pre_registration" else ()
     for field in fields:
         if not isinstance(auth.get(field), str) or not auth[field].strip():
             raise HTTPException(422, "OAuth " + field + " is required")
@@ -97,6 +98,8 @@ def normalize_proposals(value: dict) -> list[dict]:
         if "config_isolation" in data["config"].get("auth", {}):
             raise ValueError("OAuth 配置隔离由审批人设置")
         validate_service_config(data["transport"], "service", data["config"])
+        if data["config"].get("auth", {}).get("type") == "oauth":
+            data["config"]["auth"] = normalize_registration(data["config"]["auth"])
         result.append(data)
     return result
 
@@ -333,6 +336,8 @@ async def _configure(row, values, catalog, session=None):
         else:
             auth.pop("config_isolation", None)
     validate_service_config(payload["transport"], isolation or "service", payload["config"])
+    if auth.get("type") == "oauth":
+        payload["config"]["auth"] = normalize_registration(auth)
     row.payload = catalog.seal(payload)
     row.public_name = payload["name"]
     row.revision += 1
