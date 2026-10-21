@@ -21,6 +21,7 @@ from .transports import check_url
 router = APIRouter(prefix="/api/v1")
 public_router = APIRouter()
 TOKEN_REQUEST_TIMEOUT = 30
+CIMD_REJECTIONS = {"invalid_client", "invalid_client_metadata", "unauthorized_client"}
 
 
 def token_expiry(value: dict) -> float:
@@ -231,24 +232,30 @@ class OAuth:
         return credential_owner(row.isolation, user_id) if row.isolation == "user" and row.config_isolation == "user" else "service"
 
     async def effective_auth(self, row, user_id, auth):
-        from .oauth_config import callback_uri, registration_fingerprint
+        from .oauth_config import callback_uri, registration_matches, registration_policy
 
         payload = await self.credential_store.load(row.id, self.config_owner(row, user_id))
         registration = payload.get("oauth_registration", {})
         resource = self.resource(row)
-        fingerprint = registration_fingerprint(auth, resource, callback_uri(self.catalog.config.public_url, auth))
-        if registration.get("config_fingerprint") == fingerprint:
+        if registration_matches(registration, auth, resource, callback_uri(self.catalog.config.public_url, auth)):
             from .oauth_discovery import auth_method
 
             effective = auth | registration["auth"]
             auth_method(effective, effective)
             return effective
-        if registration or auth.get("auth_mode") in {"auto", "dcr"} or not all(auth.get(key) for key in ("authorization_url", "token_url")):
+        if registration or registration_policy(auth) != "pre_registration" or not all(auth.get(key) for key in ("authorization_url", "token_url")):
             raise GatewayError("auth_required", "OAuth 客户端信息需要重新授权，请在控制台点击重新授权")
         return auth
 
-    async def prepare(self, row, user_id, auth, request, epoch):
-        from .oauth_config import allows_dcr, callback_uri, client_metadata, registration_fingerprint
+    async def prepare(self, row, user_id, auth, request, epoch, *, fallback_reason=None):
+        from .oauth_config import (
+            allows_dcr,
+            callback_uri,
+            client_metadata,
+            registration_fingerprint,
+            registration_matches,
+            registration_policy,
+        )
         from .oauth_discovery import auth_method, canonical_resource, discover, register, registration_method
 
         config_owner = self.config_owner(row, user_id)
@@ -260,8 +267,8 @@ class OAuth:
         async with self.locks.setdefault(lock, asyncio.Lock()):
             payload = await self.credential_store.load(row.id, config_owner)
             cached = payload.get("oauth_registration", {})
-            mode = auth.get("auth_mode", "manual")
-            if mode == "manual" and all(auth.get(key) for key in ("authorization_url", "token_url")):
+            mode = registration_policy(auth)
+            if mode == "pre_registration" and all(auth.get(key) for key in ("authorization_url", "token_url")):
                 context = {key: auth[key] for key in ("authorization_url", "token_url", "issuer_url", "scopes") if key in auth}
                 if resource and row.transport in {"streamable-http", "sse"}:
                     context["resource"] = canonical_resource(resource)
@@ -275,19 +282,45 @@ class OAuth:
                     raise HTTPException(409, "OAuth authorization changed during discovery")
             registration_mode = "manual"
             identity = auth.get("client_id", "")
-            if mode in {"auto", "dcr"}:
-                if context.get("cimd_supported"):
-                    if auth.get("token_endpoint_auth_method") not in {None, "none"}:
-                        raise GatewayError("oauth_configuration_required",
-                            "CIMD 当前使用公开客户端 none，不能使用所选 Secret 认证方式；请选择自动/none 或使用预注册")
-                    context["token_endpoint_auth_method"] = auth_method({"token_endpoint_auth_method": "none"}, context)
-                    identity = client_metadata(self.catalog.config.public_url)["client_id"]
-                    registration_mode = "cimd"
-                elif allows_dcr(auth) and context.get("registration_url"):
+            if mode != "pre_registration":
+                reason = fallback_reason
+                fallback_code = fallback_reason
+                if mode != "dcr_only" and not reason:
+                    try:
+                        if not context.get("cimd_supported"):
+                            reason = "cimd_not_supported"
+                            raise GatewayError("oauth_configuration_required", "服务器不支持 CIMD")
+                        reason = "public_url_unavailable"
+                        identity = client_metadata(self.catalog.config.public_url)["client_id"]
+                        reason = "token_auth_incompatible"
+                        if auth.get("token_endpoint_auth_method") not in {None, "none"}:
+                            raise GatewayError("oauth_configuration_required",
+                                "CIMD 当前使用公开客户端 none，不能使用所选 Secret 认证方式")
+                        method = auth_method({"token_endpoint_auth_method": "none"}, context)
+                    except GatewayError as exc:
+                        if mode == "cimd_only":
+                            raise
+                        reason = reason or exc.code
+                        fallback_code = exc.code
+                    else:
+                        context["token_endpoint_auth_method"] = method
+                        registration_mode = "cimd"
+                if registration_mode != "cimd":
+                    if not allows_dcr(auth):
+                        raise GatewayError("oauth_configuration_required", "所选注册方式不允许 DCR 回退")
+                    if reason:
+                        await self.audit("oauth.cimd_fallback", user_id, row.id,
+                                         reason=reason, error_code=fallback_code, stage="authorization" if fallback_reason else "prerequisite",
+                                         result="dcr" if context.get("registration_url") else "unavailable")
+                    if not context.get("registration_url"):
+                        message = ("CIMD 不可用，且服务器未提供动态注册端点，请手动填写 Client ID（预注册）。"
+                                   if mode != "dcr_only" else
+                                   "服务器未提供动态注册端点，请手动填写 Client ID（预注册）。")
+                        raise GatewayError("oauth_configuration_required", message)
                     registration_mode = "dcr"
                     requested = registration_method(auth, context)
                     registered = None
-                    if (cached.get("config_fingerprint") == fingerprint and cached.get("mode") == "dcr"
+                    if (registration_matches(cached, auth, resource, redirect_uri) and cached.get("mode") == "dcr"
                             and cached.get("auth", {}).get("issuer_url") == context.get("issuer_url")
                             and cached.get("auth", {}).get("registration_url") == context.get("registration_url")):
                         candidate = cached.get("auth", {})
@@ -303,16 +336,14 @@ class OAuth:
                         registered = await register(context | {
                             "token_endpoint_auth_method": requested,
                             "token_auth_method_explicit": auth.get("token_endpoint_auth_method") is not None,
-                        }, auth["client_name"], redirect_uri)
+                        }, auth.get("client_name", "Codex"), redirect_uri)
                     context.update(registered)
                     identity = registered["client_id"]
-                else:
-                    raise GatewayError("oauth_configuration_required",
-                        "服务器未提供可用的 CIMD。请填写预注册 Client ID；仅在服务器提供注册端点时可启用 DCR 回退")
-            if mode != "manual" and not identity:
+            if mode != "pre_registration" and not identity:
                 raise GatewayError("oauth_configuration_required", "OAuth Client ID is unavailable")
             context["client_id"] = identity
-            context["token_endpoint_auth_method"] = auth_method(auth if mode == "manual" else context, context)
+            context["token_endpoint_auth_method"] = auth_method(auth if mode == "pre_registration" else context, context)
+            context["registration_mode"] = registration_mode
             effective = auth | context
             invalidated = set()
             async with self.catalog.db.locked() as session:
@@ -404,8 +435,11 @@ class OAuth:
         if not 200 <= status < 300:
             code = value.get("error") if isinstance(value, dict) else ""
             detail = " (" + code + ")" if isinstance(code, str) and code in SAFE_ERRORS else ""
-            raise GatewayError("oauth_failed", "OAuth token endpoint returned HTTP " + str(status) + detail +
-                               "；请检查 Client ID、Secret、回调地址或重新授权")
+            failure = GatewayError("oauth_failed", "OAuth token endpoint returned HTTP " + str(status) + detail +
+                                   "；请检查 Client ID、Secret、回调地址或重新授权")
+            # Only explicit client rejection can restart authorization; never replay an uncertain exchange.
+            failure.oauth_error = code if status in {400, 401} and isinstance(code, str) and code in CIMD_REJECTIONS else None
+            raise failure
         if not isinstance(value, dict) or not isinstance(value.get("access_token"), str) or not value["access_token"].strip():
             raise GatewayError("oauth_failed", "OAuth token response contains no valid access token")
         if str(value.get("token_type", "Bearer")).lower() != "bearer":
@@ -486,8 +520,6 @@ async def status(server_id: str, request: Request, user=USER):
 
 @router.post("/mcps/{server_id}/oauth/start")
 async def start(server_id: str, request: Request, user=USER):
-    from .oauth_config import callback_uri
-
     app = request.app.state
     return_to = "mcps"
     if request.headers.get("content-length", "0") not in {"", "0"}:
@@ -499,9 +531,18 @@ async def start(server_id: str, request: Request, user=USER):
         owner = credential_owner(row.isolation, user.id)
         payload = await app.credentials.load(row.id, owner, session=session)
         epoch = payload.get("oauth_epoch", 0)
-    effective, epoch = await app.oauth.prepare(row, user.id, auth, request, epoch)
+    return await authorization_start(request, row, auth, user, epoch, return_to)
+
+
+async def authorization_start(request, row, auth, user, epoch, return_to, *, fallback_reason=None):
+    """Create a fresh state/PKCE flow, including a single policy-authorized DCR restart."""
+    from .oauth_config import callback_uri
+
+    app = request.app.state
+    owner = credential_owner(row.isolation, user.id)
+    effective, epoch = await app.oauth.prepare(row, user.id, auth, request, epoch, fallback_reason=fallback_reason)
     async with app.db.locked() as session:
-        user, row, current_auth = await oauth_actor(request, session, server_id, revision=row.revision)
+        user, row, current_auth = await oauth_actor(request, session, row.id, revision=row.revision)
         payload = await app.credentials.load(row.id, owner, session=session)
         if configuration_fingerprint(current_auth) != configuration_fingerprint(auth) or payload.get("oauth_epoch", 0) != epoch:
             raise HTTPException(409, "OAuth configuration or authorization changed; restart authorization")
@@ -512,10 +553,11 @@ async def start(server_id: str, request: Request, user=USER):
         callback_url = callback_uri(app.config.public_url, auth)
         app.oauth.pending = {key: value for key, value in app.oauth.pending.items() if value["expires"] > time.time()}
         app.oauth.pending[nonce] = {
-            "server_id": server_id, "user_id": user.id, "session_id": request.state.session_id,
+            "server_id": row.id, "user_id": user.id, "session_id": request.state.session_id,
             "verifier": verifier, "redirect_uri": callback_url, "expires": time.time() + 600,
             "revision": row.revision, "fingerprint": configuration_fingerprint(auth),
             "return_to": return_to, "epoch": epoch, "auth": effective,
+            "registration_mode": effective.get("registration_mode", "manual"),
         }
         scopes = effective.get("scopes", [])
         params = {"response_type": "code", "client_id": effective.get("client_id", ""),
@@ -556,8 +598,6 @@ async def callback(
         expected_issuer = pending["auth"].get("issuer_url", "")
         if (iss and iss != expected_issuer) or (pending["auth"].get("iss_required") and not iss):
             raise HTTPException(403, "OAuth authorization issuer does not match")
-        if error or not code:
-            raise HTTPException(400, "OAuth authorization was declined")
         user, row, auth = await oauth_actor(
             request,
             session,
@@ -573,16 +613,43 @@ async def callback(
                 409, "OAuth configuration changed; restart authorization"
             )
 
-    value = await app.oauth.exchange(
-        pending["auth"],
-        {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": pending["redirect_uri"],
-            "code_verifier": pending["verifier"],
-            **({"resource": pending["auth"]["resource"]} if pending["auth"].get("resource") else {}),
-        },
-    )
+    async def fallback(reason):
+        from .oauth_config import registration_policy
+
+        if (pending.get("registration_mode") != "cimd"
+                or registration_policy(auth) != "prefer_cimd_fallback_dcr"):
+            return None
+        if pending["expires"] < time.time():
+            raise HTTPException(403, "OAuth state is invalid or expired")
+        result = await authorization_start(request, row, auth, user, pending["epoch"],
+                                           pending["return_to"], fallback_reason=reason)
+        return RedirectResponse(result["authorization_url"], status_code=303)
+
+    if error:
+        if error in CIMD_REJECTIONS:
+            redirected = await fallback(error)
+            if redirected is not None:
+                return redirected
+        raise HTTPException(400, "OAuth authorization was declined")
+    if not code:
+        raise HTTPException(400, "OAuth authorization was declined")
+    try:
+        value = await app.oauth.exchange(
+            pending["auth"],
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": pending["redirect_uri"],
+                "code_verifier": pending["verifier"],
+                **({"resource": pending["auth"]["resource"]} if pending["auth"].get("resource") else {}),
+            },
+        )
+    except GatewayError as exc:
+        if getattr(exc, "oauth_error", None) in CIMD_REJECTIONS:
+            redirected = await fallback(exc.oauth_error)
+            if redirected is not None:
+                return redirected
+        raise
     async with app.db.locked() as session:
         user, row, auth = await oauth_actor(
             request,

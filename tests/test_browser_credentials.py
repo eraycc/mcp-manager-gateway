@@ -301,6 +301,7 @@ async def test_profile_keeps_saved_personal_credentials_editable(running_gateway
             await popup.get_by_label("请求头名称（例如 X-API-Key）", exact=True).fill("X-Personal-Key")
             await popup.get_by_label("API Key", exact=True).fill(username + "-new-key")
         else:
+            await popup.get_by_label("OAuth 客户端注册方式", exact=True).select_option("pre_registration")
             for field, value in [
                 ("授权 URL", "https://oauth.invalid/new-authorize"),
                 ("Token URL", "https://oauth.invalid/new-token"),
@@ -366,17 +367,18 @@ async def test_editor_restores_auth_drafts_without_serializing_inactive_secrets(
 
             await auth.select_option("oauth")
             registration = page.get_by_label("OAuth 客户端注册方式", exact=True)
+            await expect(registration).to_have_value("prefer_cimd_fallback_dcr")
+            await registration.select_option("pre_registration")
             await page.get_by_label("Client ID", exact=True).fill("manual-client")
             await page.get_by_label("Client Secret", exact=True).fill("manual-secret")
-            await registration.select_option("auto")
-            await page.get_by_label("允许 DCR 回退（仅服务器不支持 CIMD 时）", exact=True).check()
+            await registration.select_option("prefer_cimd_fallback_dcr")
             await auth.select_option("basic")
             await expect(page.get_by_label("用户名", exact=True)).to_have_value("draft-user")
             await expect(page.get_by_label("密码", exact=True)).to_have_value("draft-password")
             await auth.select_option("oauth")
-            await expect(registration).to_have_value("auto")
+            await expect(registration).to_have_value("prefer_cimd_fallback_dcr")
             await expect(page.get_by_label("客户端名称（client_name）", exact=True)).to_have_value("Codex")
-            await registration.select_option("manual")
+            await registration.select_option("pre_registration")
             await expect(page.get_by_label("Client ID", exact=True)).to_have_value("")
             await expect(page.get_by_label("Client Secret", exact=True)).to_have_value("")
 

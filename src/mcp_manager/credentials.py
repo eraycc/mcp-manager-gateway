@@ -171,7 +171,7 @@ class CredentialStore:
     async def configuration_summaries(self, rows, user_id: str) -> dict:
         """Aggregate personal credential readiness for an administrator's current page."""
         from .oauth import token_expiry
-        from .oauth_config import callback_uri, registration_fingerprint
+        from .oauth_config import callback_uri, registration_matches
 
         eligible = {row.id: row for row in rows
                     if row.isolation == "user" and row.auth_type in PERSONAL_AUTH_TYPES}
@@ -212,8 +212,8 @@ class CredentialStore:
             registration = config_payload.get("oauth_registration", {})
             # Resource changes clear registration in persist_config; listing never opens service configs.
             resource = registration.get("resource", "")
-            registered = registration.get("config_fingerprint") == registration_fingerprint(
-                config, resource, callback_uri(self.catalog.config.public_url, config))
+            registered = registration_matches(
+                registration, config, resource, callback_uri(self.catalog.config.public_url, config))
             configured_client = (bool(registration.get("auth", {}).get("client_id")) if registered else
                 all(isinstance(config.get(key), str) and config[key]
                     for key in ("authorization_url", "token_url", "client_id")))
@@ -323,6 +323,9 @@ class CredentialStore:
             else "service"
         )
         token_owner = credential_owner(new_isolation, actor_id)
+        from .oauth_config import normalize_registration
+
+        auth = normalize_registration(auth)
         auth_config = {
             key: copy.deepcopy(value)
             for key, value in auth.items()

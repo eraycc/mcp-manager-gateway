@@ -8,13 +8,20 @@ MMG 作为 OAuth 客户端访问下游 MCP；这与 Agent 登录 MMG 所使用�
 
 | 方式 | 填写内容 | 使用条件 |
 | --- | --- | --- |
-| 预注册（默认） | Client ID 必填；Secret 可选；可填写授权、Token 地址与 Scopes | 已在服务提供方创建客户端；端点留空时尝试发现 |
-| 自动：CIMD 优先 | 无需手填 Client ID/Secret | 授权服务器声明支持 CIMD，MMG 有稳定的公网 HTTPS 地址 |
-| 自动：DCR 回退 | 显式勾选“允许 DCR 回退”；客户端名称必填，默认 Codex | 授权服务器未声明支持 CIMD，并提供 registration_endpoint |
+| 预注册 | Client ID 必填；Secret 可选；可填写授权、Token 地址与 Scopes | 已在服务提供方创建客户端；端点留空时尝试发现 |
+| 自动（优先 CIMD，失败回退 DCR）（新表单默认） | 无需手填 Client ID/Secret；DCR 客户端名称默认 Codex | CIMD 不可用时回退；服务器必须提供 registration_endpoint 才能使用 DCR |
+| 自动（仅 CIMD） | 无需手填 Client ID/Secret | 服务器声明支持 CIMD，且 MMG 有稳定的公网 HTTPS PUBLIC_URL；失败不回退 |
+| 自动（仅 DCR） | 客户端名称默认 Codex，可修改 | 直接使用 registration_endpoint，不尝试 CIMD |
 
-DCR 是可选兼容机制，默认关闭。服务器已声明 CIMD 时，即使 MMG 的公网地址未配置好，也会提示修复 PUBLIC_URL，不降级到 DCR。客户端名称仅影响 DCR 注册请求的显示名称；填写 Codex 不会取得官方 Codex 客户端的身份或特权。
+预注册使用手动填写的 Client ID/Secret，不发起自动注册。CIMD 是客户端元数据文档，以 HTTPS URL 作为客户端标识；MMG 托管的路径为 `/oauth/client-metadata.json`，需要在启动环境变量设置稳定、可公开访问的 HTTPS `PUBLIC_URL`。DCR 是动态客户端注册，MMG 直接向服务器注册并获取 Client ID/Secret，不要求 MMG 有公网地址；回调地址仍须被提供方接受。
 
-切换模式会清除不适用的 Client ID/Secret 和客户端名称，保留用户选择的 Token 端点认证方式和回调路径。新增、编辑、审批与个人独享配置均可设置以下选项：
+“优先 CIMD”模式在服务器未声明支持、公网 HTTPS 地址不可用或所选 Token 认证方式与 CIMD 不兼容时回退 DCR，并记录脱敏结构化审计事件 `oauth.cimd_fallback`（原因、阶段与结果）。客户端名称配置只用于 DCR 注册请求，默认 Codex；CIMD 与预注册的授权请求不会发送该字段。CIMD 公共文档使用 MMG 固定名称。填写 Codex 不会取得官方客户端的身份或特权；Figma 等服务可能要求特定名称或回调路径。
+
+实际 CIMD 授权失败后，仅在已通过用户、会话、state、issuer、配置、资源、回调与授权代次校验的响应中，收到 `invalid_client`、`invalid_client_metadata` 或 `unauthorized_client` 时回退。Token 端点的上述明确拒绝还要求 HTTP 400/401。回退最多一次，并使用新的 state、PKCE 和授权码，绝不重复交换旧授权码。用户拒绝、通用协议错误、Token 超时或结果不明不会触发回退。若浏览器停留在提供方错误页、未回调 MMG，无法自动检测，请选择“仅 DCR”重试。“仅 CIMD”始终不回退；没有动态注册端点时会提示改用预注册。
+
+字段 `auth.auth_mode` 保存为 `pre_registration`、`prefer_cimd_fallback_dcr`、`cimd_only` 或 `dcr_only`；不再保存独立的 `allow_dcr` 开关。旧值兼容读取，并在保存时规范化：`manual` 对应预注册，`auto + allow_dcr=true` 对应优先 CIMD，旧 `auto` 未开启回退对应仅 CIMD，`dcr` 对应仅 DCR。历史未指定模式的端点/Token 配置保持原预注册语义；等价设置与有效 DCR 注册缓存兼容，不因字段改名清除授权。
+
+切换模式时，不适用的 Client ID/Secret 和客户端名称不会提交；保留用户选择的 Token 端点认证方式和回调路径。新增、编辑、审批与个人独享配置均可设置以下选项：
 
 | Token 端点认证方式 | 预注册 | 自动注册 |
 | --- | --- | --- |
@@ -23,9 +30,9 @@ DCR 是可选兼容机制，默认关闭。服务器已声明 CIMD 时，即使 
 | client_secret_basic | 必须填写 Secret，使用 HTTP Basic | DCR 必须返回有效 Secret，使用 HTTP Basic |
 | client_secret_post | 必须填写 Secret，将其放入表单请求体 | DCR 必须返回有效 Secret，将其放入表单请求体 |
 
-每次 Token 请求只使用一种认证方式，不在失败后自动改用另一种方式或重复交换授权码。显式选择的方式必须受服务器支持；不支持时在注册前提示。CIMD 的公开文档固定为 none，显式选择 Secret 方式会提示不兼容，不绕过 CIMD 优先规则降级到 DCR。
+每次 Token 请求只使用一种认证方式，不在失败后自动改用另一种方式或重复交换授权码。显式选择的方式必须受服务器支持；不支持时在注册前提示。CIMD 的公开文档固定为 none；显式选择 Secret 方式时，优先模式回退 DCR，仅 CIMD 模式提示不兼容。
 
-DCR 返回的 Client ID、Secret、认证方式和可选 Secret 有效期按配置归属加密缓存，不回填到可编辑的服务配置，也不出现在授权 URL、公开元数据或审计日志中。有效注册可复用；更改认证方式使旧注册及待处理授权失效；重新注册取得不同的 Client ID、Secret 或认证方式时，相关配置作用域内的旧授权一并作废，避免用新客户端刷新旧 Token。Secret 缺失、非法或过期时停止并要求重新授权；只有用户明确开始授权时才可重新注册，业务调用不自动注册。
+DCR 返回的 Client ID、Secret、认证方式和可选 Secret 有效期按配置归属加密缓存，不回填到可编辑的服务配置，也不出现在授权 URL、公开元数据或审计日志中。有效注册可复用；更改认证方式使旧注册及待处理授权失效；重新注册取得不同的 Client ID、Secret 或认证方式时，相关配置作用域内的旧授权一并作废，避免用新客户端刷新旧 Token。Secret 缺失、非法或过期时停止并要求重新授权；注册只在用户明确开始授权及该授权内的一次 CIMD 回退中发生，业务调用不自动注册。
 
 Figma 的限定兼容：当发现的 issuer、资源、注册端点和 Token 端点均为其已知官方地址，且已协商 Secret 认证、注册响应却声明 none 并返回 Secret 时，MMG 按请求的 Secret 认证方式处理。其他服务器的矛盾响应不套用此规则。Figma 场景可以选择 client_secret_post；名称、端点、回调、权限及用户授权仍须由服务器接受，实际联调成功才代表可用。
 
