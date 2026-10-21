@@ -1,4 +1,5 @@
 """Credential and isolation interactions in the browser UI."""
+import json
 import os
 
 import pytest
@@ -336,3 +337,52 @@ async def test_profile_keeps_saved_personal_credentials_editable(running_gateway
         assert await app.state.credentials.load(service_id, actors[other]["id"]) == original[other]
         assert errors == []
         await browser.close()
+
+
+@pytest.mark.asyncio
+async def test_editor_restores_auth_drafts_without_serializing_inactive_secrets(running_gateway):  # noqa: F811
+    _app, _web, url, _token, _row = running_gateway
+    async with async_playwright() as pw:
+        executable = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+        browser = await pw.chromium.launch(
+            headless=True, executable_path=executable if os.path.exists(executable) else None,
+        )
+        try:
+            page = await browser.new_page()
+            await login(page, url)
+            await page.goto(url + "/#/mcps")
+            await page.get_by_role("button", name="新增服务", exact=True).click()
+            await page.get_by_label("传输协议", exact=True).select_option("streamable-http")
+            auth = page.get_by_label("认证方式", exact=True)
+            await auth.select_option("bearer")
+            await page.get_by_label("Bearer Token", exact=True).fill("draft-bearer")
+            await auth.select_option("basic")
+            await expect(page.get_by_label("用户名", exact=True)).to_have_value("")
+            await expect(page.get_by_label("密码", exact=True)).to_have_value("")
+            await page.get_by_label("用户名", exact=True).fill("draft-user")
+            await page.get_by_label("密码", exact=True).fill("draft-password")
+            await auth.select_option("bearer")
+            await expect(page.get_by_label("Bearer Token", exact=True)).to_have_value("draft-bearer")
+
+            await auth.select_option("oauth")
+            registration = page.get_by_label("OAuth 客户端注册方式", exact=True)
+            await page.get_by_label("Client ID", exact=True).fill("manual-client")
+            await page.get_by_label("Client Secret", exact=True).fill("manual-secret")
+            await registration.select_option("auto")
+            await page.get_by_label("允许 DCR 回退（仅服务器不支持 CIMD 时）", exact=True).check()
+            await auth.select_option("basic")
+            await expect(page.get_by_label("用户名", exact=True)).to_have_value("draft-user")
+            await expect(page.get_by_label("密码", exact=True)).to_have_value("draft-password")
+            await auth.select_option("oauth")
+            await expect(registration).to_have_value("auto")
+            await expect(page.get_by_label("客户端名称（client_name）", exact=True)).to_have_value("Codex")
+            await registration.select_option("manual")
+            await expect(page.get_by_label("Client ID", exact=True)).to_have_value("")
+            await expect(page.get_by_label("Client Secret", exact=True)).to_have_value("")
+
+            await auth.select_option("bearer")
+            await page.get_by_role("button", name="JSON 配置", exact=True).click()
+            config = json.loads(await page.get_by_label("完整配置 JSON", exact=False).input_value())
+            assert config["config"]["auth"] == {"type": "bearer", "token": "draft-bearer"}
+        finally:
+            await browser.close()
