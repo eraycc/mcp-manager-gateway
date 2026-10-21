@@ -249,6 +249,8 @@ Remote HTTP/SSE OAuth supports pre-registration (Client ID required, Secret opti
 
 CIMD requires a stable public HTTPS `PUBLIC_URL`, for example an Nginx proxy to port 8765. MMG publishes credential-free metadata at `/oauth/client-metadata.json`; the administration UI can remain access restricted. Expired tokens get at most one refresh attempt; refresh failure or a downstream HTTP 401 requires explicit reauthorization, without replaying business calls. See the [OAuth and public HTTPS setup guide](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/oauth.md).
 
+Both registration modes expose Token endpoint authentication: automatic, none, client_secret_basic, or client_secret_post. Automatic DCR negotiates server-supported methods and securely stores a generated Secret for token exchange and refresh. CIMD currently uses none; incompatible explicit methods produce a configuration error. See the OAuth guide above for the bounded Figma compatibility behavior.
+
 ## Configuration and deployment
 
 Environment variables override the user-home `.env`. MMG does not automatically load `.env` from the source tree or current working directory. Start from [.env.example](https://github.com/eraycc/mcp-manager-gateway/blob/master/.env.example).

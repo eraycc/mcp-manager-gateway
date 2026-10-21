@@ -188,8 +188,9 @@ class OAuth:
                 try:
                     await self.effective_auth(row, user_id, auth)
                 except GatewayError as exc:
-                    await self.mark_reauth(row, owner, value, "binding_changed", epoch=epoch)
-                    raise GatewayError("auth_required", "OAuth 目标或回调地址已变更，请重新授权") from exc
+                    reason = "binding_changed" if exc.code == "auth_required" else "client_registration_invalid"
+                    await self.mark_reauth(row, owner, value, reason, epoch=epoch)
+                    raise GatewayError("auth_required", str(exc)) from exc
             if token_expiry(value) > time.time() + 60:
                 return (value, epoch) if with_epoch else value
             if not value.get("refresh_token"):
@@ -236,14 +237,18 @@ class OAuth:
         resource = self.resource(row)
         fingerprint = registration_fingerprint(auth, resource, callback_uri(self.catalog.config.public_url))
         if registration.get("config_fingerprint") == fingerprint:
-            return auth | registration["auth"]
+            from .oauth_discovery import auth_method
+
+            effective = auth | registration["auth"]
+            auth_method(effective, effective)
+            return effective
         if registration or auth.get("auth_mode") in {"auto", "dcr"} or not all(auth.get(key) for key in ("authorization_url", "token_url")):
             raise GatewayError("auth_required", "OAuth 客户端信息需要重新授权，请在控制台点击重新授权")
         return auth
 
     async def prepare(self, row, user_id, auth, request, epoch):
         from .oauth_config import allows_dcr, callback_uri, client_metadata, registration_fingerprint
-        from .oauth_discovery import auth_method, canonical_resource, discover, register
+        from .oauth_discovery import auth_method, canonical_resource, discover, register, registration_method
 
         config_owner = self.config_owner(row, user_id)
         token_owner = credential_owner(row.isolation, user_id)
@@ -270,25 +275,43 @@ class OAuth:
             registration_mode = "manual"
             identity = auth.get("client_id", "")
             if mode in {"auto", "dcr"}:
-                auth_method({}, context)  # Validate public-client support before DCR has a side effect.
                 if context.get("cimd_supported"):
+                    if auth.get("token_endpoint_auth_method") not in {None, "none"}:
+                        raise GatewayError("oauth_configuration_required",
+                            "CIMD 当前使用公开客户端 none，不能使用所选 Secret 认证方式；请选择自动/none 或使用预注册")
+                    context["token_endpoint_auth_method"] = auth_method({"token_endpoint_auth_method": "none"}, context)
                     identity = client_metadata(self.catalog.config.public_url)["client_id"]
                     registration_mode = "cimd"
                 elif allows_dcr(auth) and context.get("registration_url"):
                     registration_mode = "dcr"
+                    requested = registration_method(auth, context)
+                    registered = None
                     if (cached.get("config_fingerprint") == fingerprint and cached.get("mode") == "dcr"
                             and cached.get("auth", {}).get("issuer_url") == context.get("issuer_url")
                             and cached.get("auth", {}).get("registration_url") == context.get("registration_url")):
-                        identity = cached["auth"]["client_id"]
-                    else:
-                        identity = await register(context, auth["client_name"], redirect_uri)
+                        candidate = cached.get("auth", {})
+                        try:
+                            method = auth_method(candidate, context)
+                            if candidate.get("client_id") and (auth.get("token_endpoint_auth_method") is None or requested == method):
+                                registered = {key: candidate[key] for key in (
+                                    "client_id", "client_secret", "client_secret_expires_at", "token_endpoint_auth_method",
+                                ) if key in candidate}
+                        except GatewayError:
+                            pass  # Only an explicit authorization start may replace unusable registration.
+                    if registered is None:
+                        registered = await register(context | {
+                            "token_endpoint_auth_method": requested,
+                            "token_auth_method_explicit": auth.get("token_endpoint_auth_method") is not None,
+                        }, auth["client_name"], redirect_uri)
+                    context.update(registered)
+                    identity = registered["client_id"]
                 else:
                     raise GatewayError("oauth_configuration_required",
                         "服务器未提供可用的 CIMD。请填写预注册 Client ID；仅在服务器提供注册端点时可启用 DCR 回退")
             if mode != "manual" and not identity:
                 raise GatewayError("oauth_configuration_required", "OAuth Client ID is unavailable")
             context["client_id"] = identity
-            context["token_endpoint_auth_method"] = auth_method(auth if mode == "manual" else {}, context)
+            context["token_endpoint_auth_method"] = auth_method(auth if mode == "manual" else context, context)
             effective = auth | context
             invalidated = set()
             async with self.catalog.db.locked() as session:
@@ -299,16 +322,22 @@ class OAuth:
                     raise HTTPException(409, "OAuth configuration or authorization changed; restart authorization")
                 current_payload = await self.credential_store.load(row.id, config_owner, session=session)
                 previous = current_payload.get("oauth_registration", {})
-                if previous.get("auth", {}).get("issuer_url") and previous["auth"]["issuer_url"] != context.get("issuer_url"):
+                previous_auth = previous.get("auth", {})
+                issuer_changed = bool(previous_auth.get("issuer_url")) and previous_auth["issuer_url"] != context.get("issuer_url")
+                client_changed = bool(previous_auth.get("client_id")) and any(
+                    previous_auth.get(key) != context.get(key)
+                    for key in ("client_id", "client_secret", "token_endpoint_auth_method"))
+                if issuer_changed or client_changed:
+                    reason = "issuer_changed" if issuer_changed else "client_changed"
                     owners = await self.credential_store.owners(row.id, session=session) if config_owner == "service" else {token_owner}
                     for owner in owners:
                         item = await self.credential_store.load(row.id, owner, session=session)
                         item.pop("oauth_token", None)
                         item["oauth_epoch"] = item.get("oauth_epoch", 0) + 1
-                        item["oauth_state"] = {"status": "needs_reauth", "reason": "issuer_changed", "at": time.time()}
+                        item["oauth_state"] = {"status": "needs_reauth", "reason": reason, "at": time.time()}
                         await self.credential_store.write(session, row.id, owner, item)
-                        self.catalog.runtime.credential_versions[(row.id, owner)] = "oauth-issuer-changed"
-                        self.catalog.cache_failure(row, GatewayError("auth_required", "OAuth issuer 已变更，请重新授权"),
+                        self.catalog.runtime.credential_versions[(row.id, owner)] = "oauth-registration-changed"
+                        self.catalog.cache_failure(row, GatewayError("auth_required", "OAuth 客户端注册已变更，请重新授权"),
                                                    owner if row.isolation == "user" else None)
                         invalidated.add(owner)
                     current_payload = await self.credential_store.load(row.id, config_owner, session=session)
@@ -336,10 +365,13 @@ class OAuth:
         data = dict(data, client_id=auth.get("client_id", ""))
         if auth.get("resource"):
             data["resource"] = auth["resource"]
-        method = auth.get("token_endpoint_auth_method") or ("client_secret_post" if auth.get("client_secret") else "none")
+        from .oauth_discovery import auth_method
+
+        try:
+            method = auth_method(auth, auth)
+        except GatewayError as exc:
+            raise GatewayError("oauth_failed", str(exc)) from None
         basic = None
-        if method not in {"none", "client_secret_basic", "client_secret_post"}:
-            raise GatewayError("oauth_failed", "Unsupported token authentication method")
         if auth.get("client_secret"):
             if method == "client_secret_basic":
                 basic = (quote(data.pop("client_id"), safe=""), quote(auth["client_secret"], safe=""))

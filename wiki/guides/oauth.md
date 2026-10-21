@@ -14,9 +14,24 @@ MMG 作为 OAuth 客户端访问下游 MCP；这与 Agent 登录 MMG 所使用�
 
 DCR 是可选兼容机制，默认关闭。服务器已声明 CIMD 时，即使 MMG 的公网地址未配置好，也会提示修复 PUBLIC_URL，不降级到 DCR。客户端名称仅影响 DCR 注册请求的显示名称；填写 Codex 不会取得官方 Codex 客户端的身份或特权。
 
-切换模式会清除不适用的 Client ID/Secret、名称与认证方式。预注册可使用公开客户端（无 Secret、PKCE S256），或按服务器要求选择 client_secret_basic / client_secret_post；每次 Token 请求只使用一种方式。
+切换模式会清除不适用的 Client ID/Secret 和客户端名称，保留用户选择的 Token 端点认证方式。新增、编辑、审批与个人独享配置均可设置以下选项：
+
+| Token 端点认证方式 | 预注册 | 自动注册 |
+| --- | --- | --- |
+| 自动选择 | 有 Secret 时按服务器能力选择 Basic/Post，无 Secret 时使用 none | CIMD 使用 none；DCR 按服务器声明依次选择 none、client_secret_post、client_secret_basic |
+| none | 不填写 Secret，配合 PKCE | 请求公开客户端注册；不会发送注册响应中多余的 Secret |
+| client_secret_basic | 必须填写 Secret，使用 HTTP Basic | DCR 必须返回有效 Secret，使用 HTTP Basic |
+| client_secret_post | 必须填写 Secret，将其放入表单请求体 | DCR 必须返回有效 Secret，将其放入表单请求体 |
+
+每次 Token 请求只使用一种认证方式，不在失败后自动改用另一种方式或重复交换授权码。显式选择的方式必须受服务器支持；不支持时在注册前提示。CIMD 的公开文档固定为 none，显式选择 Secret 方式会提示不兼容，不绕过 CIMD 优先规则降级到 DCR。
+
+DCR 返回的 Client ID、Secret、认证方式和可选 Secret 有效期按配置归属加密缓存，不回填到可编辑的服务配置，也不出现在授权 URL、公开元数据或审计日志中。有效注册可复用；更改认证方式使旧注册及待处理授权失效；重新注册取得不同的 Client ID、Secret 或认证方式时，相关配置作用域内的旧授权一并作废，避免用新客户端刷新旧 Token。Secret 缺失、非法或过期时停止并要求重新授权；只有用户明确开始授权时才可重新注册，业务调用不自动注册。
+
+Figma 的限定兼容：当发现的 issuer、资源、注册端点和 Token 端点均为其已知官方地址，且已协商 Secret 认证、注册响应却声明 none 并返回 Secret 时，MMG 按请求的 Secret 认证方式处理。其他服务器的矛盾响应不套用此规则。Figma 场景可以选择 client_secret_post；名称、端点、回调、权限及用户授权仍须由服务器接受，实际联调成功才代表可用。
 
 ## 发现、授权与缓存
+
+Scopes 用于指定申请的访问权限，多个值按 OAuth 2.0 标准以空格分隔，例如 `mcp:connect profile:read`；实际值以服务提供方要求为准。`mcp:connect` 是 Figma 等服务的常见值，可自行修改；进入端点自动发现流程时，留空则使用发现的权限信息，不强制给所有 MCP 填入相同值。
 
 先发现受保护资源元数据，再发现所选授权服务器的 OAuth/OIDC 元数据；发现支持 401 challenge、路径及根 well-known 地址。端点使用 HTTPS，本机回环可使用 HTTP；不跟随元数据重定向，不转发 MMG 或下游凭据。公共 MCP 引导的请求会校验 DNS 解析地址，并固定连接到已校验的公共 IP，保留 TLS 主机名验证。单次元数据/注册请求有 8 秒总时限，Token 请求有 30 秒总时限，JSON 响应上限 256 KiB。
 

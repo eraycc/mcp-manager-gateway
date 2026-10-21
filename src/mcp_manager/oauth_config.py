@@ -105,11 +105,11 @@ def validate_oauth(auth, transport):
     if "client_secret" in auth and not isinstance(auth["client_secret"], str):
         raise ValueError("OAuth Client Secret must be a string")
     method = auth.get("token_endpoint_auth_method")
-    if method is not None and method not in {"none", "client_secret_basic", "client_secret_post"}:
+    if method is not None and (not isinstance(method, str) or method not in {"none", "client_secret_basic", "client_secret_post"}):
         raise ValueError("Unsupported OAuth token_endpoint_auth_method")
     if method == "none" and auth.get("client_secret"):
         raise ValueError("OAuth none authentication cannot send a Client Secret")
-    if method in {"client_secret_basic", "client_secret_post"} and not auth.get("client_secret"):
+    if mode == "manual" and method in {"client_secret_basic", "client_secret_post"} and not auth.get("client_secret"):
         raise ValueError("OAuth client_secret authentication requires a Client Secret")
     for key in ("authorization_url", "token_url", "registration_url", "issuer_url"):
         if auth.get(key):
