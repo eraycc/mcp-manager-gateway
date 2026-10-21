@@ -597,7 +597,7 @@ class Catalog:
                     if resource and row.transport in {"streamable-http", "sse"}:
                         resource = canonical_resource(resource)
                     fingerprint = registration_fingerprint(
-                        config.get("auth", {}), resource, callback_uri(self.config.public_url))
+                        config.get("auth", {}), resource, callback_uri(self.config.public_url, config.get("auth", {}), resource))
                     if registration.get("config_fingerprint") != fingerprint:
                         raise GatewayError("credential_changed", "OAuth resource changed while preparing the connection")
                 return build(config, epoch)

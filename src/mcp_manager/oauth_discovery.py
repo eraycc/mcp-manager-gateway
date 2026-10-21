@@ -59,8 +59,19 @@ def challenge_values(headers):
     return result
 
 
+def registration_error(status, value=None):
+    code = value.get("error") if isinstance(value, dict) else None
+    detail = "，服务器错误：" + code if isinstance(code, str) and code in SAFE_ERRORS else ""
+    advice = ("回调地址被服务器拒绝，请检查回调路径及服务器允许列表；填写授权或 Token 端点不会改变回调地址。"
+              if code == "invalid_redirect_uri" else
+              "请检查客户端名称、注册权限或回调地址，或切换预注册并手动填写 Client ID。")
+    return GatewayError("oauth_registration_failed",
+                       "目标服务器拒绝了 DCR 注册（HTTP " + str(status) + detail + "）。" + advice)
+
+
 async def json_request(client, url, resource, *, data=None):
     checked_url(url, resource)
+    status = None
     try:
         async with asyncio.timeout(REQUEST_TIMEOUT), client.stream(
             "POST" if data is not None else "GET", url, json=data,
@@ -69,11 +80,7 @@ async def json_request(client, url, resource, *, data=None):
             status = response.status_code
             if status in {404, 405, 501} and data is None:
                 raise Unavailable
-            if not 200 <= status < 300:
-                if data is not None:
-                    raise GatewayError("oauth_registration_failed",
-                        "目标服务器拒绝了 DCR 注册（HTTP " + str(status) +
-                        "）。请检查客户端名称、注册权限或回调地址，或切换预注册并手动填写 Client ID。")
+            if not 200 <= status < 300 and data is None:
                 if 300 <= status < 400:
                     raise GatewayError("oauth_metadata_invalid", "OAuth metadata redirects are not permitted")
                 raise Unavailable
@@ -81,16 +88,24 @@ async def json_request(client, url, resource, *, data=None):
             async for chunk in response.aiter_bytes():
                 raw.extend(chunk)
                 if len(raw) > MAX_JSON_BYTES:
+                    if data is not None and not 200 <= status < 300:
+                        raise registration_error(status)
                     raise GatewayError("oauth_metadata_invalid", "OAuth response exceeds 256 KiB")
     except (httpx.HTTPError, TimeoutError):
         if data is not None:
+            if status is not None and not 200 <= status < 300:
+                raise registration_error(status) from None
             raise GatewayError("oauth_registration_unknown",
                                "DCR 注册结果无法确认，请核对服务端记录后手动重试；本次不会自动重试") from None
         raise Unavailable from None
     try:
         value = json.loads(raw)
     except (ValueError, UnicodeError, RecursionError):
+        if data is not None and not 200 <= status < 300:
+            raise registration_error(status) from None
         raise GatewayError("oauth_metadata_invalid", "OAuth response is not valid JSON") from None
+    if not 200 <= status < 300:
+        raise registration_error(status, value)
     if not isinstance(value, dict):
         raise GatewayError("oauth_metadata_invalid", "OAuth response must be a JSON object")
     return value
