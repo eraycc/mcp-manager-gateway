@@ -1,4 +1,4 @@
-"""Figma loopback callbacks preserve the same session, issuer and credential bindings."""
+"""Configured callback paths preserve session, issuer and credential bindings."""
 import asyncio
 import json
 from urllib.parse import parse_qs, urlsplit
@@ -11,17 +11,19 @@ from mcp_manager.oauth_config import callback_uri
 from mcp_manager.runtime import GatewayError
 
 
-@pytest.mark.parametrize("public_url,resource,mode,path", [
-    ("http://127.0.0.1:8765", "https://mcp.figma.com/mcp", "auto", "/callback"),
-    ("http://localhost:8765", "https://mcp.figma.com/mcp", "dcr", "/callback"),
-    ("http://[::1]:8765", "https://mcp.figma.com/mcp", "auto", "/callback"),
-    ("http://127.0.0.1:8765", "https://mcp.figma.com/mcp", "manual", "/api/v1/oauth/callback"),
-    ("http://127.0.0.1:8765", "https://mcp.test/mcp", "auto", "/api/v1/oauth/callback"),
-    ("https://gateway.example.com", "https://mcp.figma.com/mcp", "auto", "/api/v1/oauth/callback"),
-    ("http://192.168.1.2:8765", "https://mcp.figma.com/mcp", "auto", "/api/v1/oauth/callback"),
+@pytest.mark.parametrize("public_url,mode,path", [
+    ("http://127.0.0.1:8765", "auto", None),
+    ("http://localhost:8765", "dcr", None),
+    ("http://[::1]:8765", "auto", "/callback"),
+    ("http://127.0.0.1:8765", "manual", "/callback"),
+    ("https://gateway.example.com", "auto", "/callback"),
+    ("https://gateway.example.com", "manual", "/api/v1/oauth/callback"),
 ])
-def test_only_figma_loopback_automatic_registration_uses_compatible_callback(public_url, resource, mode, path):
-    assert callback_uri(public_url, {"auth_mode": mode}, resource) == public_url + path
+def test_callback_path_is_explicit_and_independent_of_provider_and_mode(public_url, mode, path):
+    auth = {"auth_mode": mode}
+    if path is not None:
+        auth["callback_path"] = path
+    assert callback_uri(public_url, auth) == public_url + (path or "/api/v1/oauth/callback")
 
 
 async def figma_server(harness, monkeypatch):
@@ -29,7 +31,8 @@ async def figma_server(harness, monkeypatch):
     row = await harness.app.state.catalog.create({
         "name": "Figma callback", "transport": "streamable-http", "mode": "disabled", "isolation": "user",
         "config": {"url": "https://mcp.figma.com/mcp", "auth": {
-            "type": "oauth", "auth_mode": "auto", "allow_dcr": True, "client_name": "Codex"}},
+            "type": "oauth", "auth_mode": "auto", "allow_dcr": True, "client_name": "Codex",
+            "callback_path": "/callback"}},
     }, user_id=harness.actor["id"])
     registrations, token_requests = [], []
 
@@ -149,3 +152,103 @@ async def test_error_body_timeout_keeps_the_already_known_registration_failure(m
         with pytest.raises(GatewayError) as caught:
             await oauth_discovery.json_request(client, "https://auth.test/register", "https://mcp.test/mcp", data={})
     assert caught.value.code == "oauth_registration_failed" and "HTTP 400" in str(caught.value)
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto", None])
+@pytest.mark.parametrize("path", ["https://other.test/callback", "//other.test/callback", "/other", "/callback?x=1",
+                                   "/callback#fragment", "callback", None, []])
+def test_unhandled_or_external_callback_paths_are_rejected(mode, path):
+    from mcp_manager.transports import validate_config
+
+    auth = {"type": "oauth", "client_id": "registered", "authorization_url": "https://auth.test/a",
+            "token_url": "https://auth.test/t", "callback_path": path}
+    if mode:
+        auth["auth_mode"] = mode
+    if mode == "auto":
+        auth.pop("client_id")
+    with pytest.raises(ValueError, match="callback_path"):
+        validate_config("streamable-http", {"url": "https://mcp.test/mcp", "auth": auth})
+
+
+@pytest.mark.parametrize("path", ["/api/v1/oauth/callback", "/callback"])
+async def test_manual_registration_uses_the_selected_callback_without_discovery(db_app, monkeypatch, path):
+    from test_oauth_registration import server
+
+    row = await server(db_app, {"type": "oauth", "auth_mode": "manual", "client_id": "pre-registered",
+        "authorization_url": "https://auth.test/a", "token_url": "https://auth.test/t", "callback_path": path})
+    exchanged = []
+
+    async def forbidden_discovery(*args):
+        pytest.fail("A pre-registered client with explicit endpoints must not discover or register a new client")
+
+    async def exchange(auth, data):
+        assert data["redirect_uri"] == db_app.app.state.config.public_url + path
+        exchanged.append(data)
+        return {"access_token": "manual-access", "expires_at": None}
+
+    monkeypatch.setattr(oauth_discovery, "discover", forbidden_discovery)
+    monkeypatch.setattr(db_app.app.state.oauth, "exchange", exchange)
+    started = await db_app.web.post(f"/api/v1/mcps/{row.id}/oauth/start")
+    assert started.status_code == 200, started.text
+    params = parse_qs(urlsplit(started.json()["authorization_url"]).query)
+    assert params["redirect_uri"] == [db_app.app.state.config.public_url + path]
+    callback = await db_app.web.get(path, params={"state": params["state"][0], "code": "manual-code"})
+    assert callback.status_code == 303, callback.text
+    assert len(exchanged) == 1
+
+@pytest.mark.parametrize("config_isolation", ["shared", "user"])
+async def test_callback_path_change_invalidates_only_its_configuration_scope(db_app, monkeypatch, config_isolation):
+    from test_oauth_registration import discovery, server
+
+    calls = discovery(monkeypatch, cimd=False)
+    row = await server(db_app, {"type": "oauth", "auth_mode": "auto", "allow_dcr": True, "client_name": "Codex",
+                               "config_isolation": config_isolation})
+    endpoint = f"/api/v1/mcps/{row.id}/oauth/start"
+    started = await db_app.web.post(endpoint)
+    assert started.status_code == 200, started.text
+    old_state = parse_qs(urlsplit(started.json()["authorization_url"]).query)["state"][0]
+    owner = db_app.actor["id"]
+    async with db_app.db.locked() as session:
+        for identity in (owner, "other-owner"):
+            await db_app.app.state.credentials.save_oauth_token(session, row, identity,
+                                                               {"access_token": "previous-access", "expires_at": None})
+    config = await db_app.app.state.credentials.materialize(row, owner)
+    config["auth"]["callback_path"] = "/callback"
+    row = await db_app.app.state.catalog.update(row.id, {"config": config}, user_id=owner)
+    for identity in (owner, "other-owner"):
+        payload = await db_app.app.state.credentials.load(row.id, identity)
+        assert bool(payload.get("oauth_token")) == (config_isolation == "user" and identity != owner)
+    payload = await db_app.app.state.credentials.load(row.id, owner if config_isolation == "user" else "service")
+    assert not payload.get("oauth_registration")
+
+    async def forbidden_exchange(*args):
+        pytest.fail("A callback with the previous path/configuration must not exchange its code")
+
+    monkeypatch.setattr(db_app.app.state.oauth, "exchange", forbidden_exchange)
+    rejected = await db_app.web.get("/api/v1/oauth/callback", params={
+        "state": old_state, "code": "old-code", "iss": "https://auth.test"})
+    assert rejected.status_code in {403, 409}
+    fresh = await db_app.web.post(endpoint)
+    assert fresh.status_code == 200, fresh.text
+    assert parse_qs(urlsplit(fresh.json()["authorization_url"]).query)["redirect_uri"][0].endswith("/callback")
+    assert calls == [("Codex", "http://127.0.0.1:8765/api/v1/oauth/callback"),
+                     ("Codex", "http://127.0.0.1:8765/callback")]
+
+
+async def test_explicit_default_callback_preserves_existing_registration_and_tokens(db_app, monkeypatch):
+    from test_oauth_registration import discovery, server
+
+    calls = discovery(monkeypatch, cimd=False)
+    row = await server(db_app)
+    endpoint = f"/api/v1/mcps/{row.id}/oauth/start"
+    assert (await db_app.web.post(endpoint)).status_code == 200
+    owner = db_app.actor["id"]
+    async with db_app.db.locked() as session:
+        await db_app.app.state.credentials.save_oauth_token(session, row, owner,
+                                                           {"access_token": "preserved-access", "expires_at": None})
+    config = await db_app.app.state.credentials.materialize(row, owner)
+    config["auth"]["callback_path"] = "/api/v1/oauth/callback"
+    row = await db_app.app.state.catalog.update(row.id, {"config": config}, user_id=owner)
+    assert (await db_app.app.state.credentials.load(row.id, owner))["oauth_token"]["access_token"] == "preserved-access"
+    assert (await db_app.web.post(endpoint)).status_code == 200
+    assert len(calls) == 1

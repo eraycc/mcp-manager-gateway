@@ -17,6 +17,10 @@ async def test_oauth_mode_clears_hidden_credentials_and_secret_is_optional(runti
     identity = page.get_by_label("Client ID", exact=True)
     secret = page.get_by_label("Client Secret", exact=True)
     name = page.get_by_label("客户端名称（client_name）", exact=True)
+    callback = page.get_by_label("OAuth 回调路径", exact=True)
+    await expect(callback).to_have_value("/api/v1/oauth/callback")
+    await expect(page.get_by_text("OAuth 回调路径。大多数服务使用默认的 /api/v1/oauth/callback；Figma 等部分远程 MCP 服务要求使用 /callback，若授权时提示 invalid_redirect_uri，请切换到 /callback 重试。", exact=True)).to_be_visible()
+    await callback.select_option("/callback")
     scopes = page.get_by_label("Scopes（空格分隔）", exact=True)
     await expect(scopes).to_have_value("")
     hint = page.locator(".oauth-fields small").filter(has_text="用于声明申请的权限范围")
@@ -35,6 +39,7 @@ async def test_oauth_mode_clears_hidden_credentials_and_secret_is_optional(runti
     await expect(name).to_have_value("Codex")
     automatic = await page.evaluate("oauthForm.value()")
     assert automatic["allow_dcr"] and automatic["client_name"] == "Codex"
+    assert automatic["callback_path"] == "/callback"
     assert "client_id" not in automatic and "client_secret" not in automatic
     await name.fill("My MMG")
     await mode.select_option("manual")
@@ -45,6 +50,9 @@ async def test_oauth_mode_clears_hidden_credentials_and_secret_is_optional(runti
     manual = await page.evaluate("oauthForm.value()")
     assert manual["scopes"] == ["mcp:connect", "profile:read"]
     assert manual["client_id"] == "public-client"
+    assert manual["callback_path"] == "/callback"
+    await callback.select_option("/api/v1/oauth/callback")
+    assert "callback_path" not in await page.evaluate("oauthForm.value()")
     assert "client_secret" not in manual and "client_name" not in manual and "allow_dcr" not in manual
 
 
@@ -53,13 +61,14 @@ async def test_automatic_registration_exposes_and_serializes_token_auth_method(r
     await page.evaluate("""async()=>{
       const {oauthFields}=await import('/oauth-fields.js');
       window.oauthForm=oauthFields({type:'oauth',auth_mode:'auto',allow_dcr:true,client_name:'Codex',
-                                   token_endpoint_auth_method:'client_secret_post'});
+                                   token_endpoint_auth_method:'client_secret_post',callback_path:'/callback'});
       document.querySelector('main').replaceChildren(oauthForm.node);
     }""")
     method = page.get_by_label("Token 端点认证方式", exact=True)
     await expect(method).to_be_visible()
     await expect(method).to_be_enabled()
     await expect(method).to_have_value("client_secret_post")
+    await expect(page.get_by_label("OAuth 回调路径", exact=True)).to_have_value("/callback")
     for chosen in ("client_secret_basic", "none", ""):
         await method.select_option(chosen)
         value = await page.evaluate("oauthForm.value()")
@@ -73,7 +82,8 @@ async def test_token_method_is_submitted_by_server_proposal_and_personal_forms(r
     model = {"id": "method-test", "name": "Method test", "slug": "method-test", "transport": "streamable-http",
              "mode": "lazy", "isolation": "user", "revision": 1, "config": {"url": "https://mcp.test/mcp",
              "auth": {"type": "oauth", "auth_mode": "auto", "allow_dcr": True, "client_name": "Codex",
-                      "token_endpoint_auth_method": "client_secret_post", "config_isolation": "user"}}}
+                      "token_endpoint_auth_method": "client_secret_post", "config_isolation": "user",
+                      "callback_path": "/callback"}}}
 
     async def respond(route):
         path = route.request.url.split("/api/v1/", 1)[1]
@@ -108,11 +118,15 @@ async def test_token_method_is_submitted_by_server_proposal_and_personal_forms(r
         if kind != "personal":
             await expect(method).to_have_value("client_secret_post")
         await method.select_option("client_secret_basic")
+        callback = dialog.get_by_label("OAuth 回调路径", exact=True)
+        await expect(callback).to_have_value("/api/v1/oauth/callback" if kind == "personal" else "/callback")
+        await callback.select_option("/callback")
         label = "保存修改" if kind == "server" else "保存审批配置" if kind == "proposal" else "保存"
         await dialog.get_by_role("button", name=label, exact=True).click()
         await expect(dialog).to_have_count(0)
         body = submitted[-1][1]
         auth = body["auth"] if kind == "personal" else body["config"]["auth"]
         assert auth["auth_mode"] == "auto" and auth["token_endpoint_auth_method"] == "client_secret_basic"
+        assert auth["callback_path"] == "/callback"
         assert "client_id" not in auth and "client_secret" not in auth
     assert len(submitted) == 3

@@ -18,6 +18,9 @@ export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=tru
  for(const [key,label]of [['authorization_url','授权 URL'],['token_url','Token URL'],['registration_url','注册 URL'],['issuer_url','Issuer URL']]){
   const f=field(label,initial[key]||'','url','可选，优先使用服务器发现信息；发现不可用时可手动填写端点。');f.input.setAttribute('aria-label',label);endpoints[key]=f;
  }
+ const callback=selectField('OAuth 回调路径',initial.callback_path||'/api/v1/oauth/callback',
+  [['/api/v1/oauth/callback','/api/v1/oauth/callback（默认）'],['/callback','/callback']]);
+ callback.node.append(el('small',{},'OAuth 回调路径。大多数服务使用默认的 /api/v1/oauth/callback；Figma 等部分远程 MCP 服务要求使用 /callback，若授权时提示 invalid_redirect_uri，请切换到 /callback 重试。'));
  const scopes=field('Scopes（空格分隔）',Array.isArray(initial.scopes)?initial.scopes.join(' '):initial.scopes||'','text',el('span',{},'用于声明申请的权限范围，多个权限用空格分隔（如 read write mcp:connect）。',el('br'),'留空时由服务器发现信息自动确定；Figma 等远程 MCP 通常填 mcp:connect。'));
  scopes.input.setAttribute('aria-label','Scopes（空格分隔）');
  function sync(clear=false){
@@ -30,10 +33,10 @@ export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=tru
   id.input.disabled=auto;secret.input.disabled=auto;name.input.disabled=!auto||!dcr.input.checked;
  }
  mode.input.addEventListener('change',()=>sync(true));dcr.input.addEventListener('change',()=>sync());sync();
- const node=el('div',{class:'form-grid span2 oauth-fields'},mode.node,manual,automatic,method.node,methodHelp,...Object.values(endpoints).map(f=>f.node),scopes.node);
+ const node=el('div',{class:'form-grid span2 oauth-fields'},mode.node,manual,automatic,method.node,methodHelp,...Object.values(endpoints).map(f=>f.node),callback.node,scopes.node);
  return{node,value(validate=true){
   const auth={...initial,type:'oauth',auth_mode:mode.input.value};
-  for(const key of [...runtimeFields,'client_id','client_secret','client_name','allow_dcr','token_endpoint_auth_method',...Object.keys(endpoints)])delete auth[key];
+  for(const key of [...runtimeFields,'client_id','client_secret','client_name','allow_dcr','token_endpoint_auth_method','callback_path',...Object.keys(endpoints)])delete auth[key];
   if(mode.input.value==='manual'){
    if(validate&&!id.input.value.trim())throw new Error('预注册模式必须填写 Client ID');
    auth.client_id=id.input.value.trim();if(secret.input.value)auth.client_secret=secret.input.value;
@@ -42,6 +45,7 @@ export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=tru
    if(auth.allow_dcr){if(validate&&!name.input.value.trim())throw new Error('DCR 注册必须填写客户端名称');auth.client_name=name.input.value.trim()}
   }
   if(method.input.value)auth.token_endpoint_auth_method=method.input.value;
+  if(callback.input.value!=='/api/v1/oauth/callback')auth.callback_path=callback.input.value;
   for(const[key,f]of Object.entries(endpoints))if(f.input.value.trim())auth[key]=f.input.value.trim();
   auth.scopes=scopes.input.value.split(/[ ,]+/).filter(Boolean);
   return auth;
