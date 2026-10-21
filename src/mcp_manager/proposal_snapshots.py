@@ -6,7 +6,7 @@ from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from .catalog_models import ArtifactObject, ProposalTestEntry
-from .catalog_store import CatalogStore, bounded_summary_rows, digest
+from .catalog_store import CatalogStore, bounded_summary_rows, digest, metadata_summary
 from .catalog_types import ArtifactRef, CatalogPage, GenerationRef
 from .database import McpProposal, now
 from .db_types import strict_json_dumps
@@ -100,9 +100,7 @@ class ProposalSnapshotStore(CatalogStore):
                 await session.execute(delete(ProposalTestEntry).where(ProposalTestEntry.id.in_(ids)))
 
     async def set_metadata(self, identity, metadata):
-        if await asyncio.to_thread(lambda: len(strict_json_dumps(metadata).encode())) > 8192:
-            raise GatewayError("catalog_metadata_too_large", "Diagnostic metadata exceeds its byte budget")
-        self.metadata = metadata
+        self.metadata = await asyncio.to_thread(metadata_summary, metadata)
 
     async def publish(self, identity, *, expected_scope):
         if expected_scope != self.scope or identity != self.scope.credential_generation:
