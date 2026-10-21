@@ -6,7 +6,7 @@ from .runtime import GatewayError
 
 SECRET_KEYS = {
     "password", "current_password", "secret", "secret_key", "database_url",
-    "token", "access_token", "refresh_token", "client_secret",
+    "token", "access_token", "refresh_token", "client_secret", "registration_access_token", "id_token", "code_verifier",
     "authorization", "cookie", "api_key", "value",
 }
 

@@ -148,11 +148,9 @@ def validate_config(transport, config):
         raise ValueError("Unsupported authentication type")
     auth = config.get("auth", {})
     if auth.get("type") == "oauth":
-        for field in ("authorization_url", "token_url"):
-            try:
-                check_url(auth.get(field, ""))
-            except ValueError as exc:
-                raise ValueError("OAuth " + field + ": " + str(exc)) from exc
+        from .oauth_config import validate_oauth
+
+        validate_oauth(auth, transport)
     auth_header = (auth.get("header", "X-API-Key") if auth.get("type") == "api_key" else
                    "Authorization" if auth.get("type") in {"oauth", "basic", "bearer"} else None)
     if auth_header:
@@ -485,9 +483,26 @@ class RestConnection(CapabilityConnection):
 
 
 class SdkConnection(CapabilityConnection):
-    def __init__(self, client, config=None):
+    def __init__(self, client, config=None, oauth_failure=None):
         self.client = client
         self.config = config or {}
+        self.oauth_failure = oauth_failure
+
+    async def _request(self, method, *args, **kwargs):
+        if self.oauth_failure is None:
+            return await getattr(self.client, method)(*args, **kwargs)
+        if self.oauth_failure.done():
+            raise self.oauth_failure.result()
+        request = asyncio.create_task(getattr(self.client, method)(*args, **kwargs))
+        try:
+            await asyncio.wait({request, self.oauth_failure}, return_when=asyncio.FIRST_COMPLETED)
+            if self.oauth_failure.done():
+                raise self.oauth_failure.result()
+            return await request
+        finally:
+            if not request.done():
+                request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
 
     def tool_allowed(self, name):
         return tool_allowed(self.config, name)
@@ -496,7 +511,7 @@ class SdkConnection(CapabilityConnection):
         cursor, seen = None, set()
         while True:
             budget.before_page()
-            result = wire(await getattr(self.client, method)(cursor=cursor, cache_mode="bypass"))
+            result = wire(await self._request(method, cursor=cursor, cache_mode="bypass"))
             entries = result.get(key, [])
             if not isinstance(entries, list):
                 raise GatewayError("invalid_pagination", "Capability page is not a list")
@@ -537,13 +552,19 @@ class SdkConnection(CapabilityConnection):
                         yield capability, entries[offset:offset + budget.batch_size]
                 succeeded += 1
             except GatewayError as exc:
-                if exc.code == "discovery_budget_exceeded":
+                from .runtime import oauth_http_401
+
+                if oauth_http_401(exc) or exc.code == "discovery_budget_exceeded":
                     raise
                 from .diagnostics import safe_diagnostic_error
                 error = {"capability": capability, "error": safe_diagnostic_error(exc, config=self.config)["message"]}
                 errors.append(error)
                 yield "_error", [error]
-            except Exception as exc:  # noqa: BLE001 - one unsupported capability does not hide the others
+            except Exception as exc:  # One unsupported capability does not hide the others.
+                from .runtime import oauth_http_401
+
+                if oauth_http_401(exc):
+                    raise
                 from .diagnostics import safe_diagnostic_error
                 error = {"capability": capability, "error": safe_diagnostic_error(exc, config=self.config)["message"]}
                 errors.append(error)
@@ -572,13 +593,13 @@ class SdkConnection(CapabilityConnection):
     async def call(self, name, arguments):
         if not self.tool_allowed(name):
             raise GatewayError("tool_disabled", "Tool is disabled by the imported service configuration")
-        return wire(await self.client.call_tool(name, arguments))
+        return wire(await self._request("call_tool", name, arguments))
 
     async def read_resource(self, uri):
-        return wire(await self.client.read_resource(uri))
+        return wire(await self._request("read_resource", uri))
 
     async def get_prompt(self, name, arguments):
-        return wire(await self.client.get_prompt(name, arguments))
+        return wire(await self._request("get_prompt", name, arguments))
 
 
 @asynccontextmanager
@@ -611,12 +632,22 @@ async def connect(spec: ServerSpec):
                 startup.deadline = float("inf")
                 yield SdkConnection(client, config)
     else:
-        async with httpx2.AsyncClient(headers=auth_headers(config),
+        oauth_failure = asyncio.get_running_loop().create_future()
+
+        async def oauth_response(response):
+            if response.status_code == 401:
+                error = GatewayError("auth_required", "授权已失效，请重新授权；本次不会自动重放调用")
+                error.oauth_http_401 = True
+                if not oauth_failure.done():
+                    oauth_failure.set_result(error)
+                raise error
+        hooks = {"response": [oauth_response]} if config.get("auth", {}).get("type") == "oauth" else {}
+        async with httpx2.AsyncClient(headers=auth_headers(config), event_hooks=hooks,
                                       timeout=float(config.get("call_timeout", 60)),
                                       verify=config.get("verify_tls", True),
                                       follow_redirects=False, trust_env=False) as http:
             def sse_http_factory(headers=None, timeout=None, auth=None):
-                return httpx2.AsyncClient(headers=headers, timeout=timeout, auth=auth,
+                return httpx2.AsyncClient(headers=headers, timeout=timeout, auth=auth, event_hooks=hooks,
                     verify=config.get("verify_tls", True), follow_redirects=False, trust_env=False)
             source = (sse_client(config["url"], headers=auth_headers(config),
                                  timeout=timeout, sse_read_timeout=float(config.get("call_timeout", 60)),
@@ -624,7 +655,12 @@ async def connect(spec: ServerSpec):
                       if spec.transport == "sse" else
                       streamable_http_client(config["url"], http_client=http))
             client = Client(source, read_timeout_seconds=float(config.get("call_timeout", 60)), cache=None)
-            with anyio.fail_after(timeout) as startup:
-                async with client:
-                    startup.deadline = float("inf")
-                    yield SdkConnection(client, config)
+            try:
+                with anyio.fail_after(timeout) as startup:
+                    async with client:
+                        startup.deadline = float("inf")
+                        yield SdkConnection(client, config, oauth_failure if hooks else None)
+            except Exception:
+                if oauth_failure.done():
+                    raise oauth_failure.result() from None
+                raise

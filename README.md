@@ -243,6 +243,12 @@ Browser translation can send visible page text to the configured translation pro
 
 See [Manage services](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/manage-services.md), [Runtime and lifecycle](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/concepts/runtime-and-lifecycle.md), and [Security model](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/security/security-model.md).
 
+## OAuth client registration
+
+Remote HTTP/SSE OAuth supports pre-registration (Client ID required, Secret optional) and automatic registration: CIMD first, then explicitly enabled DCR only if the authorization server does not advertise CIMD and provides a registration endpoint. Open the OAuth dialog and click Start authorization; opening it alone does not register a client or contact the authorization server.
+
+CIMD requires a stable public HTTPS `PUBLIC_URL`, for example an Nginx proxy to port 8765. MMG publishes credential-free metadata at `/oauth/client-metadata.json`; the administration UI can remain access restricted. Expired tokens get at most one refresh attempt; refresh failure or a downstream HTTP 401 requires explicit reauthorization, without replaying business calls. See the [OAuth and public HTTPS setup guide](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/oauth.md).
+
 ## Configuration and deployment
 
 Environment variables override the user-home `.env`. MMG does not automatically load `.env` from the source tree or current working directory. Start from [.env.example](https://github.com/eraycc/mcp-manager-gateway/blob/master/.env.example).

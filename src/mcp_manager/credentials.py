@@ -163,12 +163,15 @@ class CredentialStore:
         owner = credential_owner(row.isolation, user_id)
         payload = await self._load(session, row.id, owner)
         payload["oauth_token"] = copy.deepcopy(value)
+        payload["oauth_epoch"] = payload.get("oauth_epoch", 0) + 1
+        payload.pop("oauth_state", None)
         await self.write(session, row.id, owner, payload)
         return owner
 
     async def configuration_summaries(self, rows, user_id: str) -> dict:
         """Aggregate personal credential readiness for an administrator's current page."""
         from .oauth import token_expiry
+        from .oauth_config import callback_uri, registration_fingerprint
 
         eligible = {row.id: row for row in rows
                     if row.isolation == "user" and row.auth_type in PERSONAL_AUTH_TYPES}
@@ -203,16 +206,20 @@ class CredentialStore:
             personal = payloads[row.id].get(owner, {})
             if row.auth_type in STATIC_AUTH_FIELDS:
                 return static_auth_configured(row.auth_type, personal.get("auth_config", {}))
-            config = (personal if row.config_isolation == "user"
-                      else payloads[row.id].get("service", {})).get("auth_config", {})
+            config_payload = personal if row.config_isolation == "user" else payloads[row.id].get("service", {})
+            config = config_payload.get("auth_config", {})
             token = personal.get("oauth_token", {})
-            return bool(
-                config.get("type") == "oauth"
-                and all(isinstance(config.get(key), str) and config[key]
-                        for key in ("authorization_url", "token_url", "client_id"))
-                and token.get("access_token")
-                and (token.get("refresh_token") or token_expiry(token) > checked_at)
-            )
+            registration = config_payload.get("oauth_registration", {})
+            # Resource changes clear registration in persist_config; listing never opens service configs.
+            resource = registration.get("resource", "")
+            registered = registration.get("config_fingerprint") == registration_fingerprint(
+                config, resource, callback_uri(self.catalog.config.public_url))
+            configured_client = (bool(registration.get("auth", {}).get("client_id")) if registered else
+                all(isinstance(config.get(key), str) and config[key]
+                    for key in ("authorization_url", "token_url", "client_id")))
+            return bool(config.get("type") == "oauth" and configured_client and token.get("access_token")
+                        and personal.get("oauth_state", {}).get("status") != "needs_reauth"
+                        and (token.get("refresh_token") or token_expiry(token) > checked_at))
 
         return {
             identity: {
@@ -257,11 +264,15 @@ class CredentialStore:
             )
             if not config_payload.get("auth_config"):
                 return result | {"state": "missing", "action": "configure_oauth"}
+            from .oauth import oauth_auth_status
+
+            auth_status = oauth_auth_status(personal)
+            if personal.get("oauth_state", {}).get("status") == "needs_reauth":
+                return result | {"state": "needs_reauth", "auth_status": auth_status, "action": "authorize"}
             if not personal.get("oauth_token", {}).get("access_token"):
-                return result | {
-                    "state": "pending_authorization",
-                    "action": "authorize",
-                }
+                return result | {"state": "pending_authorization", "auth_status": auth_status, "action": "authorize"}
+            if auth_status == "expired":
+                return result | {"state": "expired", "auth_status": auth_status, "action": "authorize"}
 
         cache = self.catalog.cached(row, user_id)
         cache_status = cache.get("cache_status")
@@ -325,7 +336,7 @@ class CredentialStore:
         }
         if "granted_scope" in auth:
             oauth_token["scope"] = copy.deepcopy(auth["granted_scope"])
-        elif oauth_token and "scope" in auth:
+        elif oauth_token and "scope" in auth and auth["scope"] not in ("user", "service"):
             oauth_token["scope"] = copy.deepcopy(auth["scope"])
             auth_config.pop("scope", None)
 
@@ -333,6 +344,20 @@ class CredentialStore:
             owner: await self._load(session, row.id, owner)
             for owner in {config_owner, token_owner}
         }
+        old_config = payloads[config_owner].get("auth_config")
+        old_resource = self.catalog.unseal(row.config).get("url", "") if row.config else ""
+        from .oauth_config import comparable_settings
+
+        changed = (old_config is not None and comparable_settings(old_config) != comparable_settings(auth_config)) or bool(old_resource) and old_resource != full_config.get("url", "")
+        if changed:
+            affected = await self.owners(row.id, session=session) if config_owner == "service" else {token_owner}
+            for owner in affected | {config_owner, token_owner}:
+                item = payloads.setdefault(owner, await self._load(session, row.id, owner))
+                item.pop("oauth_token", None)
+                item.pop("oauth_registration", None)
+                item.pop("oauth_state", None)
+                item["oauth_epoch"] = item.get("oauth_epoch", 0) + 1
+            oauth_token = {}
         payloads[config_owner]["auth_config"] = auth_config
         if oauth_token:
             payloads[token_owner]["oauth_token"] = oauth_token

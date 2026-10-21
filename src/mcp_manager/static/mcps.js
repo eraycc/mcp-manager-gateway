@@ -1,3 +1,4 @@
+import{oauthFields}from './oauth-fields.js';
 import{el,api,button,toast,errorText,field,selectField,check,jsonField,dialog,formDialog,detail,pretty,jobDialog,loading,empty,badge,renderFullJson}from './core.js';
 import{capabilityBrowser}from './capability-browser.js';
 export {mcpImport} from './importer.js';
@@ -5,7 +6,7 @@ const transportOptions=[['stdio','本地进程 · stdio'],['streamable-http','St
 export const isolationOptions=transport=>transport==='stdio'?[['service','服务共享'],['user','按用户隔离'],['session','按会话隔离']]:[['service','服务共享'],['user','按用户隔离']];
 export const normalizeIsolation=(transport,isolation)=>transport!=='stdio'&&isolation==='session'?'user':isolation;
 const restExample={name:'get_item',description:'查询条目',inputSchema:{type:'object',properties:{id:{type:'string',description:'条目 ID'}},required:['id']},request:{method:'GET',url:'https://api.example.com/items/{id}',headers:{},query:{}},response:{type:'json',pointer:'/data',mapping:{}}};
-const editorSecretKeys=new Set(['authorization','password','current_password','secret','secret_key','token','access_token','refresh_token','client_secret','cookie','database_url','api_key','value']);
+const editorSecretKeys=new Set(['authorization','password','current_password','secret','secret_key','token','access_token','refresh_token','client_secret','registration_access_token','id_token','code_verifier','cookie','database_url','api_key','value']);
 export function maskEditorSecrets(value,parent=''){if(Array.isArray(value))return value.map(item=>maskEditorSecrets(item,parent));if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([key,item])=>[key,(editorSecretKeys.has(key.toLowerCase())||['env','headers','env_headers'].includes(parent))&&item?'[REDACTED]':maskEditorSecrets(item,key.toLowerCase())]));return value}
 function mergeEditorSecrets(current,revealed){if(current==='[REDACTED]')return structuredClone(revealed);if(Array.isArray(current))return current.map((item,index)=>mergeEditorSecrets(item,revealed?.[index]));if(current&&typeof current==='object')return Object.fromEntries(Object.entries(current).map(([key,item])=>[key,mergeEditorSecrets(item,revealed?.[key])]));return current}
 function proposalEditorModel(full){const payload=structuredClone(full.payload);payload.slug=payload.slug||'';if(payload.config?.auth?.type==='oauth'&&full.config_isolation)payload.config.auth.config_isolation=full.config_isolation;return{...payload,mode:full.mode||'lazy',isolation:full.isolation||'service',config_isolation:full.config_isolation??null}}
@@ -15,7 +16,20 @@ function build(){formArea.replaceChildren();const name=field('服务名称',mode
 const base=el('div',{class:'form-grid'},name.node,slug.node,description.node,tags.node,transport.node,policy.node,isolation.node),section=el('div',{class:'stack'});formArea.append(base,section);let readConfig=()=>model.config;
 function configForm(){section.replaceChildren();const c=model.config||{},parts=[];let specific=()=>({});if(transport.input.value==='stdio'){const command=field('可执行命令',c.command||'','text','例如 uv、node 或可执行文件绝对路径。'),args=jsonField('命令参数',c.args||[], 'JSON 字符串数组，例如 ["run", "server.py"]'),env=jsonField('环境变量',c.env||{},'键值对象。秘密值保存后以 [REDACTED] 展示。'),cwd=field('工作目录',c.cwd||''),encoding=field('输出编码',c.encoding||'utf-8');command.input.required=true;parts.push(command.node,args.node,env.node,el('div',{class:'form-grid'},cwd.node,encoding.node));specific=()=>{const a=args.value(),e=env.value();if(!Array.isArray(a)||!a.every(x=>typeof x==='string'))throw new Error('命令参数必须是字符串数组');if(!e||Array.isArray(e)||typeof e!=='object')throw new Error('环境变量必须是对象');return{command:command.input.value,args:a,env:e,cwd:cwd.input.value||null,encoding:encoding.input.value}}}
 else if(transport.input.value==='rest'){const health=field('健康检查 URL（可选）',c.healthcheck_url||'','url','填写后通过 GET 检查该地址；留空则对工具地址发送 HEAD 检查连接。含 URL 参数的工具必须填写固定健康检查地址。');parts.push(health.node);const list=el('div',{class:'stack'});let tools=structuredClone(c.tools||[]);const draw=()=>{list.replaceChildren(...tools.map((t,i)=>el('div',{class:'card'},el('div',{class:'actions'},el('strong',{},t.name||'未命名工具'),badge(t.request?.method||'GET'),el('span',{class:'muted'},t.request?.url||''),button('编辑映射',()=>restTool(t,value=>{tools[i]=value;draw()})),button('删除工具',()=>{tools.splice(i,1);draw()},'danger')))));if(!tools.length)list.append(empty('尚未配置 REST 工具，添加后可编辑请求与响应映射。'))};draw();parts.push(el('p',{class:'notice'},'每个 REST 工具独立定义输入 Schema、HTTP 请求和响应映射。使用 {id} 引用输入参数，支持 {user.id}；完整占位符保留 JSON 值类型，URL 参数自动编码。'),list,button('添加 REST 工具',()=>restTool(structuredClone(restExample),value=>{tools.push(value);draw()})));specific=()=>({tools,healthcheck_url:health.input.value||null})}
-else{const url=field('服务 URL',c.url||'','url'),headers=jsonField('请求头',c.headers||{}),tls=check('验证 TLS 证书',c.verify_tls!==false);url.input.required=true;const authType=selectField('认证方式',c.auth?.type||'none',[['none','无认证'],['bearer','Bearer Token'],['basic','Basic 用户名密码'],['api_key','API Key'],['oauth','OAuth 2.0']]),authBox=el('div',{class:'form-grid'});let authFields={},authBase=structuredClone(c.auth||{});const readAuth=()=>{const a={...authBase,type:authType.input.value};for(const[k,f]of Object.entries(authFields))a[k]=k==='scopes'?f.input.value.split(/[ ,]+/).filter(Boolean):f.input.value;if(a.type==='oauth'&&!a.config_isolation)delete a.config_isolation;return a};const drawAuth=()=>{authFields={};authBox.replaceChildren();const defs={none:[],bearer:[['token','Bearer Token']],basic:[['username','用户名'],['password','密码']],api_key:[['header','请求头名称（例如 X-API-Key）'],['value','API Key']],oauth:[['authorization_url','授权 URL'],['token_url','Token URL'],['client_id','Client ID'],['client_secret','Client Secret'],['scopes','Scopes（空格分隔）']]};for(const[k,l]of defs[authType.input.value]){const f=field(l,k==='scopes'?(Array.isArray(authBase[k])?authBase[k].join(' '):String(authBase[k]||'')):authBase[k]||'',/secret|password|token$|^value$/.test(k)&&!k.endsWith('_url')&&!secretsVisible?'password':'text');if(proposal&&authType.input.value==='oauth'&&['authorization_url','token_url','client_id','client_secret'].includes(k))f.input.required=true;authFields[k]=f;authBox.append(f.node)}if(authType.input.value==='oauth'){const personal=isolation.input.value==='user',choices=proposal?[['','未设置（审批后默认共享）'],['shared','共享配置'],['user','独享配置']]:[['shared','共享配置'],['user','独享配置']],selected=proposal?(authBase.config_isolation??''):(personal?(authBase.config_isolation||'shared'):'shared'),f=selectField('OAuth 配置隔离',selected,choices);f.input.disabled=!personal&&!proposal;authFields.config_isolation=f;authBox.append(f.node,el('p',{class:'muted'},personal?'共享配置由管理员维护；独享配置由每位用户在个人资料中填写。':'服务共享时留空或使用共享配置；独享配置仅适用于按用户隔离。'))}};authType.input.onchange=()=>{authBase=readAuth();drawAuth()};drawAuth();parts.push(url.node,headers.node,tls.node,authType.node,authBox);specific=()=>({url:url.input.value,headers:headers.value(),verify_tls:tls.input.checked,auth:readAuth()})}
+else{const url=field('服务 URL',c.url||'','url'),headers=jsonField('请求头',c.headers||{}),tls=check('验证 TLS 证书',c.verify_tls!==false);url.input.required=true;const authType=selectField('认证方式',c.auth?.type||'none',[['none','无认证'],['bearer','Bearer Token'],['basic','Basic 用户名密码'],['api_key','API Key'],['oauth','OAuth 2.0']]),authBox=el('div',{class:'form-grid'});let authFields={},oauthForm=null,authBase=structuredClone(c.auth||{});
+const readAuth=()=>{const a=oauthForm?oauthForm.value(false):{...authBase,type:authType.input.value};for(const[k,f]of Object.entries(authFields))a[k]=f.input.value;if(a.type==='oauth'&&!a.config_isolation)delete a.config_isolation;return a};
+const drawAuth=()=>{authFields={};oauthForm=null;authBox.replaceChildren();
+ if(authType.input.value==='oauth'){
+  oauthForm=oauthFields(authBase,{secretsVisible});authBox.append(oauthForm.node);
+  const personal=isolation.input.value==='user',choices=proposal?[['','未设置（审批后默认共享）'],['shared','共享配置'],['user','独享配置']]:[['shared','共享配置'],['user','独享配置']],
+   selected=proposal?(authBase.config_isolation??''):(personal?(authBase.config_isolation||'shared'):'shared'),f=selectField('OAuth 配置隔离',selected,choices);
+  f.input.disabled=!personal&&!proposal;authFields.config_isolation=f;
+  authBox.append(f.node,el('p',{class:'muted'},personal?'共享配置由管理员维护；独享配置由每位用户在个人资料中填写。':'服务共享时留空或使用共享配置；独享配置仅适用于按用户隔离。'));
+ }else{const defs={none:[],bearer:[['token','Bearer Token']],basic:[['username','用户名'],['password','密码']],api_key:[['header','请求头名称（例如 X-API-Key）'],['value','API Key']]};
+  for(const[k,l]of defs[authType.input.value]){const f=field(l,authBase[k]||'',/password|token$|^value$/.test(k)&&!secretsVisible?'password':'text');authFields[k]=f;authBox.append(f.node)}
+ }};
+authType.input.onchange=()=>{authBase={type:authType.input.value};drawAuth()};drawAuth();parts.push(url.node,headers.node,tls.node,authType.node,authBox);
+specific=()=>({url:url.input.value,headers:headers.value(),verify_tls:tls.input.checked,auth:readAuth()})}
 const timings={};const timingGrid=el('div',{class:'form-grid'});for(const[k,l,v]of [['startup_timeout','启动超时（秒）',30],['call_timeout','调用超时（秒）',60],['stop_timeout','停止超时（秒）',10],['queue_timeout','排队超时（秒）',30],['concurrency','并发调用数',1],['idle_seconds','空闲回收（秒）',86400]]){const f=field(l,c[k]??v,'number');f.input.min=k==='idle_seconds'?0:1;timings[k]=f;timingGrid.append(f.node)}section.append(...parts,el('details',{},el('summary',{},'超时、并发与回收设置'),timingGrid));readConfig=()=>({...c,...specific(),...Object.fromEntries(Object.entries(timings).map(([k,f])=>[k,Number(f.input.value)]))})}
 readForm=()=>{const config=readConfig();return{...model,name:name.input.value,slug:slug.input.value||undefined,description:description.input.value,tags:tags.input.value.split(',').map(x=>x.trim()).filter(Boolean),transport:transport.input.value,mode:policy.input.value,isolation:isolation.input.value,config_isolation:config.auth?.type==='oauth'?(config.auth.config_isolation||null):null,config}};const redrawIsolation=(chosen,value)=>{const normalized=normalizeIsolation(chosen,value);isolation.input.replaceChildren(...isolationOptions(chosen).map(([v,l])=>el('option',{value:v},l)));isolation.input.value=normalized;return normalized};isolation.input.onchange=()=>{model=readForm();configForm()};let previousTransport=model.transport;transport.input.onchange=()=>{const chosen=transport.input.value;try{transport.input.value=previousTransport;const saved=readForm(),before=saved.isolation;drafts.set(previousTransport,structuredClone(saved.config));model={...saved,transport:chosen,config:drafts.has(chosen)?structuredClone(drafts.get(chosen)):{...transportTemplate(chosen),...saved.config}};transport.input.value=chosen;model.isolation=redrawIsolation(chosen,before);previousTransport=chosen;configForm();if(model.isolation!==before)toast('网络传输不支持会话隔离，已切换为按用户隔离','warning');err.hidden=true}catch(e){transport.input.value=previousTransport;err.textContent='协议未切换：'+e.message;err.hidden=false}};configForm()}
 build();const formBtn=button('表单配置',()=>switchMode('form'),'active'),jsonBtn=button('JSON 配置',()=>switchMode('json'));function switchMode(next){try{if(next===mode)return;if(mode==='form'){model=readForm();json.input.value=pretty(model)}else{model=json.value();if(!model||!transportOptions.some(x=>x[0]===model.transport)||!model.config)throw new Error('配置需要合法 transport 与 config 对象');build()}mode=next;formArea.hidden=mode!=='form';json.node.hidden=mode!=='json';formBtn.classList.toggle('active',mode==='form');jsonBtn.classList.toggle('active',mode==='json');err.hidden=true}catch(e){err.textContent=e.message;err.hidden=false}}
@@ -41,7 +55,7 @@ function testTool(service,tool){const abort=new AbortController();const schema=t
 export function transportTemplate(transport){const common={startup_timeout:30,call_timeout:60,stop_timeout:10,queue_timeout:30,concurrency:1,idle_seconds:86400};if(transport==='stdio')return{...common,command:'uv',args:[],env:{},cwd:null,encoding:'utf-8'};if(transport==='rest')return{...common,tools:[],headers:{},verify_tls:true,auth:{type:'none'}};return{...common,url:'',headers:{},verify_tls:true,auth:{type:'none'}}
 }
 
-export const credentialStateLabel=state=>({not_required:'无需配置',missing:'未配置',pending_authorization:'待授权',discovering:'发现中',ready:'可用',failed:'发现失败'}[state]||state);
+export const credentialStateLabel=state=>({not_required:'无需配置',missing:'未配置',pending_authorization:'待授权',expired:'授权已过期',needs_reauth:'需要重新授权',discovering:'发现中',ready:'可用',failed:'发现失败'}[state]||state);
 
 function personalRefreshControls(service,initial,onChange){
  if(!initial.refresh_supported)return null;
@@ -77,21 +91,27 @@ export async function credentialDialog(service,onChange=()=>{}){
   oauth:[['authorization_url','授权 URL','url'],['token_url','Token URL','url'],['client_id','Client ID','text'],['client_secret','Client Secret','password'],['scopes','Scopes（空格分隔）','text']]
  }[authType];
  if(!defs)throw new Error('此服务无需配置个人凭据');
+ if(authType==='oauth'){
+  const oauth=oauthFields({}, {allowAutomatic:['streamable-http','sse'].includes(service.transport)});
+  formDialog('OAuth 配置',[oauth.node,personalRefreshControls(service,status,onChange)],async()=>{
+   const auth={...oauth.value(),config_isolation:'user'};
+   const next=await api('/mcps/'+service.id+'/credentials',{method:'PUT',body:{revision:service.revision,auth}});
+   toast('个人凭据已保存，状态：'+credentialStateLabel(next.state),'success');onChange();
+  });return;
+ }
  const fields=Object.fromEntries(defs.map(([key,label,type])=>[key,field(label,key==='header'?'X-API-Key':'',type)]));
- for(const [key]of defs)fields[key].input.required=key!=='scopes';
- formDialog(authType==='oauth'?'OAuth 配置':'配置凭据',[...defs.map(([key])=>fields[key].node),personalRefreshControls(service,status,onChange)],async()=>{
+ for(const[key]of defs)fields[key].input.required=true;
+ formDialog('配置凭据',[...defs.map(([key])=>fields[key].node),personalRefreshControls(service,status,onChange)],async()=>{
   const auth={type:authType};
-  for(const [key]of defs)auth[key]=key==='scopes'?fields[key].input.value.split(/[ ,]+/).filter(Boolean):fields[key].input.value;
-  if(authType==='oauth')auth.config_isolation='user';
+  for(const[key]of defs)auth[key]=fields[key].input.value;
   const next=await api('/mcps/'+service.id+'/credentials',{method:'PUT',body:{revision:service.revision,auth}});
-  toast('个人凭据已保存，状态：'+credentialStateLabel(next.state),'success');
-  onChange();
+  toast('个人凭据已保存，状态：'+credentialStateLabel(next.state),'success');onChange();
  });
 }
 
 export async function oauthDialog(service,canManage,onChange=()=>{},returnTo='mcps'){
  const state=await api('/mcps/'+service.id+'/oauth/status'),content=el('div',{class:'stack'});
- content.append(el('p',{class:'notice'},state.authorized?'当前登录用户已完成 OAuth 授权。':'当前登录用户尚未完成 OAuth 授权，或授权已过期。其他用户的个人授权不可复用。'));
+ content.append(el('p',{class:'notice'},state.authorized?'当前登录用户已完成 OAuth 授权。':state.state==='needs_reauth'?'授权已失效，请点击重新授权以继续使用。':'当前登录用户尚未完成 OAuth 授权，或授权已过期。其他用户的个人授权不可复用。'));
  content.append(el('p',{class:'muted'},'授权不会自动启用已禁用的服务。授权返回后点击“重新检查授权状态”，可在个人资料中刷新本人的能力缓存；管理员也可验证并启动。读取工具成功后才恢复可用目录。列表中的失败时间表示上一次尝试。'));
  const d=dialog('授权服务',content);
  if(returnTo==='profile'){
@@ -101,5 +121,5 @@ export async function oauthDialog(service,canManage,onChange=()=>{},returnTo='mc
  content.append(button('重新检查授权状态',async()=>{d.close();await oauthDialog(service,canManage,onChange,returnTo)}));
  if(state.authorized&&canManage)content.append(button('验证并启动',async()=>{try{await api('/mcps/'+service.id+'/start',{method:'POST'});toast('验证成功，服务已启动','success');d.close()}finally{onChange()}},'primary'));
  if(state.authorized)content.append(button('断开 OAuth 授权',()=>formDialog('确认操作',[el('p',{},'断开后，你需要重新授权才能调用此服务。其他用户的授权不受影响。')],async()=>{await api('/mcps/'+service.id+'/oauth/disconnect',{method:'POST'});d.close();toast('已断开 OAuth 授权');onChange()},{saveLabel:'确认执行'}),'danger'));
- try{const result=await api('/mcps/'+service.id+'/oauth/start',{method:'POST',body:{return_to:returnTo}}),url=new URL(result.authorization_url);if(!['http:','https:'].includes(url.protocol))throw new Error('授权地址不受支持');if(d.isConnected)content.append(el('a',{href:url.href,target:'_blank',rel:'noopener noreferrer'},'打开授权页面'))}catch(e){if(d.isConnected)content.append(el('p',{class:'error',role:'alert'},e.message))}
+ const authorize=async()=>{try{const result=await api('/mcps/'+service.id+'/oauth/start',{method:'POST',body:{return_to:returnTo}}),url=new URL(result.authorization_url);if(!['http:','https:'].includes(url.protocol))throw new Error('授权地址不受支持');if(d.isConnected)content.append(el('a',{href:url.href,target:'_blank',rel:'noopener noreferrer'},'打开授权页面'))}catch(e){if(d.isConnected)content.append(el('p',{class:'error',role:'alert'},e.message))}};content.append(button(state.authorized||state.state==='needs_reauth'?'重新授权':'开始授权',authorize,'primary'));
 }

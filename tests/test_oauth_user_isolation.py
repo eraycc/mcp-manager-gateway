@@ -42,6 +42,8 @@ async def test_legacy_oauth_never_reuses_shared_credentials(tmp_path, legacy_sco
             assert caught.value.code == "auth_required"
         assert (await web.get("/api/v1/mcps/" + row.id + "/oauth/status")).json() == {
             "authorized": False,
+            "auth_status": "needs_reauth",
+            "registration_mode": "manual",
             "state": "pending_authorization",
             "config_isolation": "shared",
             "isolation": "user",

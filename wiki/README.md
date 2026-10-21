@@ -14,6 +14,7 @@
 ### 管理员
 
 - [服务管理与测试](guides/manage-services.md)
+- [OAuth 预注册、CIMD、DCR 与公网 HTTPS](guides/oauth.md)
 - [连接管理与租期断开](guides/manage-connections.md)
 - [配置与数据目录](operations/configuration.md)
 - [控制台外观、翻译与版本提醒](guides/interface-translation-and-updates.md)
