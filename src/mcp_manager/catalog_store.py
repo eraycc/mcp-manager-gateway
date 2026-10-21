@@ -19,6 +19,91 @@ from .runtime import GatewayError
 
 KINDS = {"tools", "resources", "prompts", "templates"}
 MAX_DEFINITION_BYTES = 8 * 1024 * 1024
+MAX_METADATA_BYTES = 8192
+
+
+def _metadata_text(value, max_bytes):
+    """Budget the serialized JSON string, including Unicode and escaped controls."""
+    if not isinstance(value, str):
+        return "[invalid metadata]", True
+    sample = value[:max_bytes]
+    if len(sample) == len(value) and len(strict_json_dumps(sample).encode("utf-8")) <= max_bytes:
+        return sample, False
+    low, high = 0, len(sample)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(strict_json_dumps(sample[:middle] + "…").encode("utf-8")) <= max_bytes:
+            low = middle
+        else:
+            high = middle - 1
+    return sample[:low] + "…", True
+
+
+def metadata_summary(metadata):
+    """Project oversized display metadata; complete capability contracts live separately."""
+    summary = dict(metadata)
+    if len(strict_json_dumps(summary).encode("utf-8")) <= MAX_METADATA_BYTES:
+        return summary
+    info = metadata.get("serverInfo")
+    omitted = []
+    if isinstance(info, dict) and "icons" in info:
+        summary["serverInfo"] = {key: value for key, value in info.items() if key != "icons"}
+        omitted.append("serverInfo.icons")
+        summary.update(metadata_truncated=True, metadata_omitted_fields=list(omitted))
+        if len(strict_json_dumps(summary).encode("utf-8")) <= MAX_METADATA_BYTES:
+            return summary
+
+    # Fixed JSON-byte budgets leave room for field names, counts and truncation markers.
+    limits = {"name": 512, "version": 256, "title": 512, "description": 1024, "websiteUrl": 768}
+    result = {"serverInfo": {}, "capability_errors": [], "metadata_truncated": True}
+    truncated = []
+    if isinstance(info, dict):
+        for key, limit in limits.items():
+            if key in info:
+                text, clipped = _metadata_text(info[key], limit)
+                if key == "websiteUrl" and clipped:
+                    omitted.append("serverInfo.websiteUrl")  # Never synthesize a different navigation target.
+                else:
+                    result["serverInfo"][key] = text
+                    if clipped:
+                        truncated.append("serverInfo." + key)
+        if set(info) - set(limits) - {"icons"}:
+            omitted.append("serverInfo.extensions")
+    if "protocolVersion" in metadata:
+        result["protocolVersion"], clipped = _metadata_text(metadata["protocolVersion"], 128)
+        if clipped:
+            truncated.append("protocolVersion")
+    if set(metadata) - {"serverInfo", "protocolVersion", "capability_errors", "metadata_omitted_fields"}:
+        omitted.append("extensions")
+
+    errors = metadata.get("capability_errors") or []
+    if not isinstance(errors, list):
+        errors = [{"capability": "metadata", "error": "Invalid capability error metadata"}]
+    known, extra = {}, []
+    for error in errors:
+        item = error if isinstance(error, dict) else {
+            "capability": "metadata", "error": "Invalid capability error entry"}
+        capability = item.get("capability")
+        if isinstance(capability, str) and capability in KINDS:
+            known.setdefault(capability, item)
+        elif len(extra) < 4:
+            extra.append(item)
+    selected = list(known.values()) + extra[:4 - len(known)]
+    clipped_errors = len(selected) != len(errors)
+    for item in selected:
+        capability, clipped_name = _metadata_text(item.get("capability", ""), 64)
+        message, clipped_message = _metadata_text(item.get("error", ""), 512)
+        result["capability_errors"].append({"capability": capability, "error": message})
+        clipped_errors |= clipped_name or clipped_message or bool(set(item) - {"capability", "error"})
+    result["capability_errors_total"] = len(errors)
+    result["capability_errors_truncated"] = clipped_errors
+    if clipped_errors:
+        truncated.append("capability_errors")
+    if omitted:
+        result["metadata_omitted_fields"] = omitted
+    if truncated:
+        result["metadata_truncated_fields"] = truncated
+    return result
 
 
 def searchable_text(entry):
@@ -200,12 +285,10 @@ class CatalogStore:
             raise GatewayError("catalog_duplicate_entry", "Catalog contains duplicate entries or conflicting hashes") from None
 
     async def set_metadata(self, identity, metadata):
-        size = await asyncio.to_thread(lambda: len(strict_json_dumps(metadata).encode()))
-        if size > 8192:
-            raise GatewayError("catalog_metadata_too_large", "Capability metadata exceeds the summary budget")
+        summary = await asyncio.to_thread(metadata_summary, metadata)
         async with self.db.locked() as session:
             generation, _, _ = await self._staging(session, identity)
-            generation.details = metadata
+            generation.details = summary
 
     async def discard_kind(self, identity, kind):
         self._check_kind(kind)

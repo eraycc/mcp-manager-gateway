@@ -283,6 +283,10 @@ class DiscoveryBudget:
         self.entries += entries
         if self.entries > self.max_entries:
             raise GatewayError("discovery_budget_exceeded", "Capability discovery exceeded its entry budget")
+        await self.consume_bytes(result)
+
+    async def consume_bytes(self, result):
+        """Count message and total bytes without charging a capability-list page."""
         def measure():
             size = 0
             for piece in json.JSONEncoder(ensure_ascii=False, allow_nan=False).iterencode(result):
@@ -299,6 +303,8 @@ async def iter_capabilities(connection, *, budget):
     iterator = getattr(connection, "iter_capabilities", None)
     if iterator:
         async for kind, entries in iterator(budget=budget):
+            if kind == "_metadata":
+                await budget.consume_bytes(entries[0] if entries else {})
             yield kind, entries
         return
     # Legacy transport plugins remain compatible; streaming plugins should expose iter_capabilities.
@@ -415,7 +421,7 @@ class RestConnection(CapabilityConnection):
 
     async def discover(self):
         result = {"tools": [], "resources": [], "prompts": [], "templates": []}
-        async for kind, entries in self.iter_capabilities(budget=DiscoveryBudget.from_config(self.config)):
+        async for kind, entries in iter_capabilities(self, budget=DiscoveryBudget.from_config(self.config)):
             if kind == "_metadata":
                 continue
             result[kind].extend(entries)
@@ -580,7 +586,7 @@ class SdkConnection(CapabilityConnection):
     async def discover(self):
         result = dict.fromkeys(("tools", "resources", "prompts", "templates"))
         result = {kind: [] for kind in result}
-        async for kind, entries in self.iter_capabilities(budget=DiscoveryBudget.from_config(self.config)):
+        async for kind, entries in iter_capabilities(self, budget=DiscoveryBudget.from_config(self.config)):
             if kind == "_error":
                 for error in entries:
                     result[error["capability"]] = []

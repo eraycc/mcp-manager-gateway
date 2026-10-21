@@ -25,6 +25,10 @@
 
 ## 兼容与大小限制
 
+服务目录与审批诊断共用 8 KiB 元数据摘要策略。小型元数据保持原样；超限时先省略 `serverInfo.icons`，不足以缩小时再提取服务名称、版本、标题、说明、网址、协议版本和能力错误。文本按实际序列化 JSON 的 UTF-8 字节数裁剪，网址超长时省略而不生成错误链接，未知扩展不进入紧凑摘要。错误列表优先保留 tools、resources、prompts、templates 四类失败，并通过 `capability_errors_total` 与 `capability_errors_truncated` 说明其余错误数量及裁剪情况。
+
+`metadata_truncated`、`metadata_truncated_fields` 和 `metadata_omitted_fields` 明确标记摘要变化。这类展示元数据超限不会再阻塞刷新或审批测试，完整工具定义及 inputSchema 独立保存，不随元数据摘要裁剪。完整诊断响应及传输总量仍遵循各自的安全预算。原始元数据计入 `discovery_max_message_bytes` 和 `discovery_max_decoded_bytes`，不会额外占用能力分页页数；达到原始发现预算时仍返回 `discovery_budget_exceeded`。此策略不会解除原始传输或完整定义的安全限制。
+
 旧 `GET /api/v1/mcps/{id}/tools` 只读取缓存，不自动连接。旧完整目录测试、诊断和刷新响应限制为 1 MiB；服务与提议列表页限制为 128 KiB。超限返回明确的 `catalog_payload_too_large`，不截断 inputSchema，也不返回大块 JSON 让浏览器处理。
 
 大目录集成应使用摘要分页和单条详情；服务/提议列表遇到超限时减小 `page_size`。旧测试响应默认仍兼容小目录；需要大目录诊断时显式使用 `summary=true`。现有目录缓存的显式升级导入另见[备份与迁移](../operations/backup-and-migration.md)。
