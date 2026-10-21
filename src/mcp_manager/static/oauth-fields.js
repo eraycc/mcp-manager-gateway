@@ -30,7 +30,7 @@ export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=tru
   [['','自动选择'],['none','none（公共客户端）'],['client_secret_basic','client_secret_basic'],['client_secret_post','client_secret_post']]);
  const automatic=el('div',{class:'stack span2'},name.node);
  const manual=el('div',{class:'form-grid span2'},id.node,secret.node);
- const methodHelp=el('p',{class:'muted span2'},'自动注册时按服务器能力选择 DCR 认证方式，Secret 由注册返回并加密保存；可指定 none、client_secret_basic 或 client_secret_post。CIMD 当前仅支持 none；选择 Secret 认证时，优先模式回退 DCR，仅 CIMD 模式提示不兼容。');
+ const methodHelp=el('p',{class:'muted span2'},'自动选择时按服务器能力协商；DCR 返回的 Secret 加密保存。CIMD 仅支持 none，选 Secret 方式时优先模式回退 DCR，仅 CIMD 模式报不兼容。');
  for(const[label,f]of [['Client ID',id],['Client Secret',secret],['客户端名称（client_name）',name]])f.input.setAttribute('aria-label',label);
  const endpoints={};
  for(const [key,label]of [['authorization_url','授权 URL'],['token_url','Token URL'],['registration_url','注册 URL'],['issuer_url','Issuer URL']]){
