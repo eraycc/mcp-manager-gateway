@@ -189,3 +189,18 @@ dialog{max-width:calc(100vw - 28px);overflow:hidden}
 .lease-instance-hint{display:block;height:16px;line-height:16px;margin-top:2px;font-size:11px}
 .lease-instances::-webkit-scrollbar{width:6px}
 .lease-instances::-webkit-scrollbar-thumb{background:var(--accent);border-radius:6px}
+
+/* CIMD setup shares the existing form/dialog breakpoints. */
+.cimd-fields{min-width:0;border-top:1px solid var(--line);padding-top:18px}
+.cimd-fields[hidden],.cimd-external[hidden]{display:none}
+.cimd-fields>*{min-width:0}
+.cimd-fields p{margin:0}
+.cimd-fields small,.cimd-status,.cimd-callback{overflow-wrap:anywhere}
+.cimd-callback-info{display:grid;gap:8px;min-width:0}
+.cimd-callback{display:block;white-space:pre-wrap;padding:12px;background:var(--bg);border-radius:6px;font-size:13px}
+.cimd-actions{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.cimd-actions button{min-height:44px;white-space:normal;overflow-wrap:anywhere}
+.cimd-preview{min-width:0}
+.cimd-preview summary{cursor:pointer;padding:12px 0;min-height:44px}
+.cimd-preview textarea{width:100%;max-width:100%;min-height:240px;white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:720px){.cimd-actions{grid-template-columns:repeat(2,minmax(0,1fr))}.cimd-preview textarea{font-size:16px}.cimd-fields input,.cimd-fields select{font-size:16px}}

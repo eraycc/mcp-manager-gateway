@@ -93,7 +93,8 @@ def registration_policy(auth):
 
 def normalize_registration(auth):
     """Canonicalize explicit settings on save; keep historical token-only records valid."""
-    value = dict(auth)
+    value = {key: item for key, item in auth.items()
+             if not key.startswith("cimd_verified") and key != "cimd_verification_error"}
     if value.get("auth_mode") is not None:
         value["auth_mode"] = registration_policy(value)
         value.pop("allow_dcr", None)
@@ -141,6 +142,21 @@ def validate_oauth(auth, transport):
                 raise ValueError("OAuth " + key + " must be an HTTP(S) URL without credentials")
         return
     mode = registration_policy(auth)
+    if isinstance(mode, str) and mode in {"prefer_cimd_fallback_dcr", "cimd_only"}:
+        source = auth.get("cimd_metadata_source", "mmg")
+        if not isinstance(source, str) or source not in {"mmg", "external"}:
+            raise ValueError("CIMD metadata source must be mmg or external")
+        if source == "external":
+            from .oauth_metadata import MAX_BYTES, metadata_url, validate_cimd_metadata
+
+            url = auth.get("cimd_external_url", "")
+            metadata_url(url)
+            draft = auth.get("cimd_metadata")
+            if draft is not None:
+                if len(json.dumps(draft, ensure_ascii=False, allow_nan=False).encode()) > MAX_BYTES:
+                    raise ValueError("CIMD metadata exceeds 64 KiB")
+                redirects = draft.get("redirect_uris", []) if isinstance(draft, dict) else []
+                validate_cimd_metadata(draft, url, redirects[0] if isinstance(redirects, list) and redirects else "")
     if not isinstance(mode, str) or mode not in REGISTRATION_MODES:
         raise ValueError("OAuth auth_mode must be pre_registration, prefer_cimd_fallback_dcr, cimd_only or dcr_only")
     if mode != "pre_registration" and transport not in {"streamable-http", "http", "sse"}:
@@ -184,6 +200,12 @@ def comparable_settings(auth):
     if value.get("callback_path") == DEFAULT_CALLBACK_PATH:
         value.pop("callback_path")
     policy = registration_policy(value)
+    active_cimd = (policy in {"prefer_cimd_fallback_dcr", "cimd_only"}
+                   and value.get("cimd_metadata_source", "mmg") == "external")
+    for key in list(value):
+        if (key.startswith("cimd_verified") or key == "cimd_verification_error"
+                or key.startswith("cimd_") and not active_cimd):
+            value.pop(key)
     # Retain legacy fingerprint representations for equivalent manual/auto configurations.
     value["auth_mode"] = {"pre_registration": "manual", "prefer_cimd_fallback_dcr": "auto",
                           "cimd_only": "auto"}.get(policy, policy)

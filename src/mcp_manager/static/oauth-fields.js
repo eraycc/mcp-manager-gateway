@@ -1,4 +1,5 @@
 import{el,field,selectField}from './core.js';
+import{cimdFields}from './cimd-fields.js';
 
 const runtimeFields=['access_token','refresh_token','expires_at','expires_in','id_token','token_type','granted_scope','client_secret_expires_at','client_id_issued_at','registration_access_token'];
 export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=true}={}){
@@ -15,7 +16,7 @@ export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=tru
  const modeHelp=el('div',{class:'stack muted span2',style:'gap:0'},
   ...[
    '预注册：手动填写已在目标服务注册的 Client ID / Secret，不发起自动注册。',
-   'CIMD：客户端元数据文档，用一个 HTTPS URL 作为客户端标识。MMG 使用托管的 /oauth/client-metadata.json，需要稳定、可公开访问的 HTTPS PUBLIC_URL，可在启动时通过环境变量设置。',
+   'CIMD：用公网 HTTPS 元数据 URL 作为客户端标识。可由 MMG 托管，也可单独发布静态 JSON，让 MMG 保留在本机或内网。',
    'DCR：动态客户端注册，MMG 直接向服务器注册并获取 Client ID/Secret，不需要公网地址。',
    '自动（优先 CIMD，失败回退 DCR）（默认）：先尝试 CIMD，前置条件不满足或收到明确的客户端/元数据拒绝错误时回退 DCR。',
    '自动（仅 CIMD）：只使用 CIMD，失败时报错，不自动回退。',
@@ -41,16 +42,17 @@ export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=tru
  callback.node.append(el('small',{},'OAuth 回调路径。大多数服务使用默认的 /api/v1/oauth/callback；Figma 等部分远程 MCP 服务要求使用 /callback，若授权时提示 invalid_redirect_uri，请切换到 /callback 重试。'));
  const scopes=field('Scopes（空格分隔）',Array.isArray(initial.scopes)?initial.scopes.join(' '):initial.scopes||'','text',el('span',{},'用于声明申请的权限范围，多个权限用空格分隔（如 read write mcp:connect）。',el('br'),'留空时由服务器发现信息自动确定；Figma 等远程 MCP 通常填 mcp:connect。'));
  scopes.input.setAttribute('aria-label','Scopes（空格分隔）');
+ const cimd=cimdFields(initial,{callback:callback.input,mode:mode.input});
  function sync(clear=false){
   const auto=mode.input.value!=='pre_registration',dcr=['prefer_cimd_fallback_dcr','dcr_only'].includes(mode.input.value);
   if(clear&&auto){id.input.value='';secret.input.value=''}
   if(dcr&&!name.input.value)name.input.value='Codex';
   manual.hidden=auto;automatic.hidden=!dcr;
   id.input.required=!auto;secret.input.required=false;name.input.required=dcr;
-  id.input.disabled=auto;secret.input.disabled=auto;name.input.disabled=!dcr;
+  id.input.disabled=auto;secret.input.disabled=auto;name.input.disabled=!dcr;cimd.sync();
  }
  mode.input.addEventListener('change',()=>sync(true));sync();
- const node=el('div',{class:'form-grid span2 oauth-fields'},mode.node,modeHelp,manual,automatic,method.node,methodHelp,...Object.values(endpoints).map(f=>f.node),callback.node,scopes.node);
+ const node=el('div',{class:'form-grid span2 oauth-fields'},mode.node,modeHelp,manual,automatic,method.node,methodHelp,...Object.values(endpoints).map(f=>f.node),callback.node,scopes.node,cimd.node);
  return{node,value(validate=true){
   const auth={...initial,type:'oauth',auth_mode:mode.input.value};
   for(const key of [...runtimeFields,'client_id','client_secret','client_name','allow_dcr','token_endpoint_auth_method','callback_path',...Object.keys(endpoints)])delete auth[key];
@@ -64,6 +66,8 @@ export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=tru
   if(method.input.value)auth.token_endpoint_auth_method=method.input.value;
   if(callback.input.value!=='/api/v1/oauth/callback')auth.callback_path=callback.input.value;
   for(const[key,f]of Object.entries(endpoints))if(f.input.value.trim())auth[key]=f.input.value.trim();
+  for(const key of Object.keys(auth))if(key.startsWith('cimd_'))delete auth[key];
+  Object.assign(auth,cimd.value(validate));
   auth.scopes=scopes.input.value.split(/[ ,]+/).filter(Boolean);
   return auth;
  }};

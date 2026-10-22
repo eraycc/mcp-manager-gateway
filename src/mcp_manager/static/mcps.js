@@ -99,7 +99,7 @@ export async function credentialDialog(service,onChange=()=>{}){
  }[authType];
  if(!defs)throw new Error('此服务无需配置个人凭据');
  if(authType==='oauth'){
-  const oauth=oauthFields({}, {allowAutomatic:['streamable-http','sse'].includes(service.transport)});
+  const oauth=oauthFields(status.oauth_config||{}, {allowAutomatic:['streamable-http','sse'].includes(service.transport)});
   formDialog('OAuth 配置',[oauth.node,personalRefreshControls(service,status,onChange)],async()=>{
    const auth={...oauth.value(),config_isolation:'user'};
    const next=await api('/mcps/'+service.id+'/credentials',{method:'PUT',body:{revision:service.revision,auth}});
