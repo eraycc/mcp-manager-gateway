@@ -188,3 +188,54 @@ async def test_hosting_help_switches_and_generation_uses_live_client_name(runtim
     await expect(help_text).to_contain_text("{PUBLIC_URL}/oauth/client-metadata.json")
     await expect(help_text).not_to_contain_text("GitHub Pages")
     assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+@pytest.mark.parametrize("width", [320, 1280])
+async def test_wildcard_public_url_warns_and_preserves_manually_edited_callback(runtime_browser, width):
+    import json
+
+    page, _ = runtime_browser
+    await page.set_viewport_size({"width": width, "height": 900})
+    warning = "PUBLIC_URL 包含 0.0.0.0；如目标授权服务器不接受，可手动修改 redirect_uris。"
+    async def context(route):
+        from urllib.parse import parse_qs, urlsplit
+        external = parse_qs(urlsplit(route.request.url).query).get("source") == ["external"]
+        await route.fulfill(json={"public_url": "http://0.0.0.0:8765",
+            "redirect_uri": "http://0.0.0.0:8765/api/v1/oauth/callback" if external else None,
+            **({"placeholder": True, "message": warning} if external else {
+                "code": "invalid_public_url", "message": "MMG 托管不能使用 0.0.0.0"})})
+    await page.route("**/oauth/client-metadata/context?*", context)
+    value = {"client_id": URL, "client_name": "Codex",
+        "redirect_uris": ["http://0.0.0.0:8765/api/v1/oauth/callback"],
+        "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+        "token_endpoint_auth_method": "none", "application_type": "native"}
+    await page.route("**/oauth/client-metadata/template?*", lambda route: route.fulfill(json=value))
+    async def verified(route):
+        assert route.request.post_data_json["metadata"]["redirect_uris"] == [
+            "http://127.0.0.1:8765/api/v1/oauth/callback"]
+        await route.fulfill(json={"ok": True, "status": "verified", "verified_at": 1792600000,
+            "warning": warning})
+    await page.route("**/oauth/client-metadata/verify", verified)
+    await page.evaluate("""async()=>{
+      const {oauthFields}=await import('/oauth-fields.js');
+      const {dialog}=await import('/core.js');
+      window.oauthForm=oauthFields({type:'oauth',auth_mode:'cimd_only'});
+      dialog('CIMD wildcard',oauthForm.node);
+    }""")
+    await page.get_by_label("CIMD 元数据托管方式", exact=True).select_option("external")
+    await expect(page.locator(".cimd-warning")).to_contain_text("可手动")
+    await expect(page.locator(".cimd-warning")).not_to_contain_text("请先使用回调地址对应")
+    await expect(page.locator(".cimd-callback-info")).to_contain_text("占位")
+    await page.get_by_label("客户端元数据托管 URL", exact=True).fill(URL)
+    await page.get_by_role("button", name="生成 JSON", exact=True).click()
+    editor = page.get_by_label("元数据 JSON", exact=True)
+    await expect(editor).to_be_visible()
+    assert json.loads(await editor.input_value())["redirect_uris"] == value["redirect_uris"]
+    await expect(editor.locator("..").locator("small")).to_contain_text("手动")
+    value["redirect_uris"] = ["http://127.0.0.1:8765/api/v1/oauth/callback"]
+    await editor.fill(json.dumps(value))
+    await page.get_by_role("button", name="验证线上文件", exact=True).click()
+    await expect(page.locator(".cimd-status")).to_contain_text("已验证线上文件")
+    await expect(page.locator(".cimd-status")).to_have_attribute("role", "status")
+    assert (await page.evaluate("oauthForm.value()"))["cimd_metadata"]["redirect_uris"] == value["redirect_uris"]
+    assert await page.get_by_role("dialog").evaluate("(n)=>n.scrollWidth<=n.clientWidth+1")
