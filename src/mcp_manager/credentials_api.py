@@ -127,9 +127,21 @@ async def credential_status(server_id: str, request: Request, user=USER):
     row = await permitted(request, server_id, user)
     state = request.app.state
     status = await personal_credential_status(state, row, user.id)
-    if row.isolation == "user" and row.auth_type == "oauth" and row.config_isolation == "user":
-        payload = await state.credentials.load(row.id, user.id)
-        status["oauth_config"] = masked(payload.get("auth_config", {}))
+    if row.auth_type == "oauth":
+        if row.isolation == "user" and row.config_isolation == "user":
+            payload = await state.credentials.load(row.id, user.id)
+            status["oauth_config"] = masked(payload.get("auth_config", {}))
+        else:
+            from .oauth_discovery import resource_log_value
+
+            payload = await state.credentials.load(row.id, "service")
+            config = payload.get("auth_config") or state.catalog.unseal(row.config).get("auth", {})
+            fields = ("auth_mode", "authorization_url", "token_url", "client_id", "scopes", "client_name",
+                      "callback_path", "cimd_metadata_source", "cimd_external_url", "token_endpoint_auth_method")
+            status["oauth_config_summary"] = {
+                key: resource_log_value(config[key]) if key.endswith("_url") else config[key]
+                for key in fields if key in config
+            }
     return status
 
 
@@ -175,7 +187,16 @@ async def save_credentials(server_id: str, data: dict, request: Request, user=US
         await state.credentials.persist_config(
             session, row, full, row.isolation, actor.id
         )
+        from .oauth_config import comparable_settings
 
+        oauth_changed = saved_type == "oauth" and (
+            comparable_settings(previous.get("auth", {})) != comparable_settings(resolved_auth))
+        if oauth_changed:
+            cleared_states = state.oauth.flows.invalidate(server_id, actor.id)
+
+    if oauth_changed:
+        await state.oauth.audit("oauth.state_invalidated", actor.id, server_id,
+                                reason="config_changed", cleared_states=cleared_states)
     await state.runtime.invalidate_credential(server_id, actor.id)
     state.catalog.delete_cache(row, actor.id)
     if row.mode != "disabled":

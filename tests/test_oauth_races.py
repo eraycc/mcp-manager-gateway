@@ -24,7 +24,7 @@ async def test_old_401_cannot_invalidate_a_new_generation_of_the_same_token(db_a
     assert current.credential_scope != spec.credential_scope
 
 
-async def test_only_one_of_two_pending_callbacks_can_commit(db_app, monkeypatch):
+async def test_only_latest_authorization_callback_can_commit(db_app, monkeypatch):
     discovery(monkeypatch, cimd=False)
     row = await server(db_app)
     states = []
@@ -39,7 +39,7 @@ async def test_only_one_of_two_pending_callbacks_can_commit(db_app, monkeypatch)
         return {"access_token": data["code"], "expires_at": None}
 
     monkeypatch.setattr(db_app.app.state.oauth, "exchange", exchange)
-    for state, code, expected in zip(states, ["winner", "stale"], [303, 409], strict=True):
+    for state, code, expected in zip(states, ["stale", "winner"], [403, 303], strict=True):
         response = await db_app.web.get("/api/v1/oauth/callback", params={
             "state": state, "code": code, "iss": "https://auth.test"})
         assert response.status_code == expected, response.text

@@ -1,6 +1,7 @@
 """OAuth authorization code with PKCE and isolation-aware sealed credentials."""
 import asyncio
 import base64
+import copy
 import hashlib
 import json
 import math
@@ -11,15 +12,36 @@ from urllib.parse import quote, urlencode
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
+from fastapi.routing import APIRoute
 
 from .credentials import config_isolation, credential_owner
 from .database import McpServer, SystemSetting
 from .identity import current_user, revalidate_user
+from .oauth_states import STATE_TTL, OAuthFlows, state_error
 from .runtime import GatewayError
 from .transports import check_url
 
-router = APIRouter(prefix="/api/v1")
-public_router = APIRouter()
+
+class OAuthCallbackAuditRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+        if self.path not in {"/api/v1/oauth/callback", "/callback"}:
+            return handler
+
+        async def audited(request):
+            try:
+                return await handler(request)
+            except HTTPException:
+                if not getattr(request.state, "oauth_callback_failure_audited", False):
+                    state = request.query_params.get("state", "")
+                    await callback_failure(request, state, "state_missing" if not state else "state_mismatch")
+                raise
+
+        return audited
+
+
+router = APIRouter(prefix="/api/v1", route_class=OAuthCallbackAuditRoute)
+public_router = APIRouter(route_class=OAuthCallbackAuditRoute)
 TOKEN_REQUEST_TIMEOUT = 30
 CIMD_REJECTIONS = {"invalid_client", "invalid_client_metadata", "unauthorized_client"}
 
@@ -87,11 +109,46 @@ class OAuth:
     def __init__(self, catalog, credentials=None):
         self.catalog = catalog
         self.credential_store = credentials
-        self.pending = {}
+        self.flows = OAuthFlows()
+        self.pending = self.flows.pending
+        self.public_url_binding = catalog.config.public_url if catalog else None
         self.locks = {}
         from .oauth_metadata import CIMDVerifier
 
         self.cimd = CIMDVerifier(catalog)
+
+    async def registration_owner(self, row, user_id, *, session=None):
+        owner = self.config_owner(row, user_id)
+        token_owner = credential_owner(row.isolation, user_id)
+        if owner != token_owner:
+            payload = await self.credential_store.load(row.id, token_owner, session=session)
+            if payload.get("oauth_registration_private"):
+                return token_owner
+        return owner
+
+    def client_binding(self, auth, effective, resource):
+        from .oauth_config import TOKEN_FIELDS, callback_uri, registration_fingerprint
+
+        return {
+            "config_fingerprint": registration_fingerprint(
+                auth, resource, callback_uri(self.catalog.config.public_url, auth)),
+            "resource": resource, "mode": effective.get("registration_mode", "manual"),
+            "auth": {key: copy.deepcopy(value) for key, value in effective.items() if key not in TOKEN_FIELDS},
+        }
+
+    async def sync_public_url(self, user_id=None):
+        if self.public_url_binding == self.catalog.config.public_url:
+            return
+        records = []
+        async with self.catalog.db.locked():
+            if self.public_url_binding != self.catalog.config.public_url:
+                identities = {key[0] for key in self.flows.generations}
+                identities.update(item["server_id"] for item in self.pending.values())
+                self.public_url_binding = self.catalog.config.public_url
+                records = [(identity, self.flows.invalidate(identity)) for identity in identities]
+        for identity, count in records:
+            await self.audit("oauth.state_invalidated", user_id, identity,
+                             reason="config_changed", cleared_states=count)
 
     def key(self, row, user_id):
         """Return the legacy key retained for compatibility reads."""
@@ -188,8 +245,9 @@ class OAuth:
                 raise GatewayError("auth_required", "授权已失效，请点击重新授权以继续使用")
             if not value.get("access_token"):
                 raise GatewayError("auth_required", "Complete OAuth authorization in the Web console")
-            registration = (await self.credential_store.load(row.id, self.config_owner(row, user_id))).get("oauth_registration")
-            if registration:
+            registration = (await self.credential_store.load(
+                row.id, await self.registration_owner(row, user_id))).get("oauth_registration")
+            if registration or payload.get("oauth_token_client"):
                 try:
                     await self.effective_auth(row, user_id, auth)
                 except GatewayError as exc:
@@ -224,7 +282,8 @@ class OAuth:
                         or current.get("oauth_state", {}).get("status") == "needs_reauth"
                         or self.resource(server) != resource_binding or self.catalog.config.public_url != callback_binding):
                     raise GatewayError("auth_required", "OAuth authorization changed during refresh")
-                await self.credential_store.save_oauth_token(session, server, user_id, refreshed)
+                await self.credential_store.save_oauth_token(
+                    session, server, user_id, refreshed, client=self.client_binding(auth, effective, resource_binding))
                 epoch += 1
                 self.catalog.runtime.credential_versions[(row.id, owner)] = None
             await self.catalog.runtime.invalidate_credential(row.id, owner)
@@ -237,8 +296,9 @@ class OAuth:
     async def effective_auth(self, row, user_id, auth):
         from .oauth_config import callback_uri, registration_matches, registration_policy
 
-        payload = await self.credential_store.load(row.id, self.config_owner(row, user_id))
-        registration = payload.get("oauth_registration", {})
+        token_payload = await self.credential_store.load(row.id, credential_owner(row.isolation, user_id))
+        payload = await self.credential_store.load(row.id, await self.registration_owner(row, user_id))
+        registration = token_payload.get("oauth_token_client") or payload.get("oauth_registration", {})
         resource = self.resource(row)
         if registration_matches(registration, auth, resource, callback_uri(self.catalog.config.public_url, auth)):
             from .oauth_discovery import auth_method
@@ -250,7 +310,7 @@ class OAuth:
             raise GatewayError("auth_required", "OAuth 客户端信息需要重新授权，请在控制台点击重新授权")
         return auth
 
-    async def prepare(self, row, user_id, auth, request, epoch, *, fallback_reason=None):
+    async def prepare(self, row, user_id, auth, request, epoch, *, fallback_reason=None, flow_generation=None):
         from .oauth_config import (
             allows_dcr,
             callback_uri,
@@ -261,8 +321,9 @@ class OAuth:
         )
         from .oauth_discovery import auth_method, canonical_resource, discover, register, registration_method
 
-        config_owner = self.config_owner(row, user_id)
+        config_owner = await self.registration_owner(row, user_id)
         token_owner = credential_owner(row.isolation, user_id)
+        registration_epoch = self.flows.registration_epochs.get((row.id, token_owner), 0)
         lock = "registration:" + self.credential_store.key(row.id, config_owner)
         resource = self.resource(row)
         redirect_uri = callback_uri(self.catalog.config.public_url, auth)
@@ -279,6 +340,8 @@ class OAuth:
                 context = await discover(resource, auth)
             async with self.catalog.db.locked() as session:
                 _, _, current_auth = await oauth_actor(request, session, row.id, revision=row.revision)
+                if flow_generation is not None:
+                    self.flows.check(row.id, token_owner, flow_generation)
                 current_token = await self.credential_store.load(row.id, token_owner, session=session)
                 if (configuration_fingerprint(current_auth) != configuration_fingerprint(auth)
                         or current_token.get("oauth_epoch", 0) != epoch or self.resource(row) != resource
@@ -354,6 +417,9 @@ class OAuth:
             invalidated = set()
             async with self.catalog.db.locked() as session:
                 _, current, current_auth = await oauth_actor(request, session, row.id, revision=row.revision)
+                # A newer start may reuse this client; reset/config changes must prevent republishing it.
+                if self.flows.registration_epochs.get((row.id, token_owner), 0) != registration_epoch:
+                    raise state_error("state_mismatch", 409)
                 token_payload = await self.credential_store.load(row.id, token_owner, session=session)
                 if (configuration_fingerprint(current_auth) != configuration_fingerprint(auth)
                         or token_payload.get("oauth_epoch", 0) != epoch or self.resource(current) != resource
@@ -371,7 +437,14 @@ class OAuth:
                     owners = await self.credential_store.owners(row.id, session=session) if config_owner == "service" else {token_owner}
                     for owner in owners:
                         item = await self.credential_store.load(row.id, owner, session=session)
+                        bound_client = item.get("oauth_token_client", {}).get("auth", {})
+                        if (not issuer_changed and config_owner == "service"
+                                and item.get("oauth_registration_private") and bound_client
+                                and any(bound_client.get(key) != previous_auth.get(key)
+                                        for key in ("client_id", "client_secret", "token_endpoint_auth_method"))):
+                            continue
                         item.pop("oauth_token", None)
+                        item.pop("oauth_token_client", None)
                         item["oauth_epoch"] = item.get("oauth_epoch", 0) + 1
                         item["oauth_state"] = {"status": "needs_reauth", "reason": reason, "at": time.time()}
                         await self.credential_store.write(session, row.id, owner, item)
@@ -508,6 +581,7 @@ def oauth_authorizer(request, server_id, revision):
 
 @router.get("/mcps/{server_id}/oauth/status")
 async def status(server_id: str, request: Request, user=USER):
+    await request.app.state.oauth.sync_public_url(user.id)
     app = request.app.state
     async with app.db.locked() as session:
         user, row, auth = await oauth_actor(request, session, server_id, read_only=True)
@@ -519,9 +593,11 @@ async def status(server_id: str, request: Request, user=USER):
         state = ("needs_reauth" if payload.get("oauth_state") or auth_status == "expired" else
                  "pending_authorization" if not authorized else
                  "failed" if cache.get("cache_status") in {"error", "auth_required"} else "ready")
-        configuration = await app.credentials.load(row.id, app.oauth.config_owner(row, user.id), session=session)
+        configuration = await app.credentials.load(
+            row.id, await app.oauth.registration_owner(row, user.id, session=session), session=session)
+        registration = configuration.get("oauth_registration") or payload.get("oauth_token_client", {})
         return {"authorized": authorized, "state": state, "auth_status": auth_status,
-                "registration_mode": configuration.get("oauth_registration", {}).get("mode", "manual"),
+                "registration_mode": registration.get("mode", "manual"),
                 "config_isolation": config_isolation({"auth": auth}), "isolation": row.isolation}
 
 
@@ -541,14 +617,24 @@ async def start(server_id: str, request: Request, user=USER):
     return await authorization_start(request, row, auth, user, epoch, return_to)
 
 
-async def authorization_start(request, row, auth, user, epoch, return_to, *, fallback_reason=None):
+async def authorization_start(request, row, auth, user, epoch, return_to, *, fallback_reason=None, flow_generation=None):
     """Create a fresh state/PKCE flow, including a single policy-authorized DCR restart."""
-    from .oauth_config import callback_uri
+    from .oauth_config import callback_path, callback_uri
 
     app = request.app.state
+    await app.oauth.sync_public_url(user.id)
     owner = credential_owner(row.isolation, user.id)
+    async with app.db.locked() as session:
+        user, _, current_auth = await oauth_actor(request, session, row.id, revision=row.revision)
+        if configuration_fingerprint(current_auth) != configuration_fingerprint(auth):
+            raise state_error("state_mismatch", 409)
+        if flow_generation is None:
+            flow_generation = app.oauth.flows.begin(row.id, owner)
+        else:
+            app.oauth.flows.check(row.id, owner, flow_generation)
     callback_binding = callback_uri(app.config.public_url, auth)
-    effective, epoch = await app.oauth.prepare(row, user.id, auth, request, epoch, fallback_reason=fallback_reason)
+    effective, epoch = await app.oauth.prepare(
+        row, user.id, auth, request, epoch, fallback_reason=fallback_reason, flow_generation=flow_generation)
     async with app.db.locked() as session:
         user, row, current_auth = await oauth_actor(request, session, row.id, revision=row.revision)
         payload = await app.credentials.load(row.id, owner, session=session)
@@ -556,15 +642,18 @@ async def authorization_start(request, row, auth, user, epoch, return_to, *, fal
                 or payload.get("oauth_epoch", 0) != epoch
                 or callback_uri(app.config.public_url, current_auth) != callback_binding):
             raise HTTPException(409, "OAuth configuration or authorization changed; restart authorization")
+        app.oauth.flows.check(row.id, owner, flow_generation)
         check_url(effective.get("authorization_url", ""))
         verifier = secrets.token_urlsafe(48)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
         nonce = secrets.token_urlsafe(32)
         callback_url = callback_uri(app.config.public_url, auth)
-        app.oauth.pending = {key: value for key, value in app.oauth.pending.items() if value["expires"] > time.time()}
+        app.oauth.flows.prune()
         app.oauth.pending[nonce] = {
             "server_id": row.id, "user_id": user.id, "session_id": request.state.session_id,
-            "verifier": verifier, "redirect_uri": callback_url, "expires": time.time() + 600,
+            "verifier": verifier, "redirect_uri": callback_url, "expires": time.time() + STATE_TTL,
+            "owner": owner, "flow_generation": flow_generation, "callback_path": callback_path(auth),
+            "client_binding": app.oauth.client_binding(auth, effective, app.oauth.resource(row)),
             "revision": row.revision, "fingerprint": configuration_fingerprint(auth),
             "return_to": return_to, "epoch": epoch, "auth": effective,
             "registration_mode": effective.get("registration_mode", "manual"),
@@ -585,33 +674,45 @@ async def authorization_start(request, row, auth, user, epoch, return_to, *, fal
     return result
 
 
+async def callback_failure(request, state, reason, user_id=None, *, state_reason=None):
+    context = request.app.state.oauth.flows.context(state)
+    await request.app.state.oauth.audit(
+        "oauth.callback_failed", user_id, context.get("server_id"),
+        reason="state_mismatch" if reason == "state_used" else reason,
+        state_reason=state_reason or reason, state_prefix=state[:8],
+    )
+    request.state.oauth_callback_failure_audited = True
+
+
 @router.get("/oauth/callback")
 @public_router.get("/callback", include_in_schema=False)
-async def callback(
-    request: Request,
-    state: str,
-    code: str = "",
-    error: str = "",
-    iss: str = "",
-    user=USER,
-):
+async def callback(request: Request, state: str = "", code: str = "", error: str = "", iss: str = "", user=USER):
+    try:
+        await request.app.state.oauth.sync_public_url(user.id)
+        return await authorization_callback(request, state, code, error, iss, user)
+    except (HTTPException, GatewayError, httpx.HTTPError) as exc:
+        reason = getattr(exc, "oauth_reason", "state_mismatch")
+        if not getattr(request.state, "oauth_callback_failure_audited", False):
+            await callback_failure(request, state, reason, user.id if user else None,
+                                   state_reason=getattr(exc, "oauth_state_reason", None))
+        if isinstance(exc, HTTPException) and not getattr(exc, "oauth_reason", None):
+            exc.detail = "OAuth state_mismatch: " + str(exc.detail)
+        raise
+
+
+async def authorization_callback(request, state, code, error, iss, user):
     from .oauth_config import callback_uri
 
     app = request.app.state
     async with app.db.locked() as session:
         user = await revalidate_user(request, session)
-        pending = app.oauth.pending.get(state)
-        if (
-            not pending
-            or pending["expires"] < time.time()
-            or pending["user_id"] != user.id
-            or pending["session_id"] != request.state.session_id
-        ):
-            raise HTTPException(403, "OAuth state is invalid or expired")
-        app.oauth.pending.pop(state)
+        pending = app.oauth.flows.consume(state, user.id, request.state.session_id,
+                                         request.scope["route"].path)
         expected_issuer = pending["auth"].get("issuer_url", "")
         if (iss and iss != expected_issuer) or (pending["auth"].get("iss_required") and not iss):
-            raise HTTPException(403, "OAuth authorization issuer does not match")
+            failure = state_error("state_mismatch")
+            failure.oauth_state_reason = "issuer_mismatch"
+            raise failure
         user, row, auth = await oauth_actor(
             request,
             session,
@@ -623,9 +724,7 @@ async def callback(
         if (configuration_fingerprint(auth) != pending["fingerprint"] or payload.get("oauth_epoch", 0) != pending["epoch"]
                 or (pending["auth"].get("resource") or "") != app.oauth.resource(row)
                 or pending["redirect_uri"] != callback_uri(app.config.public_url, auth)):
-            raise HTTPException(
-                409, "OAuth configuration changed; restart authorization"
-            )
+            raise state_error("state_mismatch", 409)
 
     async def fallback(reason):
         from .oauth_config import registration_policy
@@ -633,20 +732,23 @@ async def callback(
         if (pending.get("registration_mode") != "cimd"
                 or registration_policy(auth) != "prefer_cimd_fallback_dcr"):
             return None
-        if pending["expires"] < time.time():
-            raise HTTPException(403, "OAuth state is invalid or expired")
+        if pending["expires"] <= time.time():
+            raise state_error("state_expired")
+        app.oauth.flows.check(row.id, owner, pending["flow_generation"])
         result = await authorization_start(request, row, auth, user, pending["epoch"],
-                                           pending["return_to"], fallback_reason=reason)
+                                           pending["return_to"], fallback_reason=reason,
+                                           flow_generation=pending["flow_generation"])
         return RedirectResponse(result["authorization_url"], status_code=303)
 
     if error:
+        await callback_failure(request, state, "code_exchange_failed", user.id)
         if error in CIMD_REJECTIONS:
             redirected = await fallback(error)
             if redirected is not None:
                 return redirected
-        raise HTTPException(400, "OAuth authorization was declined")
+        raise state_error("code_exchange_failed", 400)
     if not code:
-        raise HTTPException(400, "OAuth authorization was declined")
+        raise state_error("code_exchange_failed", 400)
     try:
         value = await app.oauth.exchange(
             pending["auth"],
@@ -658,7 +760,9 @@ async def callback(
                 **({"resource": pending["auth"]["resource"]} if pending["auth"].get("resource") else {}),
             },
         )
-    except GatewayError as exc:
+    except (GatewayError, httpx.HTTPError) as exc:
+        await callback_failure(request, state, "code_exchange_failed", user.id)
+        exc.oauth_reason = "code_exchange_failed"
         if getattr(exc, "oauth_error", None) in CIMD_REJECTIONS:
             redirected = await fallback(exc.oauth_error)
             if redirected is not None:
@@ -671,6 +775,7 @@ async def callback(
             pending["server_id"],
             revision=pending["revision"],
         )
+        app.oauth.flows.check(row.id, credential_owner(row.isolation, user.id), pending["flow_generation"])
         payload = await app.credentials.load(row.id, credential_owner(row.isolation, user.id), session=session)
         if (
             payload.get("oauth_epoch", 0) != pending["epoch"]
@@ -680,9 +785,9 @@ async def callback(
             or (pending["auth"].get("resource") or "") != app.oauth.resource(row)
             or pending["redirect_uri"] != callback_uri(app.config.public_url, auth)
         ):
-            raise HTTPException(403, "OAuth state is invalid or expired")
+            raise state_error("state_expired" if pending["expires"] <= time.time() else "state_mismatch")
         owner = await app.credentials.save_oauth_token(
-            session, row, user.id, value
+            session, row, user.id, value, client=pending["client_binding"]
         )
     await app.runtime.invalidate_credential(row.id, owner)
     await app.oauth.audit("oauth.authorized", user.id, row.id, result="success")
@@ -704,6 +809,40 @@ async def callback(
     )
 
 
+@router.post("/mcps/{server_id}/oauth/reset")
+async def reset(server_id: str, request: Request, user=USER):
+    from .oauth_config import allows_dcr, callback_uri, registration_matches
+
+    app = request.app.state
+    await app.oauth.sync_public_url(user.id)
+    async with app.db.locked() as session:
+        user, row, auth = await oauth_actor(request, session, server_id)
+        owner = credential_owner(row.isolation, user.id)
+        registration_owner = await app.oauth.registration_owner(row, user.id, session=session)
+        configuration = await app.credentials.load(row.id, registration_owner, session=session)
+        registration = configuration.get("oauth_registration", {})
+        payload = (configuration if registration_owner == owner
+                   else await app.credentials.load(row.id, owner, session=session))
+        if (token_from_auth(auth).get("access_token") and not payload.get("oauth_token_client")
+                and registration_matches(registration, auth, app.oauth.resource(row),
+                                         callback_uri(app.config.public_url, auth))):
+            payload["oauth_token_client"] = copy.deepcopy(registration)
+        cleared_client = registration.get("mode") == "dcr"
+        if row.isolation == "user" and app.oauth.config_owner(row, user.id) != owner and allows_dcr(auth):
+            # Reset only this user's future registration, never other users' shared client.
+            payload["oauth_registration_private"] = True
+        if cleared_client and registration_owner == owner:
+            payload.pop("oauth_registration", None)
+        cleared_states = app.oauth.flows.invalidate(row.id, owner)
+        await app.credentials.write(session, row.id, owner, payload)
+    await app.oauth.audit("oauth.reset", user.id, row.id,
+                          cleared_states=cleared_states, cleared_client=cleared_client)
+    return {
+        "cleared_states": cleared_states, "cleared_client": cleared_client,
+        "message": "已清理未完成的授权流程，请关闭所有旧授权标签页，再重新发起授权。",
+    }
+
+
 @router.post("/mcps/{server_id}/oauth/disconnect")
 async def disconnect(server_id: str, request: Request, user=USER):
     app = request.app.state
@@ -712,6 +851,8 @@ async def disconnect(server_id: str, request: Request, user=USER):
         owner = credential_owner(row.isolation, user.id)
         payload = await app.credentials.load(row.id, owner, session=session)
         payload.pop("oauth_token", None)
+        payload.pop("oauth_token_client", None)
+        app.oauth.flows.invalidate(row.id, owner)
         payload["oauth_epoch"] = payload.get("oauth_epoch", 0) + 1
         payload["oauth_state"] = {"status": "needs_reauth", "reason": "disconnected", "at": time.time()}
         await app.credentials.write(session, row.id, owner, payload)

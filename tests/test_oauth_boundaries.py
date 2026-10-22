@@ -53,12 +53,14 @@ async def test_metadata_failure_does_not_bypass_security(monkeypatch, kind):
             await oauth_discovery.discover(resource, auth)
 
 
-async def test_concurrent_starts_reuse_one_registration(db_app, monkeypatch):
+async def test_concurrent_starts_keep_latest_flow_and_reuse_registration(db_app, monkeypatch):
     calls = discovery(monkeypatch, cimd=False)
     row = await server(db_app)
     responses = await asyncio.gather(*[
         db_app.web.post(f"/api/v1/mcps/{row.id}/oauth/start") for _ in range(3)])
-    assert all(response.status_code == 200 for response in responses)
+    assert all(response.status_code in {200, 409} for response in responses)
+    assert any(response.status_code == 200 for response in responses)
+    assert len(db_app.app.state.oauth.pending) == 1
     assert len(calls) == 1
 
 
