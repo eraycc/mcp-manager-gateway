@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from .catalog import restore
+from .catalog import masked, restore
 from .catalog_api import permitted
 from .credentials import PERSONAL_AUTH_TYPES, STATIC_AUTH_FIELDS, config_isolation, static_auth_configured
 from .database import McpServer
@@ -125,7 +125,12 @@ async def credential_status_batch(data: dict, request: Request, user=USER):
 @router.get("/mcps/{server_id}/credentials/status")
 async def credential_status(server_id: str, request: Request, user=USER):
     row = await permitted(request, server_id, user)
-    return await personal_credential_status(request.app.state, row, user.id)
+    state = request.app.state
+    status = await personal_credential_status(state, row, user.id)
+    if row.isolation == "user" and row.auth_type == "oauth" and row.config_isolation == "user":
+        payload = await state.credentials.load(row.id, user.id)
+        status["oauth_config"] = masked(payload.get("auth_config", {}))
+    return status
 
 
 @router.put("/mcps/{server_id}/credentials")

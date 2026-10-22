@@ -10,12 +10,12 @@ MMG 作为 OAuth 客户端访问下游 MCP；这与 Agent 登录 MMG 所使用�
 | --- | --- | --- |
 | 预注册 | Client ID 必填；Secret 可选；可填写授权、Token 地址与 Scopes | 已在服务提供方创建客户端；端点留空时尝试发现 |
 | 自动（优先 CIMD，失败回退 DCR）（新表单默认） | 无需手填 Client ID/Secret；DCR 客户端名称默认 Codex | CIMD 不可用时回退；服务器必须提供 registration_endpoint 才能使用 DCR |
-| 自动（仅 CIMD） | 无需手填 Client ID/Secret | 服务器声明支持 CIMD，且 MMG 有稳定的公网 HTTPS PUBLIC_URL；失败不回退 |
+| 自动（仅 CIMD） | 无需手填 Client ID/Secret | 服务器声明支持 CIMD，且所选托管方式可用；可用外部静态文件保持 MMG 私有，失败不回退 |
 | 自动（仅 DCR） | 客户端名称默认 Codex，可修改 | 直接使用 registration_endpoint，不尝试 CIMD |
 
-预注册使用手动填写的 Client ID/Secret，不发起自动注册。CIMD 是客户端元数据文档，以 HTTPS URL 作为客户端标识；MMG 托管的路径为 `/oauth/client-metadata.json`，需要在启动环境变量设置稳定、可公开访问的 HTTPS `PUBLIC_URL`。DCR 是动态客户端注册，MMG 直接向服务器注册并获取 Client ID/Secret，不要求 MMG 有公网地址；回调地址仍须被提供方接受。
+预注册使用手动填写的 Client ID/Secret，不发起自动注册。CIMD 以公网 HTTPS 元数据 URL 作为客户端标识，可由 MMG 或外部静态站点托管。外部静态托管适用于本机和内网部署，不要求 MMG 本体公开。DCR 是动态客户端注册，MMG 直接向服务器注册并获取 Client ID/Secret，不要求 MMG 有公网地址；所有方式的回调仍须被浏览器访问并被提供方接受。
 
-“优先 CIMD”模式在服务器未声明支持、公网 HTTPS 地址不可用或所选 Token 认证方式与 CIMD 不兼容时回退 DCR，并记录脱敏结构化审计事件 `oauth.cimd_fallback`（原因、阶段与结果）。客户端名称配置只用于 DCR 注册请求，默认 Codex；CIMD 与预注册的授权请求不会发送该字段。CIMD 公共文档使用 MMG 固定名称。填写 Codex 不会取得官方客户端的身份或特权；Figma 等服务可能要求特定名称或回调路径。
+“优先 CIMD”模式在服务器未声明支持、所选元数据托管不可用或所选 Token 认证方式与 CIMD 不兼容时回退 DCR，并记录脱敏结构化审计事件 `oauth.cimd_fallback`（原因、阶段与结果）。客户端名称配置只用于 DCR 注册请求，默认 Codex；CIMD 与预注册的授权请求不会发送该字段。CIMD 公共文档使用 MMG 固定名称。填写 Codex 不会取得官方客户端的身份或特权；Figma 等服务可能要求特定名称或回调路径。
 
 实际 CIMD 授权失败后，仅在已通过用户、会话、state、issuer、配置、资源、回调与授权代次校验的响应中，收到 `invalid_client`、`invalid_client_metadata` 或 `unauthorized_client` 时回退。Token 端点的上述明确拒绝还要求 HTTP 400/401。回退最多一次，并使用新的 state、PKCE 和授权码，绝不重复交换旧授权码。用户拒绝、通用协议错误、Token 超时或结果不明不会触发回退。若浏览器停留在提供方错误页、未回调 MMG，无法自动检测，请选择“仅 DCR”重试。“仅 CIMD”始终不回退；没有动态注册端点时会提示改用预注册。
 
@@ -70,9 +70,59 @@ DCR 注册信息加密缓存，按 MCP、配置归属、实际资源地址、iss
 
 刷新失败及 401 会持久记录“需要重新授权”；重启、定时发现和再次调用都不会继续自动刷新，更不会自动重新注册客户端或重放业务调用。重新授权成功后清除终态。断开授权清除 Token，保留可复用的注册信息，不代表撤销服务提供方的授权；需要彻底撤销时请同时到提供方操作。
 
-## 公网 HTTPS 与 Nginx
+## 本机／内网 MMG：外部静态托管
 
-CIMD 的 Client ID 是 MMG 托管的 HTTPS 元数据 URL。授权服务器需要从公网读取它；不要求把管理页面开放给所有人。浏览器也必须能够访问同一 PUBLIC_URL 的控制台与回调，以保留登录会话。
+新增、编辑、提议审批和个人独享 OAuth 配置，在回调路径与 Scopes 后共用同一个 CIMD 托管区域。仅优先 CIMD 和仅 CIMD 显示；切换到 DCR 或预注册时隐藏并保留内容。桌面和手机采用相同操作顺序。
+
+1. 先确定浏览器可访问的 MMG `PUBLIC_URL` 和回调路径。
+2. 选择“外部静态托管”，填写长期稳定、匿名可读、直接返回 HTTP 200 JSON 的 HTTPS URL，例如 `https://metadata.example.com/mmg.json`。文件名任意；URL 必须包含路径，不允许凭据、fragment 或点路径，不支持跳转链接。
+3. 点击“生成 JSON”，复制或下载文件，发布到自有 HTTPS 静态站点（例如配置正确的 Pages 站点）。文件使用 `Content-Type: application/json`；仓库网页、登录页或返回 `text/plain` 的 raw 链接不能通过验证。MMG 不代为上传。
+4. 可展开预览修改名称、主页等公开字段。`client_id` 必须与托管 URL 逐字符相同，`redirect_uris` 必须包含界面显示的 **MMG 实际回调地址**。编辑这里不会改变 MMG 发送的回调地址；需要更改主机时先修改 `PUBLIC_URL` 并重启。
+5. 点击“验证线上文件”，检查的是真实线上响应。已有编辑内容时还须与线上文档一致；修改托管 URL、回调或 JSON 后须重新发布、验证。保存不会执行 DCR 或开始用户授权。
+6. 保存后明确开始授权。尚未验证、超过 24 小时或绑定配置变化时，会自动验证；优先模式失败按原策略回退 DCR，仅 CIMD 模式报错，绝不悄悄换回 MMG 托管。
+
+同机部署示例：
+
+~~~dotenv
+HOST=127.0.0.1
+PORT=8765
+PUBLIC_URL=http://127.0.0.1:8765
+~~~
+
+对应公开文件示例（只将此文件放在公网）：
+
+~~~json
+{
+  "client_id": "https://metadata.example.com/mmg.json",
+  "client_name": "MCP Manager Gateway",
+  "redirect_uris": ["http://127.0.0.1:8765/api/v1/oauth/callback"],
+  "grant_types": ["authorization_code"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none"
+}
+~~~
+
+访问关系：授权服务器从公网获取 JSON；用户浏览器重定向到本机／内网 MMG；MMG 出站访问授权服务器完成 Token 交换。**授权服务器不需要直接连接 MMG 的回调。** 此功能不提供回调代理、内网穿透，也不会让云端 Agent 自动连通私有 MMG。
+
+| 使用场景 | 实际回调建议 | 条件 |
+| --- | --- | --- |
+| 浏览器与 MMG 同一电脑 | `http://127.0.0.1:8765/…` | 使用同一浏览器和同一主机名登录、授权 |
+| 手机访问电脑／内网服务器 | `https://mmg.internal.example.com/…` | 手机可经局域网或 VPN 访问；证书受浏览器信任 |
+| 公网共享网关 | 公网 HTTPS 地址 | 可选择 MMG 托管，详见下节 |
+
+手机上的 `127.0.0.1` 指向手机，不指向运行 MMG 的电脑。不要在电脑开始授权后把链接转到手机或另一浏览器；现有回调校验绑定原登录会话。MMG 不接受 HTTP 内网 IP 作为此功能的回调，不把 `0.0.0.0` 当作访问地址；它只是监听地址。HTTPS 回调可以经私有网络访问，无需将 MMG 暴露公网。
+
+验证要求完整 `redirect_uri` 一致，不能仅比较路径；不同协议、主机、端口或尾斜杠均可能导致下游拒绝。提供方可能进一步限制回环地址、内网地址、客户端域名或认证方式，MMG 本地验证不能替代真实联调。不宣称任意服务均兼容。
+
+配置字段为 `auth.cimd_metadata_source`（缺省 `mmg`，可选 `external`）、`auth.cimd_external_url` 和可选编辑草稿 `auth.cimd_metadata`。验证证据由服务器单独加密保存，按当前用户、完整托管 URL、实际回调和文档摘要核对；不接受表单中的伪造验证时间。每用户最多保留 32 个最近验证结果；结果被淘汰后授权时重新验证，不影响已有 Token。非 CIMD 模式忽略保留的托管字段。验证状态刷新不会清除有效授权。
+
+验证请求不带 MMG Cookie、Token 或下游凭据；校验 DNS 的全部解析地址并固定实际连接 IP，禁止回环、私有网络和链路本地目标，不跟随 HTTP 跳转。总时限 5 秒、读取上限 64 KiB、每用户每分钟最多 5 次线上验证；状态查询不访问外网。结果使用结构化错误码，例如 `client_id_mismatch`、`redirect_uri_mismatch`、`invalid_content_type`、`redirect_not_allowed`、`unsafe_address`、`document_mismatch`。审计事件 `oauth.cimd_verify` 只记录绑定摘要、状态和错误码。
+
+静态文件公开的是客户端标识、名称和回调位置，可能透露内部主机名；只发布必要字段。禁止放入 Secret、Token、私钥，当前实现使用 `none + PKCE`。公网文件和域名仍须长期维护，托管账户被入侵可导致元数据被篡改；周期验证不能保证实时检测或证明域名所有权。下游凭据继续留在 MMG，仍按已有服务／用户作用域加密保存。
+
+## 公网 HTTPS 与 Nginx（MMG 托管）
+
+选择 MMG 托管时，CIMD 的 Client ID 是 MMG 自身的 HTTPS 元数据 URL。授权服务器需要从公网读取它；不要求把管理页面开放给所有人。浏览器也必须能够访问同一 PUBLIC_URL 的控制台与回调，以保留登录会话。
 
 设置 MMG 用户目录中的 .env，或通过环境变量配置：
 
@@ -121,6 +171,6 @@ server {
 https://mmg.example.com/oauth/client-metadata.json
 ~~~
 
-返回 JSON 中 client_id 必须与上述 URL 完全一致，redirect_uris 同时声明 https://mmg.example.com/api/v1/oauth/callback 和 https://mmg.example.com/callback，使授权服务器可校验所选路径。文档只包含公开客户端元数据，不包含 Client Secret、用户 Token 或 MMG 管理凭据。PUBLIC_URL 无法从外网访问、证书不被信任、或下游授权服务器不支持 CIMD 时，仍应选择预注册或符合条件的 DCR。
+返回 JSON 中 client_id 必须与上述 URL 完全一致，redirect_uris 同时声明 https://mmg.example.com/api/v1/oauth/callback 和 https://mmg.example.com/callback，使授权服务器可校验所选路径。文档只包含公开客户端元数据，不包含 Client Secret、用户 Token 或 MMG 管理凭据。MMG 托管地址无法从外网访问时，可改用外部静态托管。两种方案的元数据 HTTPS 证书均须受授权服务器信任，实际回调须由浏览器访问；下游不支持 CIMD 时，应选择预注册或符合条件的 DCR。
 
-协议依据：[MCP 授权规范](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)、[客户端注册](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/client-registration)、[RFC 7591](https://www.rfc-editor.org/rfc/rfc7591.html)。
+协议依据：[OAuth CIMD 草案（当前核对版本 -02）](https://www.ietf.org/archive/id/draft-ietf-oauth-client-id-metadata-document-02.html)、[MCP 授权规范](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)、[客户端注册](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/client-registration)、[RFC 7591](https://www.rfc-editor.org/rfc/rfc7591.html)。

@@ -126,6 +126,8 @@ async def test_token_method_is_submitted_by_server_proposal_and_personal_forms(r
         if kind in {"server", "proposal"}:
             await expect(method).to_have_value("client_secret_post")
         await method.select_option("client_secret_basic")
+        await dialog.get_by_label("CIMD 元数据托管方式", exact=True).select_option("external")
+        await dialog.get_by_label("客户端元数据托管 URL", exact=True).fill("https://metadata.example.com/mmg.json")
         callback = dialog.get_by_label("OAuth 回调路径", exact=True)
         await expect(callback).to_have_value("/api/v1/oauth/callback" if kind in {"personal", "create"} else "/callback")
         await callback.select_option("/callback")
@@ -136,6 +138,8 @@ async def test_token_method_is_submitted_by_server_proposal_and_personal_forms(r
         auth = body["auth"] if kind == "personal" else body["config"]["auth"]
         assert auth["auth_mode"] == "prefer_cimd_fallback_dcr" and auth["token_endpoint_auth_method"] == "client_secret_basic"
         assert auth["callback_path"] == "/callback"
+        assert auth["cimd_metadata_source"] == "external"
+        assert auth["cimd_external_url"] == "https://metadata.example.com/mmg.json"
         assert "client_id" not in auth and "client_secret" not in auth
     assert len(submitted) == 4
 

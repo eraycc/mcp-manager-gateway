@@ -89,6 +89,9 @@ class OAuth:
         self.credential_store = credentials
         self.pending = {}
         self.locks = {}
+        from .oauth_metadata import CIMDVerifier
+
+        self.cimd = CIMDVerifier(catalog)
 
     def key(self, row, user_id):
         """Return the legacy key retained for compatibility reads."""
@@ -278,7 +281,8 @@ class OAuth:
                 _, _, current_auth = await oauth_actor(request, session, row.id, revision=row.revision)
                 current_token = await self.credential_store.load(row.id, token_owner, session=session)
                 if (configuration_fingerprint(current_auth) != configuration_fingerprint(auth)
-                        or current_token.get("oauth_epoch", 0) != epoch or self.resource(row) != resource):
+                        or current_token.get("oauth_epoch", 0) != epoch or self.resource(row) != resource
+                        or callback_uri(self.catalog.config.public_url, current_auth) != redirect_uri):
                     raise HTTPException(409, "OAuth authorization changed during discovery")
             registration_mode = "manual"
             identity = auth.get("client_id", "")
@@ -291,7 +295,9 @@ class OAuth:
                             reason = "cimd_not_supported"
                             raise GatewayError("oauth_configuration_required", "服务器不支持 CIMD")
                         reason = "public_url_unavailable"
-                        identity = client_metadata(self.catalog.config.public_url)["client_id"]
+                        identity = (await self.cimd.ensure(request, user_id, auth)
+                                    if auth.get("cimd_metadata_source", "mmg") == "external"
+                                    else client_metadata(self.catalog.config.public_url)["client_id"])
                         reason = "token_auth_incompatible"
                         if auth.get("token_endpoint_auth_method") not in {None, "none"}:
                             raise GatewayError("oauth_configuration_required",
@@ -350,7 +356,8 @@ class OAuth:
                 _, current, current_auth = await oauth_actor(request, session, row.id, revision=row.revision)
                 token_payload = await self.credential_store.load(row.id, token_owner, session=session)
                 if (configuration_fingerprint(current_auth) != configuration_fingerprint(auth)
-                        or token_payload.get("oauth_epoch", 0) != epoch or self.resource(current) != resource):
+                        or token_payload.get("oauth_epoch", 0) != epoch or self.resource(current) != resource
+                        or callback_uri(self.catalog.config.public_url, current_auth) != redirect_uri):
                     raise HTTPException(409, "OAuth configuration or authorization changed; restart authorization")
                 current_payload = await self.credential_store.load(row.id, config_owner, session=session)
                 previous = current_payload.get("oauth_registration", {})
@@ -540,11 +547,14 @@ async def authorization_start(request, row, auth, user, epoch, return_to, *, fal
 
     app = request.app.state
     owner = credential_owner(row.isolation, user.id)
+    callback_binding = callback_uri(app.config.public_url, auth)
     effective, epoch = await app.oauth.prepare(row, user.id, auth, request, epoch, fallback_reason=fallback_reason)
     async with app.db.locked() as session:
         user, row, current_auth = await oauth_actor(request, session, row.id, revision=row.revision)
         payload = await app.credentials.load(row.id, owner, session=session)
-        if configuration_fingerprint(current_auth) != configuration_fingerprint(auth) or payload.get("oauth_epoch", 0) != epoch:
+        if (configuration_fingerprint(current_auth) != configuration_fingerprint(auth)
+                or payload.get("oauth_epoch", 0) != epoch
+                or callback_uri(app.config.public_url, current_auth) != callback_binding):
             raise HTTPException(409, "OAuth configuration or authorization changed; restart authorization")
         check_url(effective.get("authorization_url", ""))
         verifier = secrets.token_urlsafe(48)
