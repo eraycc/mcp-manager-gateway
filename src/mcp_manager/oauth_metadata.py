@@ -72,9 +72,9 @@ def expected_callback(public_url, path):
     return callback_uri(public_url, {"callback_path": path})
 
 
-def generate_client_metadata(public_url, hosting_url, path):
+def generate_client_metadata(public_url, hosting_url, path, client_name="Codex"):
     metadata_url(hosting_url)
-    return {"client_id": hosting_url, "client_name": "MCP Manager Gateway",
+    return {"client_id": hosting_url, "client_name": client_name.strip() or "Codex",
             "redirect_uris": [expected_callback(public_url, path)],
             "grant_types": ["authorization_code"], "response_types": ["code"],
             "token_endpoint_auth_method": "none"}
@@ -283,12 +283,12 @@ async def metadata_context(request: Request, callback_path: str = CALLBACK_PATHS
 
 @router.get("/template")
 async def template(request: Request, source: str = "mmg", hosting_url: str = "",
-                   callback_path: str = CALLBACK_PATHS[0], user=USER):
+                   callback_path: str = CALLBACK_PATHS[0], client_name: str = "Codex", user=USER):
     if source == "mmg":
         return client_metadata(request.app.state.config.public_url)
     if source != "external":
         raise ValueError("Unknown CIMD metadata source")
-    return generate_client_metadata(request.app.state.config.public_url, hosting_url, callback_path)
+    return generate_client_metadata(request.app.state.config.public_url, hosting_url, callback_path, client_name)
 
 
 @router.post("/verify")

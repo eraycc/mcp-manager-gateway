@@ -13,7 +13,8 @@ export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=tru
   [['pre_registration','预注册（手动 Client ID / Secret）'],...(allowAutomatic?[
    ['prefer_cimd_fallback_dcr','自动（优先 CIMD，失败回退 DCR）'],
    ['cimd_only','自动（仅 CIMD）'],['dcr_only','自动（仅 DCR）']]:[])]);
- const modeHelp=el('div',{class:'stack muted span2',style:'gap:0'},
+ const modeHelp=el('details',{class:'span2 oauth-mode-help'},el('summary',{},'注册方式说明'),
+  el('div',{class:'stack muted',style:'gap:0'},
   ...[
    '预注册：手动填写已在目标服务注册的 Client ID / Secret，不发起自动注册。',
    'CIMD：用公网 HTTPS 元数据 URL 作为客户端标识。可由 MMG 托管，也可单独发布静态 JSON，让 MMG 保留在本机或内网。',
@@ -23,10 +24,10 @@ export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=tru
    '自动（仅 DCR）：只使用 DCR，不尝试 CIMD。',
    '如果授权页面报错且没有回调 MMG，无法自动检测失败，可切换“自动（仅 DCR）”重试。用户拒绝授权、状态校验失败或 Token 请求超时不会自动回退。',
    'Figma 等部分服务器可能要求特定 client_name 或回调路径，请按服务端要求调整。'
-  ].map(text=>el('small',{},text)));
+  ].map(text=>el('small',{},text))));
  const id=field('Client ID',initial.client_id||'','text','预注册模式必填。'),
   secret=field('Client Secret',initial.client_secret||'',secretsVisible?'text':'password','可选：公共客户端可不填，使用 PKCE。'),
-  name=field('客户端名称（client_name）',initial.client_name||'Codex','text','DCR 注册必填，默认 Codex；这是客户端元数据，不代表获得 Codex 身份，也不保证服务器接受。');
+  name=field('客户端名称（client_name）',initial.client_name||'Codex','text','用于外部托管的 CIMD 元数据和 DCR 注册，默认 Codex；DCR 注册必填。这不代表获得 Codex 身份，也不保证服务器接受。');
  const method=selectField('Token 端点认证方式',initial.token_endpoint_auth_method||'',
   [['','自动选择'],['none','none（公共客户端）'],['client_secret_basic','client_secret_basic'],['client_secret_post','client_secret_post']]);
  const automatic=el('div',{class:'stack span2'},name.node);
@@ -42,14 +43,14 @@ export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=tru
  callback.node.append(el('small',{},'OAuth 回调路径。大多数服务使用默认的 /api/v1/oauth/callback；Figma 等部分远程 MCP 服务要求使用 /callback，若授权时提示 invalid_redirect_uri，请切换到 /callback 重试。'));
  const scopes=field('Scopes（空格分隔）',Array.isArray(initial.scopes)?initial.scopes.join(' '):initial.scopes||'','text',el('span',{},'用于声明申请的权限范围，多个权限用空格分隔（如 read write mcp:connect）。',el('br'),'留空时由服务器发现信息自动确定；Figma 等远程 MCP 通常填 mcp:connect。'));
  scopes.input.setAttribute('aria-label','Scopes（空格分隔）');
- const cimd=cimdFields(initial,{callback:callback.input,mode:mode.input});
+ const cimd=cimdFields(initial,{callback:callback.input,mode:mode.input,clientName:name.input});
  function sync(clear=false){
   const auto=mode.input.value!=='pre_registration',dcr=['prefer_cimd_fallback_dcr','dcr_only'].includes(mode.input.value);
   if(clear&&auto){id.input.value='';secret.input.value=''}
   if(dcr&&!name.input.value)name.input.value='Codex';
-  manual.hidden=auto;automatic.hidden=!dcr;
+  manual.hidden=auto;automatic.hidden=!auto;
   id.input.required=!auto;secret.input.required=false;name.input.required=dcr;
-  id.input.disabled=auto;secret.input.disabled=auto;name.input.disabled=!dcr;cimd.sync();
+  id.input.disabled=auto;secret.input.disabled=auto;name.input.disabled=!auto;cimd.sync();
  }
  mode.input.addEventListener('change',()=>sync(true));sync();
  const node=el('div',{class:'form-grid span2 oauth-fields'},mode.node,modeHelp,manual,automatic,method.node,methodHelp,...Object.values(endpoints).map(f=>f.node),callback.node,scopes.node,cimd.node);
@@ -62,6 +63,8 @@ export function oauthFields(initial={}, {secretsVisible=false,allowAutomatic=tru
   }else if(['prefer_cimd_fallback_dcr','dcr_only'].includes(mode.input.value)){
    if(validate&&!name.input.value.trim())throw new Error('DCR 注册必须填写客户端名称');
    auth.client_name=name.input.value.trim();
+  }else if(mode.input.value==='cimd_only'){
+   auth.client_name=name.input.value.trim()||'Codex';
   }
   if(method.input.value)auth.token_endpoint_auth_method=method.input.value;
   if(callback.input.value!=='/api/v1/oauth/callback')auth.callback_path=callback.input.value;

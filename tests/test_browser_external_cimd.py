@@ -1,5 +1,6 @@
 """Shared CIMD editor at desktop and narrow mobile widths."""
 import asyncio
+import re
 
 import pytest
 import test_browser_runtime_requirements as browser_fixtures
@@ -25,7 +26,8 @@ async def test_external_editor_generate_edit_verify_and_stale_draft(runtime_brow
     await hosting.select_option("external")
     address = page.get_by_label("客户端元数据托管 URL", exact=True)
     await address.fill(URL)
-    await expect(page.get_by_text("手机上的 127.0.0.1 指向手机", exact=False)).to_be_visible()
+    await expect(page.locator(".cimd-warning")).to_contain_text("跨设备访问")
+    await expect(page.locator(".cimd-warning")).not_to_contain_text("手机")
     await page.get_by_role("button", name="生成 JSON", exact=True).click()
     editor = page.get_by_label("元数据 JSON", exact=True)
     await expect(editor).to_be_visible()
@@ -130,3 +132,55 @@ async def test_copy_and_download_export_the_current_json(runtime_browser):
         await page.get_by_role("button", name="下载 JSON", exact=True).click()
     assert (await pending.value).suggested_filename == "client-metadata.json"
     assert json.loads(await page.evaluate("exported.text()")) == expected
+
+
+@pytest.mark.parametrize("width", [320, 1280])
+async def test_hosting_help_switches_and_generation_uses_live_client_name(runtime_browser, width):
+    import json
+
+    page, _ = runtime_browser
+    await page.set_viewport_size({"width": width, "height": 900})
+    await page.evaluate("""async()=>{
+      const {oauthFields}=await import('/oauth-fields.js');
+      const {dialog}=await import('/core.js');
+      window.oauthForm=oauthFields({type:'oauth',auth_mode:'prefer_cimd_fallback_dcr'});
+      dialog('CIMD hints',oauthForm.node);
+    }""")
+    explanation = page.locator(".oauth-mode-help")
+    summary = explanation.locator("summary")
+    await expect(explanation).not_to_have_attribute("open", "")
+    await expect(explanation.locator(".stack")).not_to_be_visible()
+    await summary.focus()
+    await summary.press("Enter")
+    await expect(explanation.locator(".stack")).to_be_visible()
+    await summary.press("Enter")
+    await expect(explanation.locator(".stack")).not_to_be_visible()
+    assert (await summary.bounding_box())["height"] >= 44
+    help_text = page.locator(".cimd-fields > .notice:not(.cimd-warning)")
+    for text in ("{PUBLIC_URL}/oauth/client-metadata.json", "可公开访问", "HTTPS", "启动前", "环境变量", "http://127.0.0.1:8765", "内网"):
+        await expect(help_text).to_contain_text(text)
+    await expect(help_text).not_to_contain_text("GitHub Pages")
+    assert await page.get_by_role("dialog").evaluate("(n)=>n.scrollWidth<=n.clientWidth+1")
+    hosting = page.get_by_label("CIMD 元数据托管方式", exact=True)
+    await hosting.select_option("external")
+    for text in ("GitHub Pages", "Vercel", "生成", "部署", "验证", "同一已登录浏览器"):
+        await expect(help_text).to_contain_text(text)
+    await expect(help_text).not_to_contain_text("启动前")
+    address = page.get_by_label("客户端元数据托管 URL", exact=True)
+    await address.fill("https://username.github.io/client-metadata.json")
+    await expect(address.locator("..")).to_contain_text("https://username.github.io/client-metadata.json")
+    name = page.get_by_label("客户端名称（client_name）", exact=True)
+    await name.fill("我的 MMG & Agent")
+    await page.get_by_role("button", name="生成 JSON", exact=True).click()
+    editor = page.get_by_label("元数据 JSON", exact=True)
+    await expect(editor).to_be_visible()
+    assert json.loads(await editor.input_value())["client_name"] == "我的 MMG & Agent"
+    await expect(editor.locator("..")).to_contain_text("上方")
+    await expect(editor.locator("..")).to_contain_text("完整回调地址")
+    await name.fill("")
+    await page.get_by_role("button", name="生成 JSON", exact=True).click()
+    await expect(editor).to_have_value(re.compile(r'"client_name": "Codex"'))
+    await hosting.select_option("mmg")
+    await expect(help_text).to_contain_text("{PUBLIC_URL}/oauth/client-metadata.json")
+    await expect(help_text).not_to_contain_text("GitHub Pages")
+    assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")

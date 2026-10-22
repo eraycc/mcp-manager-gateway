@@ -131,12 +131,24 @@ async def test_token_method_is_submitted_by_server_proposal_and_personal_forms(r
         callback = dialog.get_by_label("OAuth 回调路径", exact=True)
         await expect(callback).to_have_value("/api/v1/oauth/callback" if kind in {"personal", "create"} else "/callback")
         await callback.select_option("/callback")
+        await dialog.get_by_label("OAuth 客户端注册方式", exact=True).select_option("cimd_only")
+        name = dialog.get_by_label("客户端名称（client_name）", exact=True)
+        await expect(name).to_be_visible()
+        await expect(name).to_be_enabled()
+        await name.fill("Client " + kind)
+        await dialog.get_by_role("button", name="生成 JSON", exact=True).click()
+        editor = dialog.get_by_label("元数据 JSON", exact=True)
+        await expect(editor).to_be_visible()
+        import json
+        assert json.loads(await editor.input_value())["client_name"] == "Client " + kind
+        await expect(dialog.locator(".cimd-fields > .notice:not(.cimd-warning)")).to_contain_text("GitHub Pages")
         label = {"create": "创建服务", "server": "保存修改", "proposal": "保存审批配置", "personal": "保存"}[kind]
         await dialog.get_by_role("button", name=label, exact=True).click()
         await expect(dialog).to_have_count(0)
         body = submitted[-1][1]
         auth = body["auth"] if kind == "personal" else body["config"]["auth"]
-        assert auth["auth_mode"] == "prefer_cimd_fallback_dcr" and auth["token_endpoint_auth_method"] == "client_secret_basic"
+        assert auth["auth_mode"] == "cimd_only" and auth["token_endpoint_auth_method"] == "client_secret_basic"
+        assert auth["client_name"] == "Client " + kind
         assert auth["callback_path"] == "/callback"
         assert auth["cimd_metadata_source"] == "external"
         assert auth["cimd_external_url"] == "https://metadata.example.com/mmg.json"
@@ -165,11 +177,18 @@ async def test_default_and_legacy_modes_share_four_options_and_ignore_inactive_f
         value = await page.evaluate("oauthForm.value()")
         assert value["auth_mode"] == expected and "allow_dcr" not in value
         await mode.select_option("cimd_only")
-        await expect(page.get_by_label("客户端名称（client_name）", exact=True)).not_to_be_visible()
+        name = page.get_by_label("客户端名称（client_name）", exact=True)
+        await expect(name).to_be_visible()
+        await expect(name).to_be_enabled()
+        await name.fill("Only CIMD")
         value = await page.evaluate("oauthForm.value()")
-        assert not {"client_id", "client_secret", "client_name", "allow_dcr"} & value.keys()
+        assert value["client_name"] == "Only CIMD"
+        assert not {"client_id", "client_secret", "allow_dcr"} & value.keys()
         await mode.select_option("dcr_only")
         await page.get_by_label("客户端名称（client_name）", exact=True).fill("Custom DCR")
         await mode.select_option("prefer_cimd_fallback_dcr")
         assert (await page.evaluate("oauthForm.value()"))["client_name"] == "Custom DCR"
-        await expect(page.get_by_text("DCR：动态客户端注册，MMG 直接向服务器注册并获取 Client ID/Secret，不需要公网地址。", exact=True)).to_be_visible()
+        description = page.get_by_text("DCR：动态客户端注册，MMG 直接向服务器注册并获取 Client ID/Secret，不需要公网地址。", exact=True)
+        await expect(description).not_to_be_visible()
+        await page.get_by_text("注册方式说明", exact=True).click()
+        await expect(description).to_be_visible()
