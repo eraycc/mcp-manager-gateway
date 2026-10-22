@@ -69,7 +69,7 @@ def client_metadata(public_url):
     identity = public_url.rstrip("/") + CLIENT_METADATA_PATH
     return {"client_id": identity, "client_name": "MCP Manager Gateway",
             "redirect_uris": [callback_uri(public_url, {"callback_path": path}) for path in CALLBACK_PATHS],
-            "grant_types": ["authorization_code"],
+            "application_type": "web", "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"], "token_endpoint_auth_method": "none"}
 
 

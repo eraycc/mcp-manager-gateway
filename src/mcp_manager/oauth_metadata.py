@@ -74,9 +74,11 @@ def expected_callback(public_url, path):
 
 def generate_client_metadata(public_url, hosting_url, path, client_name="Codex"):
     metadata_url(hosting_url)
+    redirect_uri = expected_callback(public_url, path)
     return {"client_id": hosting_url, "client_name": client_name.strip() or "Codex",
-            "redirect_uris": [expected_callback(public_url, path)],
-            "grant_types": ["authorization_code"], "response_types": ["code"],
+            "redirect_uris": [redirect_uri],
+            "application_type": "native" if urlsplit(redirect_uri).scheme == "http" else "web",
+            "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
             "token_endpoint_auth_method": "none"}
 
 

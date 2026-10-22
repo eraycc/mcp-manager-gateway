@@ -41,6 +41,8 @@ async def test_cimd_is_preferred_and_public_metadata_has_no_credentials(db_app, 
     assert calls == []
     document = await db_app.web.get("/oauth/client-metadata.json")
     assert document.status_code == 200
+    assert document.json()["grant_types"] == ["authorization_code", "refresh_token"]
+    assert document.json()["application_type"] == "web"
     assert document.json()["client_id"] == params["client_id"][0]
     assert params["redirect_uri"] == ["https://gateway.example.com" + callback_path]
     assert params["redirect_uri"][0] in document.json()["redirect_uris"]
@@ -107,3 +109,45 @@ async def test_disconnect_invalidates_pending_authorization(db_app, monkeypatch)
     await db_app.web.post(f"/api/v1/mcps/{row.id}/oauth/disconnect")
     callback = await db_app.web.get("/api/v1/oauth/callback", params={"state": state, "code": "code", "iss": "https://auth.test"})
     assert callback.status_code in {403, 409}
+
+
+@pytest.mark.parametrize("mode,supported,scopes,want", [
+    ("cimd_only", ["read", "offline_access"], ["read"], "read offline_access"),
+    ("dcr_only", ["read", "offline_access"], ["read"], "read offline_access"),
+    ("pre_registration", ["read", "offline_access"], ["read"], "read offline_access"),
+    ("cimd_only", ["read"], ["read"], "read"),
+    ("cimd_only", None, ["read"], "read"),
+    ("cimd_only", [], ["read"], "read"),
+    ("cimd_only", ["offline_access"], ["read", "offline_access"], "read offline_access"),
+    ("cimd_only", ["offline_access"], "read offline_access", "read offline_access"),
+    ("cimd_only", ["offline_access"], [], "read offline_access"),
+    ("cimd_only", "offline_access", ["read"], "read"),
+])
+async def test_authorization_adds_offline_scope_only_when_as_advertises_it(
+    db_app, monkeypatch, mode, supported, scopes, want,
+):
+    from test_oauth_discovery import harness
+
+    metadata = {"issuer": "https://auth.test/tenant",
+        "authorization_endpoint": "https://auth.test/tenant/authorize",
+        "token_endpoint": "https://auth.test/tenant/token",
+        "registration_endpoint": "https://auth.test/tenant/register",
+        "client_id_metadata_document_supported": True}
+    if supported is not None:
+        metadata["scopes_supported"] = supported
+    harness(monkeypatch, metadata=metadata)
+    db_app.app.state.config.public_url = "https://gateway.example.com"
+    auth = {"type": "oauth", "auth_mode": mode, "scopes": scopes, "client_name": "Codex"}
+    if mode == "pre_registration":
+        auth.pop("client_name")
+        auth["client_id"] = "pre-registered"
+    row = await server(db_app, auth)
+    response = await db_app.web.post(f"/api/v1/mcps/{row.id}/oauth/start")
+    assert response.status_code == 200, response.text
+    query = parse_qs(urlsplit(response.json()["authorization_url"]).query)
+    assert query["scope"] == [want]
+    configured = await db_app.app.state.credentials.materialize(row, db_app.actor["id"])
+    assert configured["auth"]["scopes"] == scopes
+    registration = await db_app.app.state.credentials.load(row.id, "service")
+    assert registration["oauth_registration"]["auth"]["scopes"] == (
+        scopes.split() if isinstance(scopes, str) else scopes or ["read"])
