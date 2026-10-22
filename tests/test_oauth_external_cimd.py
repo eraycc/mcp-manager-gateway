@@ -386,3 +386,64 @@ def test_generated_application_type_matches_callback(public_url, want):
 
     value = generate_client_metadata(public_url, URL, "/callback")
     assert value["application_type"] == want
+
+
+@pytest.mark.parametrize("path", ["/api/v1/oauth/callback", "/callback"])
+async def test_external_wildcard_public_url_allows_placeholder_generation(db_app, path):
+    db_app.app.state.config.public_url = "http://0.0.0.0:8765"
+    context = (await db_app.web.get("/api/v1/oauth/client-metadata/context",
+        params={"source": "external", "callback_path": path})).json()
+    assert context["redirect_uri"] == "http://0.0.0.0:8765" + path
+    assert context["placeholder"] is True and "0.0.0.0" in context["message"]
+    response = await db_app.web.get("/api/v1/oauth/client-metadata/template", params={
+        "source": "external", "hosting_url": URL, "callback_path": path})
+    assert response.status_code == 200, response.text
+    assert response.json()["redirect_uris"] == [context["redirect_uri"]]
+    mmg = await db_app.web.get("/api/v1/oauth/client-metadata/template", params={"source": "mmg"})
+    assert mmg.status_code != 200
+    strict = (await db_app.web.get("/api/v1/oauth/client-metadata/context")).json()
+    assert strict["code"] == "invalid_public_url"
+
+
+@pytest.mark.parametrize("with_draft", [True, False])
+@pytest.mark.parametrize("redirect", [REDIRECT, "http://0.0.0.0:8765/api/v1/oauth/callback"])
+async def test_external_wildcard_public_url_verifies_edited_file_with_warning(db_app, monkeypatch, with_draft, redirect):
+    value = document(redirect_uris=[redirect])
+    remote(monkeypatch, value)
+    db_app.app.state.config.public_url = "http://0.0.0.0:8765"
+    response = await verify(db_app, **({"metadata": value} if with_draft else {}))
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["ok"] and result["status"] == "verified", result
+    assert "0.0.0.0" in result["warning"]
+    status = (await db_app.web.post("/api/v1/oauth/client-metadata/status",
+        json={"source": "external", "url": URL})).json()
+    assert status["ok"] and status["warning"] == result["warning"]
+    db_app.app.state.config.public_url = "http://127.0.0.1:8765"
+    status = (await db_app.web.post("/api/v1/oauth/client-metadata/status",
+        json={"source": "external", "url": URL})).json()
+    assert status["status"] == "unverified", "File-only verification must not authorize a real callback"
+
+
+async def test_external_wildcard_file_verification_does_not_authorize_unreachable_callback(db_app, monkeypatch):
+    discovery(monkeypatch, cimd=True)
+    remote(monkeypatch)
+    db_app.app.state.config.public_url = "http://0.0.0.0:8765"
+    assert (await verify(db_app, metadata=document())).json()["ok"]
+    row = await server(db_app, {"type": "oauth", "auth_mode": "cimd_only",
+        "cimd_metadata_source": "external", "cimd_external_url": URL, "cimd_metadata": document()})
+    response = await db_app.web.post(f"/api/v1/mcps/{row.id}/oauth/start")
+    assert response.status_code == 502
+    assert "invalid_public_url" in response.text
+    assert not db_app.app.state.oauth.pending
+
+
+@pytest.mark.parametrize("public_url", [
+    "http://0.0.0.0:8765/?", "http://0.0.0.0:8765/#", "http://0.0.0.0:8765/a/..",
+    "http://user:password@0.0.0.0:8765", "http://0.0.0.0:invalid", "http://192.168.1.2:8765",
+])
+async def test_placeholder_exception_keeps_other_public_url_checks(db_app, public_url):
+    db_app.app.state.config.public_url = public_url
+    response = await db_app.web.get("/api/v1/oauth/client-metadata/template",
+        params={"source": "external", "hosting_url": URL})
+    assert response.status_code == 422
