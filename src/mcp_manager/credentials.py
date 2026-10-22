@@ -158,11 +158,15 @@ class CredentialStore:
         row,
         user_id: str | None,
         value: dict,
+        *,
+        client: dict | None = None,
     ) -> str:
         """Save an OAuth token under the owner selected by row isolation."""
         owner = credential_owner(row.isolation, user_id)
         payload = await self._load(session, row.id, owner)
         payload["oauth_token"] = copy.deepcopy(value)
+        if client is not None:
+            payload["oauth_token_client"] = copy.deepcopy(client)
         payload["oauth_epoch"] = payload.get("oauth_epoch", 0) + 1
         payload.pop("oauth_state", None)
         await self.write(session, row.id, owner, payload)
@@ -209,7 +213,9 @@ class CredentialStore:
             config_payload = personal if row.config_isolation == "user" else payloads[row.id].get("service", {})
             config = config_payload.get("auth_config", {})
             token = personal.get("oauth_token", {})
-            registration = config_payload.get("oauth_registration", {})
+            registration = personal.get("oauth_token_client") or (
+                personal.get("oauth_registration", {}) if personal.get("oauth_registration_private")
+                else config_payload.get("oauth_registration", {}))
             # Resource changes clear registration in persist_config; listing never opens service configs.
             resource = registration.get("resource", "")
             registered = registration_matches(
@@ -357,6 +363,8 @@ class CredentialStore:
             for owner in affected | {config_owner, token_owner}:
                 item = payloads.setdefault(owner, await self._load(session, row.id, owner))
                 item.pop("oauth_token", None)
+                item.pop("oauth_token_client", None)
+                item.pop("oauth_registration_private", None)
                 item.pop("oauth_registration", None)
                 item.pop("oauth_state", None)
                 item["oauth_epoch"] = item.get("oauth_epoch", 0) + 1

@@ -670,6 +670,8 @@ class Catalog:
         return await self.get(row.id)
 
     async def update(self, server_id, values, *, authorize=None, user_id=None):
+        if self.oauth:
+            await self.oauth.sync_public_url(user_id)
         async with self.locks.setdefault(server_id, asyncio.Lock()):
             old = await self.get(server_id)
             if values.get("slug", old.slug) != old.slug:
@@ -688,6 +690,14 @@ class Catalog:
             if mode not in {"eager", "lazy", "disabled"}:
                 raise ValueError("Invalid mode")
             validate_service_config(transport, isolation, config)
+            from .oauth_config import comparable_settings
+
+            before_auth, after_auth = previous.get("auth", {}), config.get("auth", {})
+            oauth_changed = (before_auth.get("type") == "oauth" or after_auth.get("type") == "oauth") and (
+                comparable_settings(before_auth) != comparable_settings(after_auth)
+                or previous.get("url") != config.get("url")
+                or old.isolation != isolation or old.transport != transport
+                or before_auth.get("config_isolation", "shared") != after_auth.get("config_isolation", "shared"))
             if authorize:
                 await authorize()
             async with self.changing(server_id):
@@ -710,6 +720,11 @@ class Catalog:
                     row.config = self.seal(stored)
                     row.revision += 1
                     await s.flush()
+                    if oauth_changed and self.oauth:
+                        cleared_states = self.oauth.flows.invalidate(server_id)
+                if oauth_changed and self.oauth:
+                    await self.oauth.audit("oauth.state_invalidated", user_id, server_id,
+                                           reason="config_changed", cleared_states=cleared_states)
                 # A revision or ownership change must never publish stale tools.
                 self.runtime.versions[server_id] = row.revision
                 await asyncio.to_thread(self.cache_store.delete_prefix, server_id + "-")
