@@ -44,6 +44,8 @@ async def test_external_template_works_with_loopback_public_url(db_app):
     value = response.json()
     assert value["client_id"] == URL
     assert value["redirect_uris"] == ["http://127.0.0.1:8765/callback"]
+    assert value["grant_types"] == ["authorization_code", "refresh_token"]
+    assert value["application_type"] == "native"
     assert value["token_endpoint_auth_method"] == "none"
     assert "client_secret" not in value
 
@@ -60,9 +62,16 @@ async def test_external_authorization_verifies_then_completes_with_private_mmg(d
     assert params["client_id"] == [URL] and params["redirect_uri"] == [REDIRECT]
     assert len(fetched) == 1 and not calls
 
+    grants = []
+
     async def exchange(auth, data):
-        assert auth["client_id"] == URL and data["redirect_uri"] == REDIRECT
-        return {"access_token": "external-access", "expires_at": None}
+        assert auth["client_id"] == URL
+        grants.append(data["grant_type"])
+        if data["grant_type"] == "authorization_code":
+            assert data["redirect_uri"] == REDIRECT
+        else:
+            assert data["refresh_token"] == "external-refresh"
+        return {"access_token": "external-access", "refresh_token": "external-refresh", "expires_at": None}
 
     monkeypatch.setattr(db_app.app.state.oauth, "exchange", exchange)
     completed = await db_app.web.get("/api/v1/oauth/callback", params={
@@ -70,6 +79,14 @@ async def test_external_authorization_verifies_then_completes_with_private_mmg(d
     assert completed.status_code == 303
     status = (await db_app.web.get(f"/api/v1/mcps/{row.id}/oauth/status")).json()
     assert status["authorized"] and status["registration_mode"] == "cimd"
+    owner = db_app.actor["id"]
+    async with db_app.db.locked() as session:
+        payload = await db_app.app.state.credentials.load(row.id, owner, session=session)
+        assert payload["oauth_token"]["refresh_token"] == "external-refresh"
+        payload["oauth_token"]["expires_at"] = 0
+        await db_app.app.state.credentials.write(session, row.id, owner, payload)
+    assert (await db_app.app.state.oauth.credentials(row, owner))["access_token"] == "external-access"
+    assert grants == ["authorization_code", "refresh_token"]
 
 
 @pytest.mark.parametrize("changes,code", [
@@ -330,8 +347,8 @@ async def test_external_template_uses_current_form_client_name(db_app, name, wan
     assert response.json() == {
         "client_id": URL, "client_name": want,
         "redirect_uris": ["http://127.0.0.1:8765/callback"],
-        "grant_types": ["authorization_code"], "response_types": ["code"],
-        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+        "token_endpoint_auth_method": "none", "application_type": "native",
     }
 
 
@@ -340,3 +357,32 @@ async def test_external_template_omitted_client_name_defaults_to_codex(db_app):
         params={"source": "external", "hosting_url": URL})
     assert response.status_code == 200
     assert response.json()["client_name"] == "Codex"
+
+
+async def test_edited_template_without_refresh_grant_is_preserved(db_app, monkeypatch):
+    from mcp_manager.oauth_metadata import generate_client_metadata, validate_cimd_metadata
+
+    edited = generate_client_metadata("http://127.0.0.1:8765", URL, "/api/v1/oauth/callback")
+    edited["grant_types"] = ["authorization_code"]
+    edited["application_type"] = "web"
+    assert validate_cimd_metadata(edited, URL, REDIRECT) == edited
+    remote(monkeypatch, edited)
+    result = await verify(db_app, metadata=edited)
+    assert result.status_code == 200 and result.json()["ok"], result.text
+    assert edited["grant_types"] == ["authorization_code"]
+    assert edited["application_type"] == "web"
+
+
+@pytest.mark.parametrize("public_url,want", [
+    ("http://127.0.0.1:8765", "native"),
+    ("http://localhost:8765", "native"),
+    ("http://[::1]:8765", "native"),
+    ("https://gateway.example.com", "web"),
+    ("https://192.168.1.2", "web"),
+    ("https://localhost", "web"),
+])
+def test_generated_application_type_matches_callback(public_url, want):
+    from mcp_manager.oauth_metadata import generate_client_metadata
+
+    value = generate_client_metadata(public_url, URL, "/callback")
+    assert value["application_type"] == want

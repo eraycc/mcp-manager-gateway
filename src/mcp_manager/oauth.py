@@ -570,9 +570,13 @@ async def authorization_start(request, row, auth, user, epoch, return_to, *, fal
             "registration_mode": effective.get("registration_mode", "manual"),
         }
         scopes = effective.get("scopes", [])
+        scope = " ".join(scopes) if isinstance(scopes, list) else scopes
+        supported = effective.get("scopes_supported", [])
+        if isinstance(supported, list) and "offline_access" in supported and "offline_access" not in scope.split():
+            scope = (scope + " offline_access").strip()
         params = {"response_type": "code", "client_id": effective.get("client_id", ""),
                   "redirect_uri": callback_url, "state": nonce, "code_challenge": challenge,
-                  "code_challenge_method": "S256", "scope": " ".join(scopes) if isinstance(scopes, list) else scopes}
+                  "code_challenge_method": "S256", "scope": scope}
         if effective.get("resource"):
             params["resource"] = effective["resource"]
         separator = "&" if "?" in effective["authorization_url"] else "?"

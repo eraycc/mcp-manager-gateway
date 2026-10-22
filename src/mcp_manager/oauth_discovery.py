@@ -203,6 +203,8 @@ async def discover(resource, auth):
         if not isinstance(scopes, (str, list)) or isinstance(scopes, list) and not all(isinstance(x, str) for x in scopes):
             raise GatewayError("oauth_metadata_invalid", "OAuth scopes are invalid")
         result["scopes"] = scopes.split() if isinstance(scopes, str) else scopes
+        if isinstance(metadata.get("scopes_supported"), list):
+            result["scopes_supported"] = metadata["scopes_supported"]
         if "token_endpoint_auth_methods_supported" in metadata:
             result["token_endpoint_auth_methods_supported"] = metadata["token_endpoint_auth_methods_supported"]
         return result

@@ -35,22 +35,26 @@ async def test_external_editor_generate_edit_verify_and_stale_draft(runtime_brow
     import json
     value = json.loads(text)
     assert value["client_id"] == URL
+    assert value["grant_types"] == ["authorization_code", "refresh_token"]
     assert value["redirect_uris"] == [url + "/api/v1/oauth/callback"]
     await hosting.scroll_into_view_if_needed()
     await page.screenshot(path=f"artifacts/qa/cimd/{width}.png")
     async def verified(route):
         body = route.request.post_data_json
         assert body["url"] == URL and body["metadata"]["client_name"] == "Private MMG"
+        assert body["metadata"]["grant_types"] == ["authorization_code"]
         await route.fulfill(json={"ok": True, "status": "verified", "verified_at": 1792600000,
                                   "code": None, "message": "已验证线上元数据"})
     await page.route("**/api/v1/oauth/client-metadata/verify", verified)
     value["client_name"] = "Private MMG"
+    value["grant_types"].remove("refresh_token")
     await editor.fill(json.dumps(value))
     await page.get_by_role("button", name="验证线上文件", exact=True).click()
     await expect(page.locator(".cimd-status")).to_contain_text("已验证")
     saved = await page.evaluate("oauthForm.value()")
     assert saved["cimd_metadata_source"] == "external" and saved["cimd_external_url"] == URL
     assert saved["cimd_metadata"]["client_name"] == "Private MMG"
+    assert saved["cimd_metadata"]["grant_types"] == ["authorization_code"]
     assert not any(key.startswith("cimd_verified") for key in saved)
     await address.fill(URL + "?changed=1")
     await expect(page.locator(".cimd-status")).to_contain_text("已过期")
