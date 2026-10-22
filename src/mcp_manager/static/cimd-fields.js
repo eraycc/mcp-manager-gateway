@@ -1,19 +1,21 @@
 import{el,field,selectField,button,api,download,pretty}from './core.js';
 
-export function cimdFields(initial,{callback,mode}){
+export function cimdFields(initial,{callback,mode,clientName}){
  const source=selectField('CIMD 元数据托管方式',initial.cimd_metadata_source||'mmg',
   [['mmg','MMG 托管'],['external','外部静态托管（内网可用）']]);
  const address=field('客户端元数据托管 URL',initial.cimd_external_url||'','url',
-  '最终直接返回 JSON 的公网 HTTPS 地址，例如 https://metadata.example.com/mmg.json；不限定文件名，不支持 HTTP 跳转。');
+  '最终直接返回 JSON 的公网 HTTPS 地址，例如 https://username.github.io/client-metadata.json；不限定文件名，不支持 HTTP 跳转。');
  address.input.setAttribute('aria-label','客户端元数据托管 URL');address.input.spellcheck=false;
  const editor=field('元数据 JSON',initial.cimd_metadata?pretty(initial.cimd_metadata):'','textarea',
-  'client_id 必须与托管 URL 逐字符一致；redirect_uris 必须包含下方实际回调地址。编辑 JSON 不会改变 MMG 实际使用的回调地址。');
+  'client_id 必须与上方托管的 URL 逐字符一致；redirect_uris 必须包含上方“MMG 实际回调地址”中的完整回调地址。编辑 JSON 不会改变 MMG 实际使用的回调地址。');
  editor.input.setAttribute('aria-label','元数据 JSON');editor.input.className='json';editor.input.spellcheck=false;
  const preview=el('details',{class:'cimd-preview'},el('summary',{},'预览／编辑元数据 JSON'),editor.node);
  const status=el('div',{class:'cimd-status muted',role:'status','aria-live':'polite'},'未验证线上文件');
  const callbackValue=el('code',{class:'cimd-callback'},'正在读取回调配置…');
  const callbackInfo=el('div',{class:'cimd-callback-info'},el('strong',{},'MMG 实际回调地址'),callbackValue);
  const warning=el('p',{class:'notice cimd-warning',hidden:true});
+ const hostingHelp=el('p',{class:'notice'});
+ const currentName=()=>clientName.value.trim()||'Codex';
  let epoch=0,contextEpoch=0,loaded=false,active=false,context=null,generatedKey=null;
  const key=()=>JSON.stringify([source.input.value,address.input.value,callback.value,editor.input.value]);
  const activeCimd=()=>['prefer_cimd_fallback_dcr','cimd_only'].includes(mode.value);
@@ -67,16 +69,16 @@ export function cimdFields(initial,{callback,mode}){
    if(result.redirect_uri){
     const expected=new URL(result.redirect_uri);
     if(expected.hostname!==location.hostname)hints.push('当前控制台主机与回调主机不同，请先使用回调地址对应的 MMG 主机登录，再在同一浏览器完成授权。');
-    if(['127.0.0.1','localhost','[::1]'].includes(expected.hostname))hints.push('本机回调要求浏览器与 MMG 同机。手机上的 127.0.0.1 指向手机；手机访问电脑 MMG 需使用可信的内网 HTTPS 地址。');
+    hints.push('回调地址必须能被发起授权的浏览器访问；127.0.0.1 仅适用于浏览器与 MMG 同机的情况。跨设备访问时，请使用浏览器可达的地址（如内网 HTTPS 地址或公网域名）。');
    }
    warning.textContent=hints.join(' ');warning.hidden=!hints.length;
   }catch(error){if(version===contextEpoch){callbackValue.textContent='无法读取回调配置';warning.textContent=error.message;warning.hidden=false}}
  }
  const generate=button('生成 JSON',async()=>{
-  const version=++epoch,snapshot=key(),path=callback.value;
+  const version=++epoch,snapshot=key(),path=callback.value,name=currentName();
   try{
-   const value=await api('/oauth/client-metadata/template?'+new URLSearchParams({source:'external',hosting_url:address.input.value,callback_path:path}));
-   if(version!==epoch||snapshot!==key()||!external())return;
+   const value=await api('/oauth/client-metadata/template?'+new URLSearchParams({source:'external',hosting_url:address.input.value,callback_path:path,client_name:name}));
+   if(version!==epoch||snapshot!==key()||name!==currentName()||!external())return;
    editor.input.value=pretty(value);generatedKey=JSON.stringify([address.input.value,path]);
    preview.open=true;mark('JSON 已生成，请复制或下载，发布到上方 URL 后验证线上文件。');
   }catch(error){if(version===epoch)mark(error.message,true)}
@@ -108,13 +110,16 @@ export function cimdFields(initial,{callback,mode}){
   address.node,el('div',{class:'cimd-actions'},generate,copy,save,verify),status,preview,
   el('small',{class:'muted'},'文件应允许匿名读取并返回 application/json，不要发布 Token、Secret 或私钥。验证只确认 MMG 能读取且内容匹配；目标授权服务器仍可能有额外限制。'));
  const node=el('section',{class:'stack span2 cimd-fields'},source.node,
-  el('p',{class:'notice'},'外部托管只需公开静态 JSON，MMG 可留在本机或内网。回调仍须由同一已登录浏览器访问。'),
+  hostingHelp,
   callbackInfo,warning,externalBox);
  source.input.addEventListener('change',()=>{stale();sync();refreshStatus()});
  address.input.addEventListener('input',stale);address.input.addEventListener('blur',refreshStatus);
  editor.input.addEventListener('input',()=>{generatedKey=null;stale()});
  callback.addEventListener('change',()=>{stale();loadContext();refreshStatus()});
  function sync(){
+  hostingHelp.textContent=source.input.value==='external'
+   ?'需要生成一份静态 client-metadata.json 并部署至 GitHub Pages、Vercel 等平台，MMG 可留在本机或内网。填写部署后的 HTTPS 地址（即 client_id），生成并部署文件后点击验证。回调仍须由同一已登录浏览器访问。'
+   :'由 MMG 在 {PUBLIC_URL}/oauth/client-metadata.json 提供元数据，要求 PUBLIC_URL 为稳定、可公开访问的 HTTPS 地址，需在启动前通过环境变量设置。若 PUBLIC_URL 为 http://127.0.0.1:8765 或内网地址，CIMD 将不可用，请改用“外部托管”或回退 DCR。';
   active=activeCimd();node.hidden=!active;externalBox.hidden=!external();
   address.input.disabled=!external();address.input.required=external();editor.input.disabled=!external();
   if(active&&!loaded){loaded=true;loadContext();refreshStatus()}

@@ -318,3 +318,25 @@ async def test_blocked_verification_attempt_is_audited_without_url(db_app, monke
     assert events[0][0] == "oauth.cimd_verify" and events[0][1] == db_app.actor["id"]
     assert events[0][2]["code"] == "unsafe_address"
     assert "169.254.169.254" not in repr(events)
+
+
+@pytest.mark.parametrize("name,want", [
+    ("Codex", "Codex"), ("  MMG 中文 & agent  ", "MMG 中文 & agent"), ("", "Codex"), ("   ", "Codex"),
+])
+async def test_external_template_uses_current_form_client_name(db_app, name, want):
+    response = await db_app.web.get("/api/v1/oauth/client-metadata/template", params={
+        "source": "external", "hosting_url": URL, "callback_path": "/callback", "client_name": name})
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "client_id": URL, "client_name": want,
+        "redirect_uris": ["http://127.0.0.1:8765/callback"],
+        "grant_types": ["authorization_code"], "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    }
+
+
+async def test_external_template_omitted_client_name_defaults_to_codex(db_app):
+    response = await db_app.web.get("/api/v1/oauth/client-metadata/template",
+        params={"source": "external", "hosting_url": URL})
+    assert response.status_code == 200
+    assert response.json()["client_name"] == "Codex"
