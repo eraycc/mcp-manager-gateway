@@ -1,14 +1,17 @@
 """Bounded, credential-free OAuth metadata discovery and public-client registration."""
 import asyncio
 import json
+import logging
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import parse_http_list, parse_keqv_list
 
 import httpx
 
+from .diagnostics import diagnostic_secrets
 from .oauth_config import local_host, oauth_url
 from .runtime import GatewayError
 
+LOGGER = logging.getLogger(__name__)
 REQUEST_TIMEOUT = 8
 MAX_JSON_BYTES = 262144
 SAFE_ERRORS = {"invalid_client", "invalid_grant", "invalid_request", "unauthorized_client",
@@ -30,6 +33,35 @@ def http_client():
 def canonical_resource(value):
     parsed = oauth_url(value)
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, parsed.query, ""))
+
+
+def normalized_prm_resource(value):
+    """Normalize only PRM comparisons; preserve request and token resource bindings."""
+    parsed = urlsplit(canonical_resource(value))
+    return urlunsplit(parsed._replace(path=parsed.path.rstrip("/")))
+
+
+def resource_log_value(value):
+    """Keep URL comparison evidence without logging embedded credentials."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return "<invalid " + type(value).__name__ + ">"
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+    except ValueError:
+        return "<invalid URL>"
+    secrets = diagnostic_secrets(value)
+    if parsed.username is not None:
+        secrets.append(parsed.netloc.rsplit("@", 1)[0])
+    for item in parsed.query.split("&"):
+        _, separator, raw_value = item.partition("=")
+        if separator and raw_value and diagnostic_secrets("https://resource.invalid/?" + item):
+            secrets.append(raw_value)
+    for secret in sorted(set(secrets), key=len, reverse=True):
+        value = value.replace(secret, "[REDACTED]")
+    return value
 
 
 def checked_url(value, resource):
@@ -112,6 +144,7 @@ async def json_request(client, url, resource, *, data=None):
 
 
 async def discover(resource, auth):
+    original_resource = resource
     resource = canonical_resource(resource)
     parsed = urlsplit(resource)
     origin = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
@@ -140,8 +173,12 @@ async def discover(resource, auth):
                 continue
         issuer = auth.get("issuer_url") or origin
         if protected is not None:
+            metadata_resource = protected.get("resource", "")
+            normalized_resource = normalized_prm_resource(resource)
+            normalized_metadata_resource = None
             try:
-                if canonical_resource(protected.get("resource", "")) != resource:
+                normalized_metadata_resource = normalized_prm_resource(metadata_resource)
+                if normalized_metadata_resource != normalized_resource:
                     raise ValueError("OAuth resource metadata does not match the MCP resource")
                 servers = protected.get("authorization_servers")
                 if not isinstance(servers, list) or not servers or not all(isinstance(x, str) for x in servers):
@@ -150,6 +187,14 @@ async def discover(resource, auth):
                     raise ValueError("Configured OAuth issuer is not advertised by this resource")
                 issuer = auth.get("issuer_url") or servers[0]
             except (ValueError, TypeError) as exc:
+                if normalized_metadata_resource != normalized_resource:
+                    LOGGER.warning(
+                        "OAuth PRM resource mismatch: resource_raw=%r, metadata_resource_raw=%r, "
+                        "resource_normalized=%r, metadata_resource_normalized=%r",
+                        *(resource_log_value(value) for value in (
+                            original_resource, metadata_resource, normalized_resource, normalized_metadata_resource,
+                        )),
+                    )
                 raise GatewayError("oauth_metadata_invalid", str(exc)) from None
         issuer_parts = checked_url(issuer, resource)
         if issuer_parts.query:

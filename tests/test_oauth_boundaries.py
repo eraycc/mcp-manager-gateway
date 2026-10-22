@@ -18,11 +18,11 @@ def test_invalid_oauth_endpoint_is_rejected(value):
         oauth_url(value)
 
 
-async def test_trailing_slash_is_a_distinct_resource(monkeypatch):
+async def test_prm_trailing_slash_normalization_preserves_requested_resource(monkeypatch):
     implementation, _, resource = harness(monkeypatch, prm={
         "resource": "https://mcp.test/mcp/", "authorization_servers": ["https://auth.test/tenant"]})
-    with pytest.raises(GatewayError):
-        await implementation.discover(resource, {})
+    result = await implementation.discover(resource, {})
+    assert result["resource"] == resource
 
 
 @pytest.mark.parametrize("kind", ["redirect", "oversized", "issuer_fallback"])
