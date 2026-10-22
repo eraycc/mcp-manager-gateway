@@ -22,8 +22,6 @@ USER = Depends(current_user)
 VERIFICATION_TTL = 86400
 MAX_BYTES = 65536
 MAX_RECORDS = 32
-PLACEHOLDER_WARNING = ("PUBLIC_URL 包含 0.0.0.0；如目标授权服务器不接受，"
-    "可手动将 redirect_uris 改为可访问的地址（如 127.0.0.1），并确认 PUBLIC_URL 与实际授权回调一致。")
 
 
 class MetadataError(ValueError):
@@ -74,25 +72,9 @@ def expected_callback(public_url, path):
     return callback_uri(public_url, {"callback_path": path})
 
 
-def placeholder_url(value):
-    try:
-        parsed = urlsplit(value)
-        return parsed.scheme == "http" and parsed.hostname == "0.0.0.0"
-    except (TypeError, ValueError, AttributeError):
-        return False
-
-
-def external_callback(public_url, path):
-    if placeholder_url(public_url):
-        # Validate all other URL constraints without replacing the generated address.
-        expected_callback(public_url.replace("0.0.0.0", "127.0.0.1", 1), path)
-        return callback_uri(public_url, {"callback_path": path}), PLACEHOLDER_WARNING
-    return expected_callback(public_url, path), None
-
-
 def generate_client_metadata(public_url, hosting_url, path, client_name="Codex"):
     metadata_url(hosting_url)
-    redirect_uri, _ = external_callback(public_url, path)
+    redirect_uri = expected_callback(public_url, path)
     return {"client_id": hosting_url, "client_name": client_name.strip() or "Codex",
             "redirect_uris": [redirect_uri],
             "application_type": "native" if urlsplit(redirect_uri).scheme == "http" else "web",
@@ -134,11 +116,10 @@ def validate_cimd_metadata(value, url, redirect_uri):
         raise MetadataError("invalid_redirect_uris", "redirect_uris 必须是非空回调地址数组")
     try:
         for uri in redirects:
-            candidate = uri.replace("0.0.0.0", "127.0.0.1", 1) if redirect_uri is None and placeholder_url(uri) else uri
-            oauth_url(candidate)
+            oauth_url(uri)
     except (TypeError, ValueError):
         raise MetadataError("invalid_redirect_uris", "回调必须为合法 HTTPS URL；HTTP 仅允许回环地址") from None
-    if redirect_uri is not None and redirect_uri not in redirects:
+    if redirect_uri not in redirects:
         raise MetadataError("redirect_uri_mismatch",
             "文档未包含 MMG 实际使用的完整回调地址；主机、端口、协议和路径必须一致")
     if value.get("token_endpoint_auth_method", "none") != "none":
@@ -241,8 +222,6 @@ class CIMDVerifier:
             result = {"ok": False, "status": "failed", "verified_at": None,
                       "code": getattr(exc, "code", "invalid_metadata"),
                       "message": str(exc) if isinstance(exc, MetadataError) else "元数据嵌套层级过深"}
-        if redirect is None:
-            result["warning"] = PLACEHOLDER_WARNING
         result["checked_at"] = time.time()
         async with self.catalog.db.locked() as session:
             key = self.setting_key(user_id)
@@ -295,13 +274,11 @@ class VerificationInput(BaseModel):
 
 
 @router.get("/context")
-async def metadata_context(request: Request, callback_path: str = CALLBACK_PATHS[0], source: str = "mmg", user=USER):
+async def metadata_context(request: Request, callback_path: str = CALLBACK_PATHS[0], user=USER):
     public_url = request.app.state.config.public_url
     try:
-        redirect, warning = (external_callback(public_url, callback_path) if source == "external"
-                             else (expected_callback(public_url, callback_path), None))
-        return {"public_url": public_url, "redirect_uri": redirect,
-                **({"placeholder": True, "message": warning} if warning else {})}
+        redirect = expected_callback(public_url, callback_path)
+        return {"public_url": public_url, "redirect_uri": redirect}
     except MetadataError as exc:
         return {"public_url": public_url, "redirect_uri": None, "code": exc.code, "message": str(exc)}
 
@@ -328,9 +305,7 @@ async def verify_document(data: VerificationInput, request: Request, user=USER):
         if data.source != "external":
             raise MetadataError("invalid_source", "只对外部静态文件执行验证")
         metadata_url(data.url)
-        redirect, warning = external_callback(request.app.state.config.public_url, data.callback_path)
-        if warning:
-            redirect = None  # File-only evidence cannot satisfy authorization-time callback binding.
+        redirect = expected_callback(request.app.state.config.public_url, data.callback_path)
         if data.metadata is not None:
             if len(json.dumps(data.metadata, ensure_ascii=False).encode()) > MAX_BYTES:
                 raise MetadataError("response_too_large", "编辑的元数据超过 64 KiB")

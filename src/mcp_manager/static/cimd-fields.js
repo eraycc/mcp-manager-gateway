@@ -6,14 +6,13 @@ export function cimdFields(initial,{callback,mode,clientName}){
  const address=field('客户端元数据托管 URL',initial.cimd_external_url||'','url',
   '最终直接返回 JSON 的公网 HTTPS 地址，例如 https://username.github.io/client-metadata.json；不限定文件名，不支持 HTTP 跳转。');
  address.input.setAttribute('aria-label','客户端元数据托管 URL');address.input.spellcheck=false;
- const editorHint='client_id 必须与上方托管的 URL 逐字符一致；redirect_uris 必须包含上方“MMG 实际回调地址”中的完整回调地址。编辑 JSON 不会改变 MMG 实际使用的回调地址。';
- const editor=field('元数据 JSON',initial.cimd_metadata?pretty(initial.cimd_metadata):'','textarea',editorHint);
+ const editor=field('元数据 JSON',initial.cimd_metadata?pretty(initial.cimd_metadata):'','textarea',
+  'client_id 必须与上方托管的 URL 逐字符一致；redirect_uris 必须包含上方“MMG 实际回调地址”中的完整回调地址。编辑 JSON 不会改变 MMG 实际使用的回调地址。');
  editor.input.setAttribute('aria-label','元数据 JSON');editor.input.className='json';editor.input.spellcheck=false;
  const preview=el('details',{class:'cimd-preview'},el('summary',{},'预览／编辑元数据 JSON'),editor.node);
  const status=el('div',{class:'cimd-status muted',role:'status','aria-live':'polite'},'未验证线上文件');
  const callbackValue=el('code',{class:'cimd-callback'},'正在读取回调配置…');
- const callbackLabel=el('strong',{},'MMG 实际回调地址');
- const callbackInfo=el('div',{class:'cimd-callback-info'},callbackLabel,callbackValue);
+ const callbackInfo=el('div',{class:'cimd-callback-info'},el('strong',{},'MMG 实际回调地址'),callbackValue);
  const warning=el('p',{class:'notice cimd-warning',hidden:true});
  const hostingHelp=el('p',{class:'notice'});
  const currentName=()=>clientName.value.trim()||'Codex';
@@ -46,7 +45,7 @@ export function cimdFields(initial,{callback,mode,clientName}){
   return{source:'external',url:address.input.value,callback_path:callback.value,...(metadata?{metadata}:{})};
  }
  function showResult(result){
-  if(result.ok)mark('已验证线上文件 · '+new Date(result.verified_at*1000).toLocaleString()+'；此结果不代表目标服务已接受或已完成授权。'+(result.warning?' 当前仅验证文件内容，实际授权回调尚未核对。':''));
+  if(result.ok)mark('已验证线上文件 · '+new Date(result.verified_at*1000).toLocaleString()+'；此结果不代表目标服务已接受或已完成授权。');
   else if(result.status==='stale')mark('验证已过期，将在开始授权时重新验证。');
   else if(result.status==='failed')mark('['+result.code+'] '+result.message,true);
   else mark('未验证线上文件；开始授权时 MMG 会自动验证。');
@@ -62,18 +61,14 @@ export function cimdFields(initial,{callback,mode,clientName}){
  async function loadContext(){
   const version=++contextEpoch,path=callback.value;
   try{
-   const result=await api('/oauth/client-metadata/context?'+new URLSearchParams({callback_path:path,source:source.input.value}));
+   const result=await api('/oauth/client-metadata/context?'+new URLSearchParams({callback_path:path}));
    if(version!==contextEpoch)return;
    context=result;callbackValue.textContent=result.redirect_uri||result.public_url||'未配置 PUBLIC_URL';
-   callbackLabel.textContent=result.placeholder?'MMG 回调占位地址':'MMG 实际回调地址';
-   editor.node.querySelector('small').textContent=result.placeholder
-    ?'client_id 必须与上方托管 URL 一致；如目标授权服务器不接受 0.0.0.0，可手动修改 redirect_uris。编辑 JSON 不会改变 MMG 实际使用的回调地址。'
-    :editorHint;
    const hints=[];
    if(result.message)hints.push(result.message);
    if(result.redirect_uri){
     const expected=new URL(result.redirect_uri);
-    if(!result.placeholder&&expected.hostname!==location.hostname)hints.push('当前控制台主机与回调主机不同，请先使用回调地址对应的 MMG 主机登录，再在同一浏览器完成授权。');
+    if(expected.hostname!==location.hostname)hints.push('当前控制台主机与回调主机不同，请先使用回调地址对应的 MMG 主机登录，再在同一浏览器完成授权。');
     hints.push('回调地址必须能被发起授权的浏览器访问；127.0.0.1 仅适用于浏览器与 MMG 同机的情况。跨设备访问时，请使用浏览器可达的地址（如内网 HTTPS 地址或公网域名）。');
    }
    warning.textContent=hints.join(' ');warning.hidden=!hints.length;
@@ -117,7 +112,7 @@ export function cimdFields(initial,{callback,mode,clientName}){
  const node=el('section',{class:'stack span2 cimd-fields'},source.node,
   hostingHelp,
   callbackInfo,warning,externalBox);
- source.input.addEventListener('change',()=>{stale();sync();loadContext();refreshStatus()});
+ source.input.addEventListener('change',()=>{stale();sync();refreshStatus()});
  address.input.addEventListener('input',stale);address.input.addEventListener('blur',refreshStatus);
  editor.input.addEventListener('input',()=>{generatedKey=null;stale()});
  callback.addEventListener('change',()=>{stale();loadContext();refreshStatus()});
