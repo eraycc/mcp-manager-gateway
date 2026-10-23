@@ -1069,7 +1069,8 @@ class Catalog:
             validator = cached[0]
         await asyncio.to_thread(validate_local, validator, arguments)
 
-    async def call(self, row, lease, name, arguments, *, user=None, token=None, authorize=None, source="gateway"):
+    async def call(self, row, lease, name, arguments, *, user=None, token=None, authorize=None, source="gateway",
+                   response_processor=None):
         if authorize:
             await authorize()
         await self.spec(row, user.id if user else None)
@@ -1110,7 +1111,7 @@ class Catalog:
             finally:
                 tool_context.reset(binding)
             event.update(status="tool_error" if result.get("isError") else "success", result=result)
-            return result
+            response = result
         except asyncio.CancelledError:
             event.update(status="cancelled", error="Caller cancelled; dispatched side effects may have occurred")
             raise
@@ -1121,7 +1122,15 @@ class Catalog:
         finally:
             event["duration_ms"] = round((time.monotonic() - started) * 1000, 3)
             try:
-                await asyncio.shield(self.logs.append(event))
-            except Exception:
-                import logging
-                logging.getLogger(__name__).exception("Final call log write failed; preserving downstream outcome")
+                # Keep the downstream outcome/result even if later response processing fails.
+                if response_processor is not None and "result" in event:
+                    response, added_content = await response_processor(result)
+                    if added_content:
+                        event["gateway_processing"] = {"added_content": added_content}
+            finally:
+                try:
+                    await asyncio.shield(self.logs.append(event))
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).exception("Final call log write failed; preserving downstream outcome")
+        return response

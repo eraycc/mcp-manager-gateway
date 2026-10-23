@@ -740,18 +740,28 @@ class Gateway:
                 raise GatewayError("credential_changed", "MCP credentials changed during exact call")
 
         call_scope = await catalog.index_scope(row, user.id if user else None)
+
+        async def process_response(raw_result):
+            await authorize()
+            original_count = len(raw_result.get("content", []))
+            response = await self.capture_embedded(
+                request, user, token, row, raw_result, scope=call_scope, authorize=authorize,
+            )
+            added_content = [block.model_dump(mode="json", by_alias=True, exclude_none=True)
+                             for block in response.content[original_count:]]
+            return response, added_content
+
         await authorize()
         try:
             result = await catalog.call(
                 row, self.lease(request, user, token), original_name, arguments,
-                user=user, token=token, authorize=authorize,
+                user=user, token=token, authorize=authorize, response_processor=process_response,
             )
         except ValidationError as exc:
             if discovery:
                 raise validation_error(exc, name=name) from None
             raise
-        await authorize()
-        return await self.capture_embedded(request, user, token, row, result, scope=call_scope, authorize=authorize)
+        return result
 
     async def resource_value(self, request, user, token, rows, uri, arguments=None):
         candidate = next((r for r in rows if uri.startswith("mcp-manager://" + r.id + "/")), None)
