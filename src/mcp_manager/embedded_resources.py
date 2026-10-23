@@ -19,6 +19,12 @@ class EmbeddedResources:
     def __init__(self):
         self.items = OrderedDict()
         self.bytes = 0
+        self.epoch = 0
+
+    def clear(self):
+        self.items.clear()
+        self.bytes = 0
+        self.epoch += 1
 
     def _remove(self, uri):
         item = self.items.pop(uri)
@@ -80,4 +86,4 @@ class EmbeddedResources:
             "uri": uri, "name": item["content"]["uri"].rsplit("/", 1)[-1] or "embedded resource",
             "mimeType": item["content"].get("mimeType", "application/octet-stream"),
             "source_uri": item["content"]["uri"], "temporary": True,
-        }) for uri, item in self.visible(namespace, scopes)]
+        }) for uri, item in reversed(self.visible(namespace, scopes))]

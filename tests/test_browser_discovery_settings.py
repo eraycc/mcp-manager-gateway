@@ -114,8 +114,17 @@ async def test_embedded_resource_injection_switch_persists(running_gateway):
         await page.goto(url + "/#/settings")
         await page.get_by_role("tab", name="工具检索", exact=True).click()
         toggle = page.get_by_label("启用内嵌资源注入", exact=True)
-        await expect(toggle).to_be_checked()
+        await expect(toggle).not_to_be_checked()
         await expect(page.get_by_role("heading", name="资源兼容", exact=True)).to_be_visible()
+        await expect(page.get_by_text("默认关闭。客户端不支持 embedded resource", exact=False)).to_be_visible()
+        await toggle.check()
+        async with page.expect_response(lambda response: response.url.endswith("/api/v1/settings")
+                                        and response.request.method == "PATCH") as response:
+            await page.get_by_role("button", name="保存资源兼容设置", exact=True).click()
+        assert (await response.value).status == 200
+        assert (await web.get("/api/v1/settings")).json()["embedded_resource.inject"] is True
+        await page.reload()
+        await expect(toggle).to_be_checked()
         await toggle.uncheck()
         async with page.expect_response(lambda response: response.url.endswith("/api/v1/settings")
                                         and response.request.method == "PATCH") as response:
@@ -124,10 +133,4 @@ async def test_embedded_resource_injection_switch_persists(running_gateway):
         assert (await web.get("/api/v1/settings")).json()["embedded_resource.inject"] is False
         await page.reload()
         await expect(toggle).not_to_be_checked()
-        await toggle.check()
-        async with page.expect_response(lambda response: response.url.endswith("/api/v1/settings")
-                                        and response.request.method == "PATCH") as response:
-            await page.get_by_role("button", name="保存资源兼容设置", exact=True).click()
-        assert (await response.value).status == 200
-        assert (await web.get("/api/v1/settings")).json()["embedded_resource.inject"] is True
         await browser.close()

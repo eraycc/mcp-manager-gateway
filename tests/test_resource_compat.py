@@ -10,8 +10,11 @@ from mcp_manager.catalog import alias
 from mcp_manager.database import ApiToken
 
 
-async def enabled_context(harness):
+async def enabled_context(harness, *, inject=True):
     ctx, token_id = await gateway_context(harness)
+    if inject:
+        response = await harness.web.patch("/api/v1/settings", json={"embedded_resource.inject": True})
+        assert response.status_code == 200
     async with harness.db.locked() as session:
         (await session.get(ApiToken, token_id)).enable_resource_tools = True
     gateway = harness.app.state.gateway
@@ -208,39 +211,28 @@ async def test_temporary_resource_rejects_same_token_other_session_and_changed_c
     assert not page.is_error and not page.structured_content["items"]
 
 
-async def test_injection_switch_hides_but_captures_and_reexposes_same_snapshot(db_app):
+async def test_injection_switch_does_not_cache_while_disabled(db_app):
     row, _ = await resource_catalog(db_app)
     ctx, _ = await enabled_context(db_app)
-    state = db_app.app.state
-    gateway = state.gateway
+    gateway = db_app.app.state.gateway
     user, token, _ = await gateway.principal(ctx.request)
     key = "embedded_resource.inject"
-    assert (await db_app.web.get("/api/v1/settings")).json()[key] is True
     invalid = await db_app.web.patch("/api/v1/settings", json={key: "false"})
     assert invalid.status_code == 422
     assert (await db_app.web.patch("/api/v1/settings", json={key: False})).status_code == 200
     original = {"content": [{"type": "text", "text": "downloaded"}, {
-        "type": "resource", "resource": {"uri": "fixture://switch", "text": "cached body"},
+        "type": "resource", "resource": {"uri": "fixture://switch", "text": "body"},
     }], "structuredContent": {"original": True}}
     value = await gateway.capture_embedded(ctx.request, user, token, row, original)
     assert value.model_dump(mode="json", by_alias=True, exclude_none=True)["content"] == original["content"]
     assert value.structured_content == original["structuredContent"]
-    uri = next(iter(gateway.embedded.items))
-    listed = await invoke(db_app, ctx, "gateway_list_resources", {"uri_prefix": "fixture://switch"})
-    assert not listed.is_error and listed.structured_content["items"] == []
-    native = await gateway.list_resources(ctx, SimpleNamespace(cursor=None))
-    assert uri not in [str(item.uri) for item in native.resources]
-    assert (await invoke(db_app, ctx, "gateway_read_resource", {"uri": uri})).is_error
+    assert not gateway.embedded.items
     assert (await db_app.web.patch("/api/v1/settings", json={key: True})).status_code == 200
     listed = await invoke(db_app, ctx, "gateway_list_resources", {"uri_prefix": "fixture://switch"})
-    assert listed.structured_content["items"][0]["uri"] == uri
-    native = await gateway.list_resources(ctx, SimpleNamespace(cursor=None))
-    assert uri in [str(item.uri) for item in native.resources]
-    read = await invoke(db_app, ctx, "gateway_read_resource", {"uri": uri})
-    assert read.structured_content["contents"][0]["text"] == "cached body"
-
+    assert not listed.is_error and listed.structured_content["items"] == []
 
 async def test_revoking_stateless_lease_clears_embedded_cache(db_app):
+    await db_app.web.patch("/api/v1/settings", json={"embedded_resource.inject": True})
     row, _ = await resource_catalog(db_app)
     ctx, token_id = await gateway_context(db_app)
     state = db_app.app.state

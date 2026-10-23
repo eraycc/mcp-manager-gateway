@@ -6,9 +6,9 @@
 
 某些 MCP 工具将文件正文放进标准的 `EmbeddedResource`（`type: "resource"`）块，而不是文本块。例如 GitHub MCP 的单文件 `get_file_contents` 可以同时返回下载状态文本和包含正文的 resource 块。客户端如果不展示 resource，用户可能只看到 SHA 或下载成功提示。
 
-内嵌资源不一定出现在下游 `resources/list` 中，也不保证支持下游 `resources/read`。因此，重新查询静态目录通常无法取回这次工具响应里的正文。这与“HTTP 请求缺少参数镜像头”是两个独立问题。
+内嵌资源不一定出现在下游 `resources/list` 中，也不保证支持下游 `resources/read`。有些服务提供等价可读资源模板，例如 GitHub MCP 的 `repository_content`。此时优先发现资源模板，按返回的 `uriTemplate` 填充参数并保留 MMG 前缀，再通过原生 `resources/read` 或 `gateway_read_resource` 读取，无需先生成临时快照。是否存在可读模板与“HTTP 请求缺少参数镜像头”是独立问题。
 
-MMG 默认启用适用于任何下游 MCP 的兼容措施，GitHub MCP 是其中一个使用场景：
+MMG 提供默认关闭、适用于任何下游 MCP 的兜底兼容。客户端不支持 embedded resource 或上游未提供等价可读资源模板时，可开启以下措施：
 
 1. 保留原始内容块、正文、二进制数据及 `structuredContent`。
 2. 在有明确会话边界时，将内嵌资源保存为当前会话的临时快照。
@@ -20,9 +20,9 @@ MMG 默认启用适用于任何下游 MCP 的兼容措施，GitHub MCP 是其中
 
 ## 资源兼容开关
 
-在“系统设置 → 工具检索 → 资源兼容”中设置“启用内嵌资源注入”，对应系统设置 `embedded_resource.inject`，默认开启。保存后应用于原生资源协议和网关资源工具。
+在“系统设置 → 工具检索 → 资源兼容”中设置“启用内嵌资源注入”，对应系统设置 `embedded_resource.inject`，默认关闭。保存后应用于原生资源协议和网关资源工具。默认值用于未保存该设置的环境；已有明确保存的开关值继续生效。
 
-开关只控制展示与读取注入：关闭时工具响应原样透传、不追加临时读取提示，临时资源不出现在任何资源列表中，也不能通过旧临时 URI 读取。捕获始终继续，且继续遵守会话隔离、容量、过期和权限规则；重新开启后，尚未过期的快照立即恢复可见，无需重新调用下游工具。关闭不会清空缓存或停止静态资源与提示词的正常读取。
+关闭时停止捕获、不写入临时缓存，并立即清空当前 MMG 进程内所有会话与租约的临时快照。工具响应原样透传、不追加临时读取提示，旧临时 URI 不再可读。重新开启不会恢复已清空的快照，必须重新调用工具生成。进行中的响应也不能在关闭清空之后重新写回旧快照。静态资源、提示词和资源模板继续正常提供。
 
 ## 正确的读取流程
 
@@ -32,20 +32,24 @@ MMG 默认启用适用于任何下游 MCP 的兼容措施，GitHub MCP 是其中
 {
   "mcp": "example-service",
   "kind": "resource",
-  "uri_prefix": "github://",
+  "uri_prefix": "repo://",
   "limit": 20
 }
 ~~~
 
-将上述参数传给 `gateway_list_resources`。返回项包含 `temporary: true`、原始 `source_uri` 和 `read_with`；直接执行 `read_with` 指定的读取操作即可。不要自己拼接内层 URI 或网关前缀。
+将上述参数传给 `gateway_list_resources`。同一会话或租约内，匹配 MCP 的临时资源排在注册资源之前，且最新生成的条目永远优先；原生 `resources/list` 也采用此顺序。超过一页时仍需跟随游标。返回项包含 `temporary: true`、原始 `source_uri` 和 `read_with`；直接执行 `read_with` 指定的读取操作即可。不要自己拼接临时 URI 或网关前缀。
+
+`keyword="admin/layout.tsx"`、`keyword="layout.tsx"` 均可按 `source_uri` 子串命中；`keyword="admin layout tsx"` 支持分词匹配。临时正文不参与全文或向量检索，兼容开关也不会改变管理界面的持久能力计数。
 
 临时 URI 形如 `mcp-manager://<server-id>/_embedded/<opaque-id>`。每次调用产生独立快照，即使下游返回同一原始 URI，也不会覆盖之前的调用结果或静态资源。
 
 ## 会话、权限与容量
 
 - 旧版有状态 HTTP 客户端按 MMG 验证过的 `Mcp-Session-Id` 隔离。
-- 没有有状态 MCP 会话的客户端，需要先通过 `POST /gateway/v1/leases` 取得租约，并在调用、列表和读取请求中持续携带 `X-MCP-Manager-Lease`。MMG stdio Bridge 自动管理自己的租约。纯无状态请求不会按共享 Token 缓存正文。
-- 资源只对产生它的会话或租约可见；即使 Token 相同，其他会话也不能读取。
+- 显式租约客户端通过 `POST /gateway/v1/leases` 取得租约，在调用、列表和读取请求中持续携带 `X-MCP-Manager-Lease`；MMG stdio Bridge 自动管理自己的租约。
+- 已认证请求没有显式会话或租约头时，复用 MMG 已为该身份建立的隐式 `retention` 运行租约作为缓存作用域，后续使用同一认证身份的请求可以发现和读取它的快照。相同 Token 的无状态请求共享该隐式租约；需要独立隔离的 Agent 应使用独立 Token 或显式租约。
+- 资源只对产生它的会话或租约可见；显式会话或租约之间不会因为 Token 相同而互相读取快照。已进入显式会话的客户端应持续携带其标识，不会按 Token 猜测丢失的会话。
+- 匿名无状态请求必须携带稳定的 `X-MCP-Manager-Client`，或使用有效会话/租约。完全没有稳定身份时保留原始内容并明确提示无法缓存，不静默丢弃。
 - 每次列出和读取都检查当前服务权限、启用状态、配置版本及凭据作用域。凭据或配置变化后，旧快照不能继续读取。
 - 快照仅保存在当前进程内存中，不写数据库、持久能力目录或向量索引，不发送给 embedding 服务。
 - 快照最长保留 30 分钟；会话关闭、租约释放或过期、Token 撤销以及进程重启也会使快照失效。
