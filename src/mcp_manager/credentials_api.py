@@ -214,21 +214,9 @@ async def save_credentials(server_id: str, data: dict, request: Request, user=US
 @router.post("/mcps/{server_id}/credentials/refresh")
 async def refresh_personal_capabilities(server_id: str, data: PersonalRefresh, request: Request, user=USER):
     state = request.app.state
-    row = await permitted(request, server_id, user)
+    await permitted(request, server_id, user)
     authorize = personal_authorizer(request, server_id, data.revision, refresh=True)
     actor = await authorize()
-    if state.catalog.unseal(row.config).get("auth", {}).get("type") == "oauth":
-        # Complete any token renewal before capturing the catalog credential generation.
-        scope = await state.catalog.index_scope(row, actor.id)
-        expected_refresh = await state.catalog.index.refresh_version(scope)
-        try:
-            await state.catalog.spec(row, actor.id)
-        except GatewayError as exc:
-            raise await state.catalog.record_refresh_failure(
-                row, exc, actor.id, scope=scope, expected_refresh=expected_refresh,
-                had_ready=state.catalog.cached(row, actor.id)["cache_status"] == "ready",
-            ) from exc
-        await authorize()
     result = await state.catalog.refresh_index(server_id, actor.id, authorize=authorize)
     await authorize()
     current = await state.catalog.get(server_id)

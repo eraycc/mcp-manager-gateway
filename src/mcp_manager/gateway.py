@@ -689,12 +689,41 @@ class Gateway:
     async def execute_exact(self, request, user, token, name, arguments, *, discovery=False):
         catalog = self.app.state.catalog
         identity = owner(user, token, request)
+
+        async def authorize_scope(target, scope=None):
+            try:
+                fresh_user, fresh_token, allowed = await self.principal(request, target_id=target.id)
+            except HTTPException:
+                raise GatewayError("permission_revoked", "Gateway authorization changed") from None
+            fresh = await catalog.get(target.id, metadata_only=True)
+            if (owner(fresh_user, fresh_token, request) != identity or target.id not in allowed
+                    or fresh.revision != target.revision):
+                raise GatewayError("permission_revoked", "MCP permission or configuration changed")
+            if scope is not None and await catalog.index_scope(
+                    fresh, fresh_user.id if fresh_user else None) != scope:
+                raise GatewayError("credential_changed", "MCP credentials changed during exact call")
+
         ref = await self.resolve_authorized_tool(request, name)
         expected_scope = None
         if ref:
             expected_scope = await catalog.index.get_generation_scope(ref.generation)
             row = await catalog.get(expected_scope.server_id)
             original_name = ref.original_name
+            if row.auth_type == "oauth":
+                # Renew before freezing the execution scope, never after dispatch.
+                _spec, prepared_scope = await catalog.prepare_scope(
+                    row, user.id if user else None, authorize=lambda: authorize_scope(row),
+                )
+                if prepared_scope != expected_scope:
+                    expected_scope = prepared_scope
+                    await catalog.ensure_ready(
+                        row, user.id if user else None,
+                        authorize=lambda: authorize_scope(row, prepared_scope),
+                    )
+                    fresh_ref = await self.resolve_authorized_tool(request, name)
+                    if fresh_ref is None:
+                        raise GatewayError("tool_not_found", "Tool is absent from the refreshed MCP directory")
+                    original_name = fresh_ref.original_name
         else:
             # Compatibility only: old aliases select candidate service metadata, never all schemas.
             _fresh_user, _fresh_token, allowed = await self.principal(request)
@@ -702,7 +731,13 @@ class Gateway:
                           if name.startswith((row.id + "__", (row.slug + "__")[:47]))]
             row, original_name = None, None
             for candidate in candidates:
-                scope = await catalog.index_scope(candidate, user.id if user else None)
+                if candidate.mode != "disabled" and candidate.auth_type == "oauth":
+                    _spec, scope = await catalog.prepare_scope(
+                        await catalog.get(candidate.id), user.id if user else None,
+                        authorize=lambda candidate=candidate: authorize_scope(candidate),
+                    )
+                else:
+                    scope = await catalog.index_scope(candidate, user.id if user else None)
                 summary = (await catalog.index.get_summaries([scope])).get(candidate.id)
                 if candidate.mode == "disabled":
                     continue
@@ -710,13 +745,7 @@ class Gateway:
                     not summary and catalog.cached_view(candidate, user.id if user else None)["cache_status"] != "ready"
                 ):
                     async def authorize_recovery(candidate=candidate, scope=scope):
-                        fresh_user, fresh_token, allowed = await self.principal(request, target_id=candidate.id)
-                        fresh = await catalog.get(candidate.id, metadata_only=True)
-                        if (owner(fresh_user, fresh_token, request) != identity or candidate.id not in allowed
-                                or fresh.revision != candidate.revision):
-                            raise GatewayError("permission_revoked", "MCP authorization changed during recovery")
-                        if await catalog.index_scope(fresh, user.id if user else None) != scope:
-                            raise GatewayError("credential_changed", "MCP credentials changed during recovery")
+                        await authorize_scope(candidate, scope)
 
                     await authorize_recovery()
                     await catalog.ensure_ready(
@@ -740,16 +769,7 @@ class Gateway:
             row = await catalog.get(row.id)
 
         async def authorize():
-            try:
-                fresh_user, fresh_token, allowed = await self.principal(request, target_id=row.id)
-            except HTTPException:
-                raise GatewayError("permission_revoked", "Gateway authorization changed") from None
-            fresh = await catalog.get(row.id, metadata_only=True)
-            if (owner(fresh_user, fresh_token, request) != identity or row.id not in allowed
-                    or fresh.revision != row.revision):
-                raise GatewayError("permission_revoked", "MCP permission or configuration changed")
-            if await catalog.index_scope(fresh, fresh_user.id if fresh_user else None) != (expected_scope or call_scope):
-                raise GatewayError("credential_changed", "MCP credentials changed during exact call")
+            await authorize_scope(row, expected_scope or call_scope)
 
         call_scope = await catalog.index_scope(row, user.id if user else None)
 

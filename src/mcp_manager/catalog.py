@@ -430,6 +430,10 @@ class Catalog:
                         "lease_expired", "disabled", "shutting_down", "generation_superseded"}
         ):
             return exc
+        if code == "auth_required" and config.get("auth", {}).get("type") == "oauth":
+            payload = await self.credentials.load(row.id, credential_owner(row.isolation, user_id))
+            if payload.get("oauth_state", {}).get("status") == "needs_reauth":
+                exc = GatewayError("auth_required", "授权已失效，请重新授权")
         failed_at = now().isoformat()
         details = {
             "cache_error_code": code, "cache_error": str(exc)[:500],
@@ -554,7 +558,7 @@ class Catalog:
             # offline; the attempt and actionable status are recorded in its cache.
             pass
 
-    async def spec(self, row, user_id=None):
+    async def spec(self, row, user_id=None, *, with_scope=False):
         if row.mode == "disabled":
             raise GatewayError("disabled", "MCP is disabled; repair configuration or authorization, then enable it")
 
@@ -600,10 +604,42 @@ class Catalog:
                         config.get("auth", {}), resource, callback_uri(self.config.public_url, config.get("auth", {})))
                     if registration.get("config_fingerprint") != fingerprint:
                         raise GatewayError("credential_changed", "OAuth resource changed while preparing the connection")
-                return build(config, epoch)
+                prepared = build(config, epoch)
+                if with_scope:
+                    scope = await self._index_scope(session, server, catalog_owner(server.isolation, user_id))
+                    return prepared, scope
+                return prepared
         if auth.get("type") == "oauth" and not auth.get("access_token"):
             raise GatewayError("auth_required", "Complete OAuth authorization in the Web console")
+        if with_scope:
+            from sqlalchemy.orm import load_only
+
+            async with self.db.locked() as session:
+                server = await session.get(McpServer, row.id, options=[load_only(
+                    McpServer.id, McpServer.revision, McpServer.isolation, McpServer.mode,
+                )])
+                if not server or server.revision != row.revision:
+                    raise GatewayError("revision_changed", "MCP configuration changed during preparation")
+                config = (self.unseal(row.config) if self.credentials is None else
+                          await self.credentials.materialize(row, user_id, session=session))
+                return build(config), await self._index_scope(
+                    session, server, catalog_owner(server.isolation, user_id))
         return build(config)
+
+    async def prepare_scope(self, row, user_id=None, *, authorize=None):
+        """Renew credentials, then atomically materialize the connection and catalog scope."""
+        for attempt in range(2):
+            try:
+                if authorize:
+                    await authorize()
+                prepared = await self.spec(row, user_id, with_scope=True)
+                if authorize:
+                    await authorize()
+                return prepared
+            except GatewayError as exc:
+                if exc.code != "credential_changed" or attempt:
+                    raise
+                # Preparation alone is retryable; no downstream business call has begun.
 
     @staticmethod
     def validate_metadata(values, partial=False):
@@ -918,9 +954,8 @@ class Catalog:
         lease, spec, scope, expected_refresh = None, None, None, None
         had_ready = self.cached(row, user_id)["cache_status"] == "ready"
         try:
-            scope = await self.index_scope(row, user_id)
+            spec, scope = await self.prepare_scope(row, user_id, authorize=authorize)
             expected_refresh = await self.index.refresh_version(scope)
-            spec = await self.spec(row, user_id)
             lease = self.runtime.create_lease(user_id or "system", "maintenance", kind="maintenance")
             result = await self.runtime.perform(
                 spec, lease.id, "ingest_catalog", self.index, scope, authorize,
@@ -961,9 +996,8 @@ class Catalog:
         lease, spec, scope, expected_refresh = None, None, None, None
         had_ready = self.cached(row, user_id)["cache_status"] == "ready"
         try:
-            scope = await self.index_scope(row, user_id)
+            spec, scope = await self.prepare_scope(row, user_id, authorize=authorize)
             expected_refresh = await self.index.refresh_version(scope)
-            spec = await self.spec(row, user_id)
             if authorize:
                 await authorize()
             lease = self.runtime.create_lease(user_id or "system", "maintenance", kind="maintenance")
@@ -990,9 +1024,8 @@ class Catalog:
             if expected_revision is not None and row.revision != expected_revision:
                 return
             had_ready = self.cached(row, user_id)["cache_status"] == "ready"
-            scope = await self.index_scope(row, user_id)
+            spec, scope = await self.prepare_scope(row, user_id, authorize=authorize)
             expected_refresh = await self.index.refresh_version(scope)
-            spec = await self.spec(row, user_id)
             lease = self.runtime.create_lease(user_id or "system", "maintenance", kind="maintenance")
             result = await self.runtime.perform(spec, lease.id, "discover", authorize=authorize, business=False)
             await self.store_discovery(row, result, user_id, spec=spec)
@@ -1073,7 +1106,7 @@ class Catalog:
                    response_processor=None):
         if authorize:
             await authorize()
-        await self.spec(row, user.id if user else None)
+        await self.prepare_scope(row, user.id if user else None, authorize=authorize)
         await self.ensure_ready(row, user.id if user else None, authorize=authorize)
         tool = await self.tool_definition(row, name, user.id if user else None)
         event = {"id": str(uuid4()), "user_id": user.id if user else None,
@@ -1089,7 +1122,7 @@ class Catalog:
             await self.validate_tool_arguments(tool, arguments)
             if authorize:
                 await authorize()
-            spec = await self.spec(row, user.id if user else None)
+            spec, _scope = await self.prepare_scope(row, user.id if user else None, authorize=authorize)
             from .tool_headers import tool_context, validate_header_schema
 
             context = {"name": name, "tool": tool}

@@ -18,7 +18,7 @@ async def test_update_interval_persists_with_auto_check_on_or_off(runtime_browse
     await expect(interval).to_be_enabled()
     await expect(interval).to_have_attribute("min", "1")
     hint = about.locator("#settings-hint-update_check_interval_seconds")
-    for text in ("PyPI 最新版本信息", "缓存有效时长", "下次登录或刷新", "读取缓存", "强制联网"):
+    for text in ("PyPI 最新版本信息", "缓存有效时长", "下次登录、打开关于或刷新", "读取缓存", "强制联网"):
         await expect(hint).to_contain_text(text)
     await interval.fill("0")
     assert not await interval.evaluate("(n)=>n.checkValidity()")
