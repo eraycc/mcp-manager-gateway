@@ -210,6 +210,8 @@ Keep a backup, preserve unrelated settings, and never remove the MMG connection 
 
 Reliable agents do not guess tool names or arguments: search for the MCP, retrieve the tool schema, and call the exact returned name. Discovery and pagination do not wake lazy services. See the [Gateway tool reference](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/reference/gateway-tools.md). Failed services report their state without advertising executable tools; keyword search supports bounded one-character typo recovery.
 
+Tool-embedded resources (including GitHub MCP file contents) are preserved and exposed as bounded session snapshots through native resource methods and the optional resource tools. Resource discovery supports `kind`, `match` and source `uri_prefix` filters, with background vectors for static resources, prompts and templates. The default-on `embedded_resource.inject` switch under Settings → Tool search → Resource compatibility can hide injection for capable clients while retaining bounded session snapshots. Stateless HTTP clients need an explicit lease to retain snapshots. HTTP calls mirror `x-mcp-header` parameters from the authorized cached schema. See [Embedded resource compatibility](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/embedded-resources.md) for limits, isolation and keyword fallback behavior.
+
 ## Web console languages
 
 MMG supports optional browser-side interface translation:

@@ -56,7 +56,9 @@ Schema 校验只解析自包含定义中的本地引用，不自动读取远程 
 - resource templates；
 - prompts。
 
-可以按服务和关键词筛选。返回提供方、精确 URI 和后续读取方式。
+支持 `mcp`、`keyword`、`kind`（`resource` / `prompt` / `template` / `all`）、`match`（`exact` / 默认 `fuzzy` / `keyword_only`）及下游原始 `uri_prefix`。精确匹配区分名称大小写；关键词模式跳过 embedding；模糊模式使用有界候选和向量融合，成功状态为 `hybrid` / `ready`，失败时明确报告关键词降级原因。静态资源向量在后台构建；查询不启动下游服务。
+
+默认合并当前会话的工具内嵌资源快照，返回提供方、精确 URI、`temporary` 标记及后续读取方式。系统设置 `embedded_resource.inject=false` 时隐藏临时条目并拒绝其读取，工具响应原样透传；捕获仍继续，重新开启后未过期快照恢复可用。临时资源不参与向量索引。会话要求、容量、GitHub MCP 示例与 HTTP 参数镜像见[内嵌资源兼容与检索](../guides/embedded-resources.md)。
 
 ## `gateway_read_resource`
 

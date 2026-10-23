@@ -408,10 +408,12 @@ class EmbeddingIndex:
                                     CatalogEntry.id,
                                     CatalogEntry.generation_id,
                                     CatalogEntry.search_text,
+                                    CatalogEntry.kind,
+                                    CatalogEntry.summary,
                                 )
                                 .where(
                                     CatalogEntry.generation_id == generation,
-                                    CatalogEntry.kind == "tools",
+                                    CatalogEntry.kind.in_(("tools", "resources", "prompts", "templates")),
                                     ~indexed,
                                 )
                                 .order_by(CatalogEntry.sort_key, CatalogEntry.name_hash)
@@ -423,7 +425,12 @@ class EmbeddingIndex:
                     break
                 for offset in range(0, len(rows), MAX_BATCH_INPUTS):
                     batch = rows[offset:offset + MAX_BATCH_INPUTS]
-                    texts = [row.search_text[:MAX_TEXT_CHARS] for row in batch]
+                    texts = [
+                        (row.search_text if row.kind == "tools" else " ".join(
+                            row.summary.get(key, "") for key in ("name", "title", "description")
+                            if isinstance(row.summary.get(key), str)
+                        ))[:MAX_TEXT_CHARS] for row in batch
+                    ]
                     vectors = await self._embed(
                         endpoint,
                         model,
@@ -507,7 +514,7 @@ class EmbeddingIndex:
         )
         missing_vector = exists().where(
             CatalogEntry.generation_id == CatalogGeneration.id,
-            CatalogEntry.kind == "tools",
+            CatalogEntry.kind.in_(("tools", "resources", "prompts", "templates")),
             ~indexed_entry,
         )
         async with self.db.session() as session:
@@ -813,7 +820,7 @@ async def prune_stale_vectors(state, *, batch_limit=250, server_id=None, startup
 
 
 async def reuse_generation_vectors(session, previous, generation):
-    """Rebind unchanged same-owner tools without reading payloads or calling a model."""
+    """Rebind unchanged same-owner capabilities without reading payloads or calling a model."""
     if not previous:
         return
     old, new = aliased(CatalogEntry), aliased(CatalogEntry)
@@ -822,7 +829,7 @@ async def reuse_generation_vectors(session, previous, generation):
         rows = list((await session.execute(select(
             EmbeddingVector, new.id.label("new_entry_id"), new.search_text,
         ).join(old, old.id == EmbeddingVector.entry_id).join(new, and_(
-            new.generation_id == generation.id, new.kind == "tools",
+            new.generation_id == generation.id, new.kind == old.kind,
             new.name_hash == old.name_hash, new.schema_hash == old.schema_hash,
         )).where(
             EmbeddingVector.generation_id == previous,

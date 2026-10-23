@@ -258,6 +258,8 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 
 [渐进式发现](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/concepts/progressive-discovery.md)解释了搜索、分页、完整 Schema 与精确路由的契约。
 
+工具响应中的内嵌资源（包括 GitHub MCP 文件正文）保持原样，并以有容量限制的会话快照供原生资源协议及可选资源工具读取。资源检索支持 `kind`、`match`、原始 `uri_prefix` 筛选，静态资源、提示词和模板接入后台向量索引；“系统设置 → 工具检索 → 资源兼容”的 `embedded_resource.inject` 默认开启，关闭时隐藏注入但继续保留有界会话缓存；无状态 HTTP 客户端需要显式租约才能保留快照。HTTP 转发根据已授权的缓存 Schema 镜像 `x-mcp-header` 参数。容量、隔离与关键词降级规则见[内嵌资源兼容与检索](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/embedded-resources.md)。
+
 ## 管理能力概览
 
 控制台支持确认后导出全部服务的脱敏 JSON 配置；MCP 服务、审批、访问令牌、调用日志和用户列表支持跨页勾选与批量操作。服务列表的“能力列表”和个人资料的“可访问的服务”显示缓存中的工具、资源、提示词及资源模板数量，个人资料同时显示服务描述。管理员和普通用户均可在个人资料中配置、修改按用户隔离服务的 Bearer、Basic、API Key 和个人独享 OAuth 凭据，保存后仍保留编辑入口。已完成认证的 HTTP 类用户隔离服务支持在凭据或 OAuth 授权弹窗中手动刷新本人的能力缓存。管理员服务列表显示当前管理员的能力或未认证状态，以及有访问权的启用用户中的已认证人数。详见[服务管理与测试](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/manage-services.md)。

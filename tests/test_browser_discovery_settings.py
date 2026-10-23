@@ -102,3 +102,32 @@ async def test_legacy_and_unreadable_token_secrets_keep_editor_usable(running_ga
             await expect(page.get_by_label("访问令牌值", exact=True)).to_have_value(rotated["token"])
             await page.keyboard.press("Escape")
         await browser.close()
+
+
+async def test_embedded_resource_injection_switch_persists(running_gateway):
+    _app, web, url, _, _ = running_gateway
+    async with async_playwright() as pw:
+        executable = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+        browser = await pw.chromium.launch(headless=True, executable_path=executable if os.path.exists(executable) else None)
+        page = await browser.new_page(viewport={"width": 1280, "height": 900})
+        await login(page, url)
+        await page.goto(url + "/#/settings")
+        await page.get_by_role("tab", name="工具检索", exact=True).click()
+        toggle = page.get_by_label("启用内嵌资源注入", exact=True)
+        await expect(toggle).to_be_checked()
+        await expect(page.get_by_role("heading", name="资源兼容", exact=True)).to_be_visible()
+        await toggle.uncheck()
+        async with page.expect_response(lambda response: response.url.endswith("/api/v1/settings")
+                                        and response.request.method == "PATCH") as response:
+            await page.get_by_role("button", name="保存资源兼容设置", exact=True).click()
+        assert (await response.value).status == 200
+        assert (await web.get("/api/v1/settings")).json()["embedded_resource.inject"] is False
+        await page.reload()
+        await expect(toggle).not_to_be_checked()
+        await toggle.check()
+        async with page.expect_response(lambda response: response.url.endswith("/api/v1/settings")
+                                        and response.request.method == "PATCH") as response:
+            await page.get_by_role("button", name="保存资源兼容设置", exact=True).click()
+        assert (await response.value).status == 200
+        assert (await web.get("/api/v1/settings")).json()["embedded_resource.inject"] is True
+        await browser.close()

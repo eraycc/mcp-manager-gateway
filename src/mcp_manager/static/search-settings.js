@@ -1,7 +1,7 @@
 import{el,api,button,field,check}from './core.js';
 
 export async function embeddingSettings(signal){
- const saved=await api('/settings/embedding',{signal});
+ const [saved,system]=await Promise.all([api('/settings/embedding',{signal}),api('/settings',{signal})]);
  const card=el('section',{class:'card stack'},el('h2',{},'工具检索'),
   el('p',{class:'notice'},'按需发现优先匹配精确名称，并结合字段关键词、模糊匹配与向量语义检索。向量接口不可用时自动回退关键词检索。'));
  const enabled=check('启用向量语义检索',saved.enabled),grid=el('div',{class:'form-grid settings-grid'});
@@ -44,5 +44,19 @@ export async function embeddingSettings(signal){
  });
  card.append(enabled.node,grid,el('p',{class:'notice'},'仅向该接口发送服务与工具的描述性元数据和检索语句，不发送 MCP 连接凭据或实际工具调用参数。'),
   el('div',{class:'actions'},save,probe),status,errors);
- return card;
+ const inject=check('启用内嵌资源注入',system['embedded_resource.inject']!==false);
+ const compatibilityStatus=el('p',{role:'status','aria-live':'polite'}),compatibilityError=el('p',{class:'error',role:'alert',hidden:true});
+ const compatibilitySave=button('保存资源兼容设置',async()=>{
+  compatibilitySave.disabled=true;compatibilityError.hidden=true;compatibilityStatus.textContent='正在保存…';
+  try{
+   const result=await api('/settings',{method:'PATCH',body:{'embedded_resource.inject':inject.input.checked}});
+   inject.input.checked=result['embedded_resource.inject'];compatibilityStatus.textContent='资源兼容设置已保存。';
+  }catch(e){compatibilityStatus.textContent='';compatibilityError.textContent=e.message;compatibilityError.hidden=false}
+  finally{compatibilitySave.disabled=false}
+ },'primary');
+ const compatibility=el('section',{class:'card stack'},el('h2',{},'资源兼容'),inject.node,
+  el('p',{class:'muted'},'将工具响应中的内嵌资源（如 GitHub 文件正文）注入资源列表，供原生资源协议与网关工具读取。客户端已原生支持后可关闭。'),
+  el('p',{class:'notice'},'关闭后上游响应原样透传，临时资源隐藏且不可读取；会话缓存仍按容量与过期限制保留，重新开启后无需再次调用工具。'),
+  el('div',{class:'actions'},compatibilitySave),compatibilityStatus,compatibilityError);
+ return el('div',{class:'stack'},card,compatibility);
 }

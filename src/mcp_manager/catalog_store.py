@@ -248,7 +248,10 @@ class CatalogStore:
                 lambda definition=entry: digest(strict_json_dumps(definition.get("inputSchema", {})))
             ) if kind == "tools" else ""
             entry_id = uid()
-            search_text = await asyncio.to_thread(searchable_text, entry)
+            searchable = entry if kind == "tools" else {
+                key: entry[key] for key in ("name", "title", "description") if key in entry
+            }
+            search_text = await asyncio.to_thread(searchable_text, searchable)
             values = {
                 "id": entry_id, "generation_id": identity, "kind": kind,
                 "original_name": name, "name_hash": digest(name),
@@ -378,7 +381,8 @@ class CatalogStore:
             return None
         return generation
 
-    async def query_tool_entries(self, generations, *, kind="tools", query="", exact_names=None, offset=0, limit=20):
+    async def query_tool_entries(self, generations, *, kind="tools", query="", exact_names=None, offset=0, limit=20,
+                                 uri_prefix="", display_name=None):
         """Filter/count/page lightweight rows in SQL before any contract or artifact read."""
         self._check_kind(kind)
         if query and exact_names is None and kind == "tools":
@@ -401,6 +405,10 @@ class CatalogStore:
             total = len(candidates)
             return total, list(candidates[offset:offset + limit]) if limit else []
         filters = [CatalogEntry.generation_id.in_(generations), CatalogEntry.kind == kind]
+        if uri_prefix:
+            filters.append(func.hex(CatalogEntry.original_name).startswith(uri_prefix.encode("utf-8").hex().upper()))
+        if display_name is not None:
+            filters.append(func.hex(CatalogEntry.summary["name"].as_string()) == display_name.encode("utf-8").hex().upper())
         if exact_names is not None:
             hashes = [digest(name) for name in exact_names]
             filters.append(or_(

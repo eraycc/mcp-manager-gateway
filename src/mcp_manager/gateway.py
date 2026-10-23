@@ -34,13 +34,17 @@ RESOURCE_TOOLS = [
         "description": (
             "List authorized MCP resources, prompts and resource templates as JSON. "
             "Use only when the client does not support native MCP resource and prompt protocols. "
-            "Filter by mcp and keyword; each result identifies its provider and how readable resources are read."
+            "Filter by mcp, kind, keyword, match or source uri_prefix. Includes this session\'s temporary embedded resources. "
+            "Use exact for case-sensitive names, keyword_only to skip embeddings; fuzzy combines lexical and semantic matching."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "mcp": {"type": "string", "maxLength": 2000, "default": ""},
                 "keyword": {"type": "string", "maxLength": 2000, "default": ""},
+                "kind": {"enum": ["resource", "prompt", "template", "all"], "default": "all"},
+                "match": {"enum": ["exact", "fuzzy", "keyword_only"], "default": "fuzzy"},
+                "uri_prefix": {"type": "string", "maxLength": 2000, "default": ""},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
                 "cursor": {"type": "string", "maxLength": 2048},
             },
@@ -206,8 +210,11 @@ class Gateway:
         self.sessions = {}
         self.retention = {}
         self.discovery = Discovery(self)
+        from .embedded_resources import EmbeddedResources
+        self.embedded = EmbeddedResources()
 
     async def close_session(self, sid):
+        self.embedded.release(("session", sid))
         bound = self.sessions.pop(sid, None)
         if bound:
             await self.app.state.runtime.release(bound["lease"])
@@ -231,7 +238,9 @@ class Gateway:
         affected = [i for i in runtime.instances.values() if i.refs & targets]
         # Revoke routing before the first await: a request must not recreate a lease
         # through the session being disconnected.
+        self.embedded.release(("lease", lease_id))
         for sid, _ in sessions:
+            self.embedded.release(("session", sid))
             self.sessions.pop(sid, None)
         for key, value in list(self.retention.items()):
             if value in targets:
@@ -257,6 +266,11 @@ class Gateway:
                 "session_cleanup_ok": cleanup_ok, "instances": instances}
 
     async def revoke(self, *, token_id):
+        for item in list(self.embedded.items.values()):
+            kind, key = item["namespace"]
+            lease = self.app.state.runtime.leases.get(key) if kind == "lease" else None
+            if kind == "lease" and (lease is None or lease.token_id == token_id):
+                self.embedded.release((kind, key))
         for sid, bound in list(self.sessions.items()):
             if bound["owner"][1] == token_id:
                 await self.close_session(sid)
@@ -266,6 +280,12 @@ class Gateway:
                 await self.app.state.runtime.release(lease_id)
 
     async def reap(self):
+        self.embedded.prune()
+        for uri, item in list(self.embedded.items.items()):
+            kind, key = item["namespace"]
+            lease = self.app.state.runtime.leases.get(key) if kind == "lease" else None
+            if kind == "lease" and (lease is None or self.app.state.runtime.lease_expired(lease)):
+                self.embedded.release((kind, key))
         runtime = self.app.state.runtime
         sessions = list(self.sessions.items())
         retention = list(self.retention.items())
@@ -376,6 +396,61 @@ class Gateway:
             lease = runtime.create_lease(*identity, kind="retention")
             self.retention[key] = lease.id
         return lease
+
+    def resource_session(self, request, user, token):
+        identity = owner(user, token, request)
+        runtime = self.app.state.runtime
+        sid = request.headers.get("Mcp-Session-Id")
+        if sid:
+            bound = self.sessions.get(sid)
+            if not bound or bound["owner"] != identity:
+                raise GatewayError("session_expired", "Resource session is no longer available")
+            lease = runtime.leases.get(bound.get("explicit_lease") or bound["lease"])
+            if lease is None or runtime.lease_expired(lease):
+                raise GatewayError("session_expired", "Resource session has expired")
+            return ("session", sid)
+        explicit = request.headers.get("X-MCP-Manager-Lease")
+        if explicit:
+            runtime.check_lease(explicit, *identity)
+            return ("lease", explicit)
+        return None
+
+    async def embedded_injection_enabled(self):
+        from .database import get_setting
+        return await get_setting(self.app.state.db, "embedded_resource.inject", True) is True
+
+    async def temporary_summaries(self, request, user, token, rows):
+        if not await self.embedded_injection_enabled():
+            return []
+        namespace = self.resource_session(request, user, token)
+        scopes = await self.app.state.catalog.index_scopes(rows, user.id if user else None)
+        return self.embedded.summaries(namespace, scopes)
+
+    async def capture_embedded(self, request, user, token, row, result, *, scope=None, authorize=None):
+        value = types.CallToolResult.model_validate(result)
+        if not any(isinstance(block, types.EmbeddedResource) for block in value.content):
+            return value
+        if scope is None:
+            scope = await self.app.state.catalog.index_scope(row, user.id if user else None)
+        inject = await self.embedded_injection_enabled()
+        if authorize:
+            await authorize()
+        namespace = self.resource_session(request, user, token)
+        if namespace is None:
+            return value
+        uris, skipped = self.embedded.capture(namespace, scope, value)
+        if not inject:
+            return value
+        hints = [
+            "Temporary embedded resource: " + uri
+            + '. Read using resources/read or gateway_read_resource({"uri": "' + uri + '"}) in this session.'
+            for uri in uris
+        ]
+        if skipped:
+            hints.append("Some embedded resources exceed the temporary cache limit; original response blocks are retained.")
+        if hints:
+            value.content.append(types.TextContent(type="text", text="\n".join(hints)))
+        return value
 
     async def list_tools(self, ctx, params):
         _, token, _ = await self.principal(ctx.request)
@@ -503,10 +578,13 @@ class Gateway:
         mcp_query = str(arguments.get("mcp", ""))
         keyword = str(arguments.get("keyword", "")).strip()
         cached = lambda row: self.app.state.catalog.cached_view(row, user.id if user else None)
+        from .resource_discovery import matches, public_summary
         items = resource_index(rows, cached, mcp=mcp_query)
+        filter_arguments = {**arguments, "keyword": ""}
+        items = [item for item in items if matches(item, filter_arguments)]
         search = {"mode": "keyword", "semantic_status": "disabled"}
-        if keyword:
-            literal = resource_index(rows, cached, mcp=mcp_query, keyword=keyword)
+        if keyword and arguments.get("match", "fuzzy") == "fuzzy":
+            literal = [item for item in items if matches(item, arguments)]
             literal_keys = {
                 json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
                 for item in literal
@@ -547,17 +625,28 @@ class Gateway:
             for document_id, item in keyed.items():
                 if document_id in scores and item in items:
                     item["semantic_score"] = scores[document_id]
+        if keyword and arguments.get("match", "fuzzy") != "fuzzy":
+            items = [item for item in items if matches(item, arguments)]
+        await authorize_search()
+        selected = [row for row in rows if not mcp_query or mcp_query == "*" or
+                    mcp_query.casefold() in (row.id + " " + row.slug + " " + row.name).casefold()]
+        temporary = await self.temporary_summaries(request, user, token, selected)
+        providers = {row.id: row for row in selected}
+        items.extend(item for server, value in temporary
+                     if matches(item := public_summary(providers[server], "resource", value), arguments))
         await authorize_search()
         from .paging import bounded_mcp_page
         from .tool_index import fingerprint
         # Cursor is not itself part of the query binding.
-        version = fingerprint([expected_scope, {k: v for k, v in arguments.items() if k != "cursor"}, "legacy-resources"])
+        version = fingerprint([expected_scope, temporary, {k: v for k, v in arguments.items() if k != "cursor"}, "legacy-resources"])
         def envelope(page):
             return result_json(page | {"count": page["returned"], "search": search})
         page = await asyncio.to_thread(bounded_mcp_page, items, envelope=envelope,
             cursor=arguments.get("cursor"), limit=arguments.get("limit", 20), version=version,
             signing_key=self.app.state.config.jwt_secret)
         await authorize_search()
+        if await self.temporary_summaries(request, user, token, selected) != temporary:
+            raise GatewayError("catalog_changed", "Temporary resource catalog changed during search")
         return await asyncio.to_thread(envelope, page)
 
 
@@ -630,9 +719,10 @@ class Gateway:
             if (owner(fresh_user, fresh_token, request) != identity or row.id not in allowed
                     or fresh.revision != row.revision):
                 raise GatewayError("permission_revoked", "MCP permission or configuration changed")
-            if expected_scope and await catalog.index_scope(fresh, fresh_user.id if fresh_user else None) != expected_scope:
+            if await catalog.index_scope(fresh, fresh_user.id if fresh_user else None) != (expected_scope or call_scope):
                 raise GatewayError("credential_changed", "MCP credentials changed during exact call")
 
+        call_scope = await catalog.index_scope(row, user.id if user else None)
         await authorize()
         try:
             result = await catalog.call(
@@ -643,7 +733,8 @@ class Gateway:
             if discovery:
                 raise validation_error(exc, name=name) from None
             raise
-        return types.CallToolResult.model_validate(result)
+        await authorize()
+        return await self.capture_embedded(request, user, token, row, result, scope=call_scope, authorize=authorize)
 
     async def resource_value(self, request, user, token, rows, uri, arguments=None):
         candidate = next((r for r in rows if uri.startswith("mcp-manager://" + r.id + "/")), None)
@@ -658,6 +749,23 @@ class Gateway:
         await self.ensure(request, row)
         prefix = "mcp-manager://" + row.id + "/"
         original = uri[len(prefix):]
+        if original.startswith("_embedded/"):
+            if not await self.embedded_injection_enabled():
+                raise GatewayError("resource_not_found", "Temporary resource injection is disabled")
+            if arguments:
+                raise GatewayError("invalid_arguments", "arguments are supported only for prompt URIs")
+            scope = await catalog.index_scope(row, user.id if user else None)
+            namespace = self.resource_session(request, user, token)
+            value = self.embedded.read(namespace, scope, uri)
+            if value is None or row.mode == "disabled":
+                raise GatewayError("resource_not_found", "Temporary resource expired or is not authorized in this session")
+            await self.ensure(request, row)
+            if (await catalog.index_scope(row, user.id if user else None) != scope
+                    or self.resource_session(request, user, token) != namespace):
+                raise GatewayError("credential_changed", "Temporary resource scope changed during read")
+            if not await self.embedded_injection_enabled():
+                raise GatewayError("resource_not_found", "Temporary resource injection is disabled")
+            return row, value
         prompt_prefix = "prompt://" + row.slug + "/"
         if original.startswith(prompt_prefix):
             from .prompt_resources import prompt_uri
@@ -713,7 +821,8 @@ class Gateway:
         expected = await self.search_scope(ctx.request, user, token, rows)
         scopes = await catalog.index_scopes(rows, user.id if user else None)
         indexed = await catalog.index.get_summaries(scopes.values())
-        version = fingerprint([expected, "native", kind])
+        temporary = await self.temporary_summaries(ctx.request, user, token, rows) if kind == "resources" else []
+        version = fingerprint([expected, "native", kind, temporary])
         cursor = getattr(params, "cursor", None)
         offset = decode_cursor(cursor, version, catalog.config.jwt_secret)
         legacy = [row for row in rows if row.id not in indexed
@@ -737,6 +846,12 @@ class Gateway:
                 generations, kind=kind, offset=offset, limit=50
             )
             selected = [(by_id[entry.server_id], entry) for entry in entries]
+        static_total = total
+        total += len(temporary)
+        if offset + len(selected) >= static_total:
+            start = max(0, offset - static_total)
+            selected.extend((by_id[server_id], dict(value, _mmg_temporary=True))
+                            for server_id, value in temporary[start:start + 50 - len(selected)])
         if cursor and offset >= total:
             raise GatewayError("invalid_cursor", "Native cursor is outside the result")
         factories = {
@@ -761,13 +876,16 @@ class Gateway:
             if kind in {"tools", "prompts"}:
                 original = dict(original, name=alias(row.slug, original["name"]))
             elif kind == "resources":
-                original = dict(original, uri="mcp-manager://" + row.id + "/" + original["uri"])
+                if not original.pop("_mmg_temporary", False):
+                    original = dict(original, uri="mcp-manager://" + row.id + "/" + original["uri"])
             else:
                 original = dict(original, uriTemplate="mcp-manager://" + row.id + "/" + original["uriTemplate"])
             value = await asyncio.to_thread(entry_type.model_validate, original)
             if not await asyncio.to_thread(builder.add, value):
                 break
         await self.revalidate_search_scope(ctx.request, expected)
+        if kind == "resources" and await self.temporary_summaries(ctx.request, user, token, rows) != temporary:
+            raise GatewayError("catalog_changed", "Temporary resource catalog changed during paging")
         return builder.finish()
 
     async def list_resources(self, ctx, params):
@@ -791,7 +909,7 @@ class Gateway:
     async def ensure(self, request, row):
         _, _, allowed = await self.principal(request)
         fresh = await self.app.state.catalog.get(row.id)
-        if row.id not in allowed or fresh.revision != row.revision:
+        if row.id not in allowed or fresh.revision != row.revision or fresh.mode == "disabled":
             raise GatewayError("permission_revoked", "MCP access revoked")
 
     async def list_prompts(self, ctx, params):
@@ -891,6 +1009,7 @@ class MCPAuthMiddleware:
                         "owner": session_owner, "lease": lease.id, "explicit_lease": explicit,
                         "touched": time.monotonic()}
                 if request.method == "DELETE" and session and message["status"] < 300:
+                    self.gateway.embedded.release(("session", session))
                     bound = self.gateway.sessions.pop(session, None)
                     if bound:
                         await self.root_app.state.runtime.release(bound["lease"])
