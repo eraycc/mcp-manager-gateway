@@ -113,6 +113,7 @@ class OAuth:
         self.pending = self.flows.pending
         self.public_url_binding = catalog.config.public_url if catalog else None
         self.locks = {}
+        self.refresh_serials = {}
         from .oauth_metadata import CIMDVerifier
 
         self.cimd = CIMDVerifier(catalog)
@@ -231,9 +232,10 @@ class OAuth:
             return canonical_resource(resource)
         return resource
 
-    async def credentials(self, row, user_id, *, with_epoch=False):
+    async def credentials(self, row, user_id, *, with_epoch=False, force_refresh=False):
         owner = credential_owner(row.isolation, user_id)
         key = self.credential_store.key(row.id, owner)
+        refresh_serial = self.refresh_serials.get(key, 0)
         async with self.locks.setdefault(key, asyncio.Lock()):
             async with self.catalog.db.locked() as session:
                 config = await self.credential_store.materialize(row, user_id, session=session)
@@ -254,9 +256,12 @@ class OAuth:
                     reason = "binding_changed" if exc.code == "auth_required" else "client_registration_invalid"
                     await self.mark_reauth(row, owner, value, reason, epoch=epoch)
                     raise GatewayError("auth_required", str(exc)) from exc
-            if token_expiry(value) > time.time() + 60:
+            force_current = force_refresh and refresh_serial == self.refresh_serials.get(key, 0)
+            if not force_current and token_expiry(value) > time.time() + 60:
                 return (value, epoch) if with_epoch else value
             if not value.get("refresh_token"):
+                if token_expiry(value) > time.time() + 60:
+                    raise GatewayError("oauth_refresh_unavailable", "This authorization has no refresh token")
                 await self.mark_reauth(row, owner, value, epoch=epoch)
                 raise GatewayError("auth_required", "授权已过期，请点击重新授权以继续使用")
 
@@ -286,6 +291,7 @@ class OAuth:
                     session, server, user_id, refreshed, client=self.client_binding(auth, effective, resource_binding))
                 epoch += 1
                 self.catalog.runtime.credential_versions[(row.id, owner)] = None
+            self.refresh_serials[key] = self.refresh_serials.get(key, 0) + 1
             await self.catalog.runtime.invalidate_credential(row.id, owner)
             await self.audit("oauth.refresh", user_id, row.id, result="success")
             return (refreshed, epoch) if with_epoch else refreshed
@@ -584,6 +590,17 @@ async def status(server_id: str, request: Request, user=USER):
     await request.app.state.oauth.sync_public_url(user.id)
     app = request.app.state
     async with app.db.locked() as session:
+        user, row, _auth = await oauth_actor(request, session, server_id, read_only=True)
+        payload = await app.credentials.load(
+            row.id, credential_owner(row.isolation, user.id), session=session)
+    if oauth_auth_status(payload) == "expired" and payload.get("oauth_token", {}).get("refresh_token"):
+        try:
+            await app.oauth.credentials(row, user.id)
+        except GatewayError as exc:
+            if exc.code != "auth_required":
+                raise
+            # Failed refresh persists needs_reauth; report that fresh state below.
+    async with app.db.locked() as session:
         user, row, auth = await oauth_actor(request, session, server_id, read_only=True)
         owner = credential_owner(row.isolation, user.id)
         payload = await app.credentials.load(row.id, owner, session=session)
@@ -597,8 +614,19 @@ async def status(server_id: str, request: Request, user=USER):
             row.id, await app.oauth.registration_owner(row, user.id, session=session), session=session)
         registration = configuration.get("oauth_registration") or payload.get("oauth_token_client", {})
         return {"authorized": authorized, "state": state, "auth_status": auth_status,
+                "refresh_available": bool(payload.get("oauth_token", {}).get("refresh_token")
+                                          and auth_status != "needs_reauth"),
                 "registration_mode": registration.get("mode", "manual"),
                 "config_isolation": config_isolation({"auth": auth}), "isolation": row.isolation}
+
+
+@router.post("/mcps/{server_id}/oauth/refresh")
+async def refresh_authorization(server_id: str, request: Request, user=USER):
+    app = request.app.state
+    async with app.db.locked() as session:
+        user, row, _auth = await oauth_actor(request, session, server_id)
+    await app.oauth.credentials(row, user.id, force_refresh=True)
+    return await status(server_id, request, user)
 
 
 @router.post("/mcps/{server_id}/oauth/start")

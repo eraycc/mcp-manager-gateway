@@ -135,6 +135,7 @@ export async function oauthDialog(service,canManage,onChange=()=>{},returnTo='mc
   try{const personal=await api('/mcps/'+service.id+'/credentials/status');if(d.isConnected)content.append(...[personal.config_isolation==='shared'?sharedOauthConfigSummary(personal):null,personalRefreshControls({...service,revision:personal.revision??service.revision},personal,onChange)].filter(Boolean))}
   catch(error){if(d.isConnected)content.append(el('p',{class:'error',role:'alert'},error.message))}
  }
+ if(state.refresh_available)content.append(button('刷新授权',async()=>{try{await api('/mcps/'+service.id+'/oauth/refresh',{method:'POST'});toast('OAuth 授权已刷新','success')}finally{d.close();await oauthDialog(service,canManage,onChange,returnTo);onChange()}}));
  content.append(button('重新检查授权状态',async()=>{d.close();await oauthDialog(service,canManage,onChange,returnTo)}));
  if(state.isolation==='user'||canManage){
   const recovery=el('p',{class:'notice',role:'status',hidden:true});

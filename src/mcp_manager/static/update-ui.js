@@ -60,7 +60,7 @@ export function maybeNotifyUpdate(state){
 
 export function updateCheckSetting(enabled=true,intervalSeconds=86400){
  const control=check('自动检测更新',enabled);
- const interval=field('自动检测间隔（秒）',intervalSeconds,'number','默认 86400 秒（24 小时），至少 1 秒。控制上次获取的 PyPI 最新版本信息的缓存有效时长；距上次成功检查超过此间隔后，下次登录或刷新才联网，否则读取缓存。手动“检查更新”始终强制联网，不受此间隔影响。关闭自动检测时仍可修改并保存间隔；该间隔仅在开启自动检测时生效。');
+ const interval=field('自动检测间隔（秒）',intervalSeconds,'number','默认 86400 秒（24 小时），至少 1 秒。控制上次获取的 PyPI 最新版本信息的缓存有效时长；距上次成功检查超过此间隔后，下次登录、打开关于或刷新时联网，否则读取缓存。手动“检查更新”始终强制联网，不受此间隔影响。关闭自动检测时仍可修改并保存间隔；该间隔仅在开启自动检测时生效。');
  interval.input.min=1;interval.input.max=2147483647;interval.input.step=1;interval.input.required=true;
  interval.input.setAttribute('aria-label','自动检测间隔（秒）');
  const hint=interval.node.querySelector('small');hint.id='settings-hint-update_check_interval_seconds';interval.input.setAttribute('aria-describedby',hint.id);
@@ -80,14 +80,14 @@ function statusNode(current){
 }
 
 export function updateAboutPanel({about,state,onCheck,onIgnore,autoCheckNode}){
- let current=state||{current_version:about.version,latest_version:'',update_available:false,notification_count:0};
+ let current={...(state||{latest_version:'',update_available:false,notification_count:0}),current_version:about.version};
  const link=(label,url)=>el('a',{href:url,target:'_blank',rel:'noopener noreferrer',class:'about-link'},label);
- const latest=el('strong',{},current.latest_version||'—'),status=el('div'),actions=el('div',{class:'actions'});
+ const installed=el('strong',{},about.version),latest=el('strong',{},current.latest_version||'—'),status=el('div'),actions=el('div',{class:'actions'});
  const panel=el('section',{class:'card about-card'},
   el('div',{class:'about-heading'},
    el('div',{},el('h2',{},'MCP Manager Gateway'),el('p',{class:'muted'},'集中管理 MCP 服务与客户端连接。')),
    el('div',{class:'about-versions'},
-    el('div',{class:'about-version'},el('span',{class:'muted'},'当前版本'),el('strong',{},about.version)),
+    el('div',{class:'about-version'},el('span',{class:'muted'},'当前版本'),installed),
     el('div',{class:'about-version'},el('span',{class:'muted'},'最新版本'),latest)
    )
   ),
@@ -104,6 +104,7 @@ export function updateAboutPanel({about,state,onCheck,onIgnore,autoCheckNode}){
  );
  panel.syncUpdateState=next=>{
   current=next||current;
+  installed.textContent=current.current_version||about.version;
   latest.textContent=current.latest_version||'—';
   status.replaceChildren(statusNode(current));
   actions.replaceChildren(button('检查更新',onCheck),...(current.update_available?[button('跳过本次更新',onIgnore)]:[]));

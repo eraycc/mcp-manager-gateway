@@ -12,6 +12,12 @@ let me,bootstrap,abort,refreshTimer,updateState,selectionPage,translationConfig=
 const nav=[['dashboard','仪表盘','grid'],['mcps','MCP 服务','server',true],['proposals','MCP 审批','approval',true],['tokens','访问令牌','key'],['leases','连接管理','link'],['logs','调用日志','logs'],['users','用户管理','users',true],['profile','个人资料','user'],['settings','系统设置','settings',true]];
 const admin=()=>me?.role==='admin';
 const refresh=()=>render();
+let updateRequest=0;
+async function refreshUpdateState(path='/update-status',options={}){
+ const request=++updateRequest,next=await api(path,options);
+ if(request===updateRequest){updateState=next;cacheUpdateState(next);syncUpdateNotifications(next.notification_count,next)}
+ return next;
+}
 function formAction(title,fields,action,options={}){
  return new Promise(resolve=>{
   let success=false;
@@ -81,7 +87,7 @@ function shell(){
  const main=el('main',{id:'main',tabindex:'-1'}),menu=button('',()=>setDrawer(mobileNav==='hidden'?'rail':'hidden'),'mobile-menu');menu.append(icon('menu'));menu.setAttribute('aria-label','打开导航');
  const backdrop=button('关闭导航',()=>setDrawer('hidden'),'drawer-backdrop');backdrop.tabIndex=-1;
  const actions=topActions({me,isAdmin:admin(),translationConfig,onRefresh:refresh,onLogout:async()=>{await api('/auth/logout',{method:'POST'});me=null;await start()}});$('#app').replaceChildren(sidebar,backdrop,tooltip,el('div',{class:'shell'},el('header',{class:'topbar'},el('div',{class:'actions'},menu,el('span',{class:'muted'},'工作空间 / '+(nav.find(x=>x[0]===route().name)?.[1]||'仪表盘'))),actions),main));syncNavigation();return main}
-async function activateSessionPlugins(){if(translationConfig.enabled){const applied=await applyTranslation(translationConfig,preferredTranslationTarget(translationConfig));applied.warnings.forEach(message=>toast(message,'warning'))}updateState=await api('/update-status');cacheUpdateState(updateState);syncUpdateNotifications(updateState.notification_count,updateState);if(updateState.auto_check_enabled)maybeNotifyUpdate(updateState)}
+async function activateSessionPlugins(){if(translationConfig.enabled){const applied=await applyTranslation(translationConfig,preferredTranslationTarget(translationConfig));applied.warnings.forEach(message=>toast(message,'warning'))}const next=await refreshUpdateState();if(updateState===next&&next.auto_check_enabled)maybeNotifyUpdate(next)}
 async function openSession(){updateState=readCachedUpdateState();translationConfig=normalizeTranslationConfig(await api('/translation/settings'));await render();run(activateSessionPlugins)}
 async function auth(register=false){resetTableSelection();selectionPage=null;const username=field('用户名'),password=field('密码','','password');username.input.required=true;username.input.autocomplete='username';password.input.required=true;password.input.autocomplete=register?'new-password':'current-password';if(register)password.input.minLength=10;const email=field('邮箱（可选）','','email');const err=el('div',{class:'error',hidden:true,role:'alert'}),submit=el('button',{type:'submit',class:'primary'},register?'创建账户':'登录');const form=el('form',{class:'stack'},username.node,password.node,register?email.node:null,err,submit);form.onsubmit=async e=>{e.preventDefault();submit.disabled=true;err.hidden=true;try{await api('/auth/'+(register?'register':'login'),{method:'POST',body:{username:username.input.value,password:password.input.value,...(register?{email:email.input.value||''}:{})}});if(register){toast('账户已创建，请登录');auth(false)}else{me=await api('/me');history.replaceState(null,'','#/dashboard');await openSession()}}catch(x){err.textContent=x.message;err.hidden=false}finally{submit.disabled=false}};
 $('#app').replaceChildren(el('div',{class:'auth'},el('section',{class:'card'},el('div',{class:'brand'},el('span',{class:'brand-icon'},icon('link')),bootstrap.title||'MCP Manager'),el('h1',{},register?(!bootstrap.initialized?'初始化管理员':'创建账户'):'欢迎回来'),el('p',{class:'muted'},register?(!bootstrap.initialized?'第一个注册账户将成为系统管理员。':'创建账户后由管理员分配服务访问权限。'):'登录以管理服务、访问令牌和调用记录。'),form,el('div',{class:'actions',style:'margin-top:20px;justify-content:space-between'},bootstrap.registration_enabled||!bootstrap.initialized?button(register?'已有账户，登录':'创建账户',()=>auth(!register)):null,button('切换主题',theme)))))}
@@ -291,7 +297,7 @@ tabPanels([['http','HTTP 接入',el('div',{class:'stack'},el('p',{},'支持 Stre
 ['codex','Codex / 客户端配置',el('div',{class:'stack'},el('p',{},'Codex 使用 config.toml。先在运行 Codex 的环境中设置 MCP_MANAGER_TOKEN；以下配置通过环境变量读取令牌。'),copyBlock('Codex TOML',toml),el('p',{},'采用 mcpServers JSON 配置的客户端可使用本地 stdio 桥接。将下面示例合并到客户端配置中。'),copyBlock('客户端 JSON',json))],
 ['stdio','本地 stdio',el('div',{class:'stack'},el('p',{},'使用 uv tool 安装 MCP Manager 后，可在任意目录运行以下命令。mmg、mcp-manager 与 mcp-manager-gateway 是等效入口，任选其一。可设置环境变量 MCP_MANAGER_TOKEN，也可使用 --token 参数。'),copyBlock('环境变量示例','PowerShell:\n$env:MCP_MANAGER_TOKEN = "<你的令牌>"\n\nLinux / macOS:\nexport MCP_MANAGER_TOKEN="<你的令牌>"'),copyBlock('启动命令',stdio))]],{key:'connect_tab',label:'客户端接入方式'}),
 el('div',{class:'notice',style:'margin-top:20px'},'工具目录读取缓存，不会仅因浏览目录而启动服务。新增或修改工具后，请联系管理员刷新目录缓存。默认空闲 24 小时回收服务，可由管理员调整；stdio 桥接退出会释放该客户端连接，共享服务仍可供其他客户端使用。'))}
-function aboutPanel(about,autoCheckNode){return updateAboutPanel({about,state:updateState,autoCheckNode,onCheck:async()=>{updateState=await api('/update-status/check',{method:'POST'});cacheUpdateState(updateState);syncUpdateNotifications(updateState.notification_count,updateState);toast(updateState.update_available?'发现新版本 '+updateState.latest_version:'当前已经是最新版本',updateState.update_available?'warning':'success')},onIgnore:async()=>{updateState=await api('/update-status/ignore',{method:'POST'});cacheUpdateState(updateState);syncUpdateNotifications(updateState.notification_count,updateState);toast('已忽略版本 '+updateState.ignored_version,'info')}})}
+function aboutPanel(about,autoCheckNode){return updateAboutPanel({about,state:updateState,autoCheckNode,onCheck:async()=>{const next=await refreshUpdateState('/update-status/check',{method:'POST'});if(next.check_error)toast('更新检测失败：'+next.check_error,'warning');else toast(next.update_available?'发现新版本 '+next.latest_version:'当前已经是最新版本',next.update_available?'warning':'success')},onIgnore:async()=>{const next=await refreshUpdateState('/update-status/ignore',{method:'POST'});toast('已忽略版本 '+next.ignored_version,'info')}})}
 async function settings(main,signal){
  main.append(title('系统设置','配置账户策略、匿名访问和运行维护。'));
  const original=await api('/settings',{signal});
@@ -326,8 +332,8 @@ async function settings(main,signal){
  allowAnonymous.input.addEventListener('change',syncAnonymousScope);syncAnonymousScope();
  settingPanels.push(['anonymous','匿名访问',el('section',{class:'card'},el('h2',{},'匿名访问'),el('div',{class:'stack'},allowAnonymous.node,allowAnonymousHint),el('h3',{},'匿名访问范围'),el('p',{class:'notice'},'此范围仅在允许匿名访问开启时生效'),scopePrompt,scope.node)]);
  settingPanels.push(['translation','翻译设置',translation.node]);
- const about=el('section',{class:'card'},el('h2',{},'关于'),loading());
- const loadAbout=async()=>{try{const content=aboutPanel(await api('/about',{signal}),updateCheck.node);about.replaceChildren(...content.childNodes);about.className=content.className}catch(e){if(e.name==='AbortError')return;about.replaceChildren(el('h2',{},'关于'),el('p',{class:'error',role:'alert'},e.message),button('重试',loadAbout))}};
+ const about=el('div',{},el('h2',{},'关于'),loading());
+ const loadAbout=async()=>{try{const content=aboutPanel(await api('/about',{signal}),updateCheck.node);about.replaceChildren(content);run(()=>refreshUpdateState())}catch(e){if(e.name==='AbortError')return;about.replaceChildren(el('h2',{},'关于'),el('p',{class:'error',role:'alert'},e.message),button('重试',loadAbout))}};
  settingPanels.push(['storage','存储治理',storageSettings(signal)]);
  settingPanels.push(['embedding','工具检索',await embeddingSettings(signal)]);
  const aboutLabel=el('span',{class:'tab-label'},'关于',updateState?.notification_count?notificationDot(updateState.notification_count):null);settingPanels.push(['about',aboutLabel,about]);
