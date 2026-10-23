@@ -1089,6 +1089,9 @@ class Catalog:
             if authorize:
                 await authorize()
             spec = await self.spec(row, user.id if user else None)
+            from .tool_headers import tool_context, validate_header_schema
+
+            context = {"name": name, "tool": tool}
             async def before_dispatch():
                 if authorize:
                     await authorize()
@@ -1097,9 +1100,15 @@ class Catalog:
                 if current_tool is None:
                     raise GatewayError("tool_not_found", "Tool is absent from the current MCP directory")
                 await self.validate_tool_arguments(current_tool, arguments)
+                validate_header_schema(current_tool.get("inputSchema", {}))
+                context["tool"] = current_tool
                 if authorize:
                     await authorize()
-            result = await self.runtime.call(spec, lease.id, name, arguments, authorize=before_dispatch)
+            binding = tool_context.set(context)
+            try:
+                result = await self.runtime.call(spec, lease.id, name, arguments, authorize=before_dispatch)
+            finally:
+                tool_context.reset(binding)
             event.update(status="tool_error" if result.get("isError") else "success", result=result)
             return result
         except asyncio.CancelledError:

@@ -23,7 +23,7 @@ DEFAULTS = {"title": "MCP Manager", "registration_enabled": True, "jwt_days": 30
             "token_auth_enabled": True, "anonymous_scope_mode": "selected", "anonymous_mcp_ids": [],
             "idle_seconds": 86400, "connection_ttl_seconds": 43200, "refresh_enabled": False, "refresh_cron": "0 3 * * *",
             "bridge_heartbeat_seconds": 90, "bridge_missed_heartbeats": 3,
-            "startup_failure_threshold": 3, "timezone": "Asia/Shanghai",
+            "startup_failure_threshold": 3, "timezone": "Asia/Shanghai", "embedded_resource.inject": True,
             "log_retention_days": 0, "cors_origins": ["*"], "allowed_hosts": ["*"],
             "update_auto_check": True, "update_check_interval_seconds": DEFAULT_AUTO_CHECK_INTERVAL_SECONDS,
             "translation_config": DEFAULT_TRANSLATION_CONFIG}
@@ -283,7 +283,8 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
         result["translation_config"] = normalize_translation_config(result["translation_config"])
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    for key in ("registration_enabled", "token_auth_enabled", "refresh_enabled", "update_auto_check"):
+    for key in ("registration_enabled", "token_auth_enabled", "refresh_enabled", "update_auto_check",
+                "embedded_resource.inject"):
         if not isinstance(result[key], bool):
             raise HTTPException(422, key + " must be a boolean")
     for key in ("jwt_days", "idle_seconds", "log_retention_days"):

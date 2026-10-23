@@ -30,6 +30,7 @@
 - [运行时与生命周期](concepts/runtime-and-lifecycle.md)
 - [状态机：启动策略、运行状态与隔离](concepts/state-machine.md)
 - [网关工具参考](reference/gateway-tools.md)
+- [工具内嵌资源兼容与资源检索](guides/embedded-resources.md)
 - [能力目录与审批诊断 API](reference/catalog-api.md)
 - [CLI 参考](reference/cli.md)
 - [传输插件](development/transport-plugins.md)

@@ -647,7 +647,11 @@ async def connect(spec: ServerSpec):
                 if not oauth_failure.done():
                     oauth_failure.set_result(error)
                 raise error
-        hooks = {"response": [oauth_response]} if config.get("auth", {}).get("type") == "oauth" else {}
+        from .tool_headers import mirror_tool_headers
+
+        hooks = {"request": [mirror_tool_headers]}
+        if config.get("auth", {}).get("type") == "oauth":
+            hooks["response"] = [oauth_response]
         async with httpx2.AsyncClient(headers=auth_headers(config), event_hooks=hooks,
                                       timeout=float(config.get("call_timeout", 60)),
                                       verify=config.get("verify_tls", True),
