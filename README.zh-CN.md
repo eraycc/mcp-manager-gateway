@@ -250,9 +250,11 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 | `gateway_search_mcps` | 搜索或列出当前 Token 有权访问的 MCP |
 | `gateway_search_tools` | 获取目标工具的完整 `inputSchema` 和精确 `gateway_name` |
 | `gateway_call` | 使用精确名称和符合 Schema 的参数执行工具 |
-| `gateway_list_resources` | 可选：列出资源、提示词和模板 |
+| `gateway_search_resources` | 可选：按服务、类型与匹配方式渐进检索资源、提示词和模板元数据，支持语义检索与稳定分页；默认每页 20 条，最多 100 条 |
 | `gateway_read_resource` | 可选：读取精确资源或提示词 URI；提示词支持字符串类型的 `arguments` |
 | `gateway_mcp_proposals` | 可选：管理员 Token 批量提交或查询 MCP 提议 |
+
+资源搜索与读取仍由创建/编辑 Token 时的“启用资源工具”勾选项同时控制，已启用的 Token 无需重建。升级后客户端重启或重连，刷新工具目录后使用新名称。
 
 一个可靠的 Agent 不应猜测工具名或参数：先搜索 MCP，再搜索工具，最后使用返回的精确名称调用。搜索和目录分页不会唤醒 `lazy` 服务。
 
@@ -394,4 +396,4 @@ MCP 配置可以启动本地进程、访问网络和读取数据，应当视为�
 
 Copyright 2026 eraycc. Licensed under the [Apache License 2.0](https://github.com/eraycc/mcp-manager-gateway/blob/master/LICENSE).
 
-大目录可用 `gateway_search_tools` 的 `names_only: true` 渐进获取名称摘要，不读取 Schema；调用前应去掉该参数，按精确名称查询完整定义。跟随 `next_cursor` 时保持原查询不变。原生工具/资源/提示词/模板列表与 `gateway_list_resources` 均分页；整个 MCP JSON-RPC 响应按 1 MiB 预算计入文本与结构化内容的重复占用。单个完整契约超限明确返回 `catalog_entry_too_large`，不截断 Schema。失败服务保留状态和原因，但不展示可执行工具；关键词搜索支持有界的单字符拼写容错，精确调用仍严格匹配名称。
+大目录可用 `gateway_search_tools` 的 `names_only: true` 渐进获取名称摘要，不读取 Schema；调用前应去掉该参数，按精确名称查询完整定义。跟随 `next_cursor` 时保持原查询不变。原生工具/资源/提示词/模板列表与 `gateway_search_resources` 均分页；整个 MCP JSON-RPC 响应按 1 MiB 预算计入文本与结构化内容的重复占用。单个完整契约超限明确返回 `catalog_entry_too_large`，不截断 Schema。失败服务保留状态和原因，但不展示可执行工具；关键词搜索支持有界的单字符拼写容错，精确调用仍严格匹配名称。

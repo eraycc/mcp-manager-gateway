@@ -73,7 +73,7 @@ async def test_definition_endpoint_accepts_exact_capability_identifier(db_app, p
 async def test_prompt_resource_bridge_native_and_tool(db_app, prompt_catalog):
     row, ctx, calls = prompt_catalog
     uri = f"mcp-manager://{row.id}/prompt://{row.slug}/issue_to_fix_workflow"
-    listing = await invoke(db_app, ctx, "gateway_list_resources", {})
+    listing = await invoke(db_app, ctx, "gateway_search_resources", {})
     prompt = next(item for item in listing.structured_content["items"]
                   if item["kind"] == "prompt" and item["name"] == "issue_to_fix_workflow")
     assert prompt["uri"] == uri

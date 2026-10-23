@@ -42,7 +42,7 @@ async def test_revocation_during_embedding_discloses_no_resource(db_app, monkeyp
         await release.wait()
         return {item["id"]: 0.9 for item in documents}, {"mode": "hybrid"}
     monkeypatch.setattr(db_app.app.state.embeddings, "scores", scores)
-    params = SimpleNamespace(name="gateway_list_resources", arguments={"keyword": "fixture"})
+    params = SimpleNamespace(name="gateway_search_resources", arguments={"keyword": "fixture"})
     task = asyncio.create_task(db_app.app.state.gateway._call_tool(ctx, params))
     try:
         await asyncio.wait_for(entered.wait(), 5)
@@ -63,7 +63,7 @@ async def test_embedding_documents_exclude_uris_and_extension_fields(db_app, mon
         return {item["id"]: 0.9 for item in documents}, {"mode": "hybrid"}
     monkeypatch.setattr(db_app.app.state.embeddings, "scores", scores)
     result = await db_app.app.state.gateway._call_tool(ctx, SimpleNamespace(
-        name="gateway_list_resources", arguments={"keyword": "fixture"}
+        name="gateway_search_resources", arguments={"keyword": "fixture"}
     ))
     assert texts and all("SYNTHETIC_METADATA_MARKER" not in text for text in texts)
     assert all("private-extension" not in text for text in texts)
@@ -79,7 +79,7 @@ async def test_configuration_change_during_embedding_discloses_no_resource(db_ap
         return {item["id"]: 0.9 for item in documents}, {"mode": "hybrid"}
     monkeypatch.setattr(db_app.app.state.embeddings, "scores", scores)
     task = asyncio.create_task(db_app.app.state.gateway._call_tool(ctx, SimpleNamespace(
-        name="gateway_list_resources", arguments={"keyword": "fixture"}
+        name="gateway_search_resources", arguments={"keyword": "fixture"}
     )))
     try:
         await asyncio.wait_for(entered.wait(), 5)
@@ -103,7 +103,7 @@ async def test_credential_slot_change_during_embedding_discloses_no_resource(db_
         return {item["id"]: 0.9 for item in documents}, {"mode": "hybrid"}
     monkeypatch.setattr(db_app.app.state.embeddings, "scores", scores)
     task = asyncio.create_task(db_app.app.state.gateway._call_tool(ctx, SimpleNamespace(
-        name="gateway_list_resources", arguments={"keyword": "fixture"}
+        name="gateway_search_resources", arguments={"keyword": "fixture"}
     )))
     try:
         await asyncio.wait_for(entered.wait(), 5)

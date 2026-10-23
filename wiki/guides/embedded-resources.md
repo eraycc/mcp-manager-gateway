@@ -13,7 +13,7 @@ MMG 提供默认关闭、适用于任何下游 MCP 的兜底兼容。客户端�
 1. 保留原始内容块、正文、二进制数据及 `structuredContent`。
 2. 在有明确会话边界时，将内嵌资源保存为当前会话的临时快照。
 3. 添加普通文本提示，给出实际可读的临时 URI；原 URI 不变。
-4. 将快照加入当前会话的原生 `resources/list` 和 `gateway_list_resources`。
+4. 将快照加入当前会话的原生 `resources/list` 和 `gateway_search_resources`。
 5. 通过原生 `resources/read` 或 `gateway_read_resource` 直接读取快照，无需再次调用下游工具。
 
 只缓存真正的内嵌资源，不自动抓取 `resource_link` 或任意 URL，也不根据 GitHub 服务名做特殊处理。
@@ -56,7 +56,7 @@ MMG 提供默认关闭、适用于任何下游 MCP 的兜底兼容。客户端�
 }
 ~~~
 
-将上述参数传给 `gateway_list_resources`。同一会话或租约内，匹配 MCP 的临时资源排在注册资源之前，且最新生成的条目永远优先；原生 `resources/list` 也采用此顺序。超过一页时仍需跟随游标。返回项包含 `temporary: true`、原始 `source_uri` 和 `read_with`；直接执行 `read_with` 指定的读取操作即可。不要自己拼接临时 URI 或网关前缀。
+将上述参数传给 `gateway_search_resources`。同一会话或租约内，匹配 MCP 的临时资源排在注册资源之前，且最新生成的条目永远优先；原生 `resources/list` 也采用此顺序。超过一页时仍需跟随游标。返回项包含 `temporary: true`、原始 `source_uri` 和 `read_with`；直接执行 `read_with` 指定的读取操作即可。不要自己拼接临时 URI 或网关前缀。
 
 `keyword="admin/layout.tsx"`、`keyword="layout.tsx"` 均可按 `source_uri` 子串命中；`keyword="admin layout tsx"` 支持分词匹配。临时正文不参与全文或向量检索，兼容开关也不会改变管理界面的持久能力计数。
 
@@ -79,7 +79,7 @@ MMG 提供默认关闭、适用于任何下游 MCP 的兜底兼容。客户端�
 
 ## 静态资源检索
 
-`gateway_list_resources` 支持：
+`gateway_search_resources` 支持：
 
 | 参数 | 行为 |
 | --- | --- |

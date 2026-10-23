@@ -100,19 +100,19 @@ async def test_newest_temporary_resources_lead_every_page_path(db_app):
     await capture(db_app, ctx, row, "admin/layout.tsx")
     old, new = list(db_app.app.state.gateway.embedded.items)
     for mcp in (row.id, row.slug, row.name):
-        page = await invoke(db_app, ctx, "gateway_list_resources", {"mcp": mcp, "limit": 1})
+        page = await invoke(db_app, ctx, "gateway_search_resources", {"mcp": mcp, "limit": 1})
         assert not page.is_error
         assert page.structured_content["items"][0]["uri"] == new
     for query in ("layout.tsx", "admin/layout.tsx", "admin layout tsx"):
-        page = await invoke(db_app, ctx, "gateway_list_resources", {
+        page = await invoke(db_app, ctx, "gateway_search_resources", {
             "mcp": row.id, "keyword": query, "match": "keyword_only", "limit": 1,
         })
         assert not page.is_error and page.structured_content["items"][0]["uri"] == new
-    page = await invoke(db_app, ctx, "gateway_list_resources", {"keyword": "layout", "limit": 1})
+    page = await invoke(db_app, ctx, "gateway_search_resources", {"keyword": "layout", "limit": 1})
     assert page.structured_content["items"][0]["uri"] == new
     cursor, seen = None, []
     while True:
-        page = await invoke(db_app, ctx, "gateway_list_resources", {
+        page = await invoke(db_app, ctx, "gateway_search_resources", {
             "mcp": row.id, "limit": 7, **({"cursor": cursor} if cursor else {}),
         })
         assert not page.is_error, page
@@ -152,7 +152,7 @@ async def test_implicit_retention_lease_captures_without_session_header(db_app, 
     assert any("Temporary embedded resource:" in getattr(block, "text", "") for block in result.content)
     # A different HTTP request with the same authenticated implicit lease.
     again = SimpleNamespace(request=Request(dict(ctx.request.scope)))
-    page = await invoke(db_app, again, "gateway_list_resources", {
+    page = await invoke(db_app, again, "gateway_search_resources", {
         "mcp": row.id, "keyword": "admin/layout.tsx", "limit": 1,
     })
     assert not page.is_error and page.structured_content["returned"] == 1
@@ -178,9 +178,9 @@ async def test_legacy_catalog_also_lists_newest_temporary_resource_first(db_app)
     await capture(db_app, ctx, row, "old/layout.tsx")
     await capture(db_app, ctx, row, "admin/layout.tsx")
     old, new = list(gateway.embedded.items)
-    result = await invoke(db_app, ctx, "gateway_list_resources", {"mcp": row.id, "limit": 1})
+    result = await invoke(db_app, ctx, "gateway_search_resources", {"mcp": row.id, "limit": 1})
     assert not result.is_error and result.structured_content["items"][0]["uri"] == new
-    result = await invoke(db_app, ctx, "gateway_list_resources", {
+    result = await invoke(db_app, ctx, "gateway_search_resources", {
         "mcp": row.id, "keyword": "admin layout tsx", "match": "keyword_only",
     })
     assert [item["uri"] for item in result.structured_content["items"]] == [new]
@@ -204,7 +204,7 @@ async def test_mcp_filter_does_not_include_another_providers_temporary_resources
     await capture(db_app, ctx, row, "first.tsx")
     await capture(db_app, ctx, other, "second.tsx")
     for provider, name in [(row, "first.tsx"), (other, "second.tsx")]:
-        result = await invoke(db_app, ctx, "gateway_list_resources", {"mcp": provider.id, "limit": 1})
+        result = await invoke(db_app, ctx, "gateway_search_resources", {"mcp": provider.id, "limit": 1})
         assert not result.is_error
         item = result.structured_content["items"][0]
         assert item["name"] == name and item["mcp"]["id"] == provider.id and item["temporary"]

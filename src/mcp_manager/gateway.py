@@ -30,12 +30,14 @@ router = APIRouter(prefix="/gateway/v1")
 
 RESOURCE_TOOLS = [
     {
-        "name": "gateway_list_resources",
+        "name": "gateway_search_resources",
         "description": (
-            "List authorized MCP resources, prompts and resource templates as JSON. "
-            "Use only when the client does not support native MCP resource and prompt protocols. "
-            "Filter by mcp, kind, keyword, match or source uri_prefix. Includes this session\'s temporary embedded resources. "
-            "Use exact for case-sensitive names, keyword_only to skip embeddings; fuzzy combines lexical and semantic matching."
+            "Search authorized MCP resources, prompts and resource templates with progressive metadata disclosure. "
+            "Filter by mcp, kind, keyword, match or source uri_prefix. Empty keyword browses authorized metadata. "
+            "Use exact for case-sensitive names, keyword_only to skip embeddings; fuzzy combines lexical, typo and optional semantic matching. "
+            "Empty arguments return the first page of at most 20 metadata entries; limit is 1-100. "
+            "Follow next_cursor with unchanged query and limit. Includes authorized session snapshots when compatibility is enabled. "
+            "Search does not start lazy services or return resource bodies; use gateway_read_resource with an exact returned URI to read content."
         ),
         "inputSchema": {
             "type": "object",
@@ -55,9 +57,9 @@ RESOURCE_TOOLS = [
     {
         "name": "gateway_read_resource",
         "description": (
-            "Read one authorized resource or prompt by the exact URI returned by gateway_list_resources. "
+            "Read one authorized resource or prompt by the exact URI returned by gateway_search_resources. "
             "Prompt URIs use prompts/get; supply string arguments when required. "
-            "Use only when the client does not support the native MCP resource and prompt protocols."
+            "Search metadata first, then read only the content needed."
         ),
         "inputSchema": {
             "type": "object",
@@ -523,7 +525,7 @@ class Gateway:
                 arguments = validate_meta("gateway_call", arguments)
                 name, arguments = arguments["name"], arguments["arguments"]
             return await self.execute_exact(request, user, token, name, arguments, discovery=discovery)
-        if discovery and token.enable_resource_tools and name == "gateway_list_resources":
+        if discovery and token.enable_resource_tools and name == "gateway_search_resources":
             from .resource_discovery import resource_page
             return await resource_page(self, request, arguments)
         if discovery and token.enable_resource_tools and name == "gateway_read_resource":

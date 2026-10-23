@@ -63,7 +63,7 @@ async def resource_page(gateway, request, arguments):
     try:
         Draft202012Validator(RESOURCE_TOOLS[0]["inputSchema"]).validate(arguments)
     except ValidationError as exc:
-        raise validation_error(exc, name="gateway_list_resources") from None
+        raise validation_error(exc, name="gateway_search_resources") from None
     user, token, allowed = await gateway.principal(request)
     catalog, state = gateway.app.state.catalog, gateway.app.state
     rows = [row for row in await catalog.rows(ids=allowed, metadata_only=True) if row.mode != "disabled"]

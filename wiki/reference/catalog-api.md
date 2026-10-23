@@ -35,7 +35,7 @@
 
 ## MCP protocol pagination
 
-`gateway_search_tools` accepts optional `names_only: true` for complete name traversal without reading definition artifacts. Obtain the original full `inputSchema` through exact search before `gateway_call`. Providers in each response belong only to that page. Follow opaque `next_cursor` with unchanged query and page size; identity, permission, credentials, generation, feature or retrieval changes invalidate it. Native lists use `nextCursor`. `gateway_list_resources` accepts `limit` and `cursor`, returns summary items and a total. Whole JSON-RPC responses include all text and structured representations in the 1 MiB budget. Individual oversized contracts fail explicitly with `catalog_entry_too_large`.
+`gateway_search_tools` accepts optional `names_only: true` for complete name traversal without reading definition artifacts. Obtain the original full `inputSchema` through exact search before `gateway_call`. Providers in each response belong only to that page. Follow opaque `next_cursor` with unchanged query and page size; identity, permission, credentials, generation, feature or retrieval changes invalidate it. Native lists use `nextCursor`. `gateway_search_resources` accepts `limit` and `cursor`, returns summary items and a total. Whole JSON-RPC responses include all text and structured representations in the 1 MiB budget. Individual oversized contracts fail explicitly with `catalog_entry_too_large`.
 
 ## Console cache and full detail display
 
