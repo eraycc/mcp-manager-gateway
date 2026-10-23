@@ -413,11 +413,22 @@ class Gateway:
         if explicit:
             runtime.check_lease(explicit, *identity)
             return ("lease", explicit)
+        # Stateless authenticated requests already share this runtime lease.
+        # Reuse its verified scope instead of silently dropping returned resources.
+        if user is None and not request.headers.get("X-MCP-Manager-Client"):
+            return None
+        implicit = self.retention.get(identity)
+        if implicit:
+            runtime.check_lease(implicit, *identity)
+            return ("lease", implicit)
         return None
 
     async def embedded_injection_enabled(self):
         from .database import get_setting
-        return await get_setting(self.app.state.db, "embedded_resource.inject", True) is True
+        enabled = await get_setting(self.app.state.db, "embedded_resource.inject", False) is True
+        if not enabled and self.embedded.items:
+            self.embedded.clear()
+        return enabled
 
     async def temporary_summaries(self, request, user, token, rows):
         if not await self.embedded_injection_enabled():
@@ -427,20 +438,26 @@ class Gateway:
         return self.embedded.summaries(namespace, scopes)
 
     async def capture_embedded(self, request, user, token, row, result, *, scope=None, authorize=None):
+        epoch = self.embedded.epoch
         value = types.CallToolResult.model_validate(result)
+        if not await self.embedded_injection_enabled():
+            return value
         if not any(isinstance(block, types.EmbeddedResource) for block in value.content):
             return value
         if scope is None:
             scope = await self.app.state.catalog.index_scope(row, user.id if user else None)
-        inject = await self.embedded_injection_enabled()
         if authorize:
             await authorize()
+        if not await self.embedded_injection_enabled() or self.embedded.epoch != epoch:
+            return value
         namespace = self.resource_session(request, user, token)
         if namespace is None:
+            value.content.append(types.TextContent(type="text", text=(
+                "Embedded resource was not cached: no stable session or lease is available. "
+                "Use an authenticated client or an explicit MCP Manager lease."
+            )))
             return value
         uris, skipped = self.embedded.capture(namespace, scope, value)
-        if not inject:
-            return value
         hints = [
             "Temporary embedded resource: " + uri
             + '. Read using resources/read or gateway_read_resource({"uri": "' + uri + '"}) in this session.'
@@ -632,8 +649,8 @@ class Gateway:
                     mcp_query.casefold() in (row.id + " " + row.slug + " " + row.name).casefold()]
         temporary = await self.temporary_summaries(request, user, token, selected)
         providers = {row.id: row for row in selected}
-        items.extend(item for server, value in temporary
-                     if matches(item := public_summary(providers[server], "resource", value), arguments))
+        items = [item for server, value in temporary
+                 if matches(item := public_summary(providers[server], "resource", value), arguments)] + items
         await authorize_search()
         from .paging import bounded_mcp_page
         from .tool_index import fingerprint
@@ -825,6 +842,9 @@ class Gateway:
         version = fingerprint([expected, "native", kind, temporary])
         cursor = getattr(params, "cursor", None)
         offset = decode_cursor(cursor, version, catalog.config.jwt_secret)
+        leading = temporary[offset:offset + 50]
+        static_offset = max(0, offset - len(temporary))
+        static_limit = 50 - len(leading)
         legacy = [row for row in rows if row.id not in indexed
                   and catalog.cached_view(row, user.id if user else None)[kind]]
         by_id = {row.id: row for row in rows}
@@ -840,18 +860,15 @@ class Gateway:
                 pair[1].get("uri", pair[1].get("uriTemplate", pair[1].get("name", "")))
                 if isinstance(pair[1], dict) else pair[1].original_name
             )))
-            total, selected = len(records), records[offset:offset + 50]
+            total, selected = len(records), records[static_offset:static_offset + static_limit]
         else:
             total, entries = await catalog.index.query_tool_entries(
-                generations, kind=kind, offset=offset, limit=50
+                generations, kind=kind, offset=static_offset, limit=static_limit
             )
             selected = [(by_id[entry.server_id], entry) for entry in entries]
-        static_total = total
         total += len(temporary)
-        if offset + len(selected) >= static_total:
-            start = max(0, offset - static_total)
-            selected.extend((by_id[server_id], dict(value, _mmg_temporary=True))
-                            for server_id, value in temporary[start:start + 50 - len(selected)])
+        selected = [(by_id[server_id], dict(value, _mmg_temporary=True))
+                    for server_id, value in leading] + selected
         if cursor and offset >= total:
             raise GatewayError("invalid_cursor", "Native cursor is outside the result")
         factories = {

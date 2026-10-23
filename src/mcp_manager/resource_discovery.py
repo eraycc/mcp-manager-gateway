@@ -45,6 +45,9 @@ def matches(item, arguments):
     text = " ".join(str(item.get(key, "")) for key in ("name", "title", "description", "source_uri")).casefold()
     if query.casefold() in text:
         return True
+    terms = set(tokens(query))
+    if terms and terms.issubset(set(tokens(text))):
+        return True
     return arguments.get("match", "fuzzy") == "fuzzy" and typo_match(query, text)
 
 
@@ -137,8 +140,8 @@ async def resource_page(gateway, request, arguments):
             score = (1 / (60 + lexical_rank) if lexical_rank else 0) + (1 / (60 + semantic) if semantic else 0)
             return -score, entry.server_id, entry.original_name
         candidates.sort(key=rank)
-        items = [public_summary(by_id[entry.server_id], labels[entry.id], entry.summary) for entry in candidates]
-        items.extend(dynamic)
+        items = dynamic + [public_summary(by_id[entry.server_id], labels[entry.id], entry.summary)
+                           for entry in candidates]
         version = fingerprint([*version_parts, [item.get("uri", item.get("uriTemplate", item.get("name")))
                                                for item in items], search])
         page = await asyncio.to_thread(bounded_mcp_page, items, envelope=envelope,
@@ -164,7 +167,14 @@ async def resource_page(gateway, request, arguments):
         raise GatewayError("invalid_cursor", "Resource cursor is outside the result")
     builder = await asyncio.to_thread(McpPageBuilder, total=total, offset=offset,
         limit=arguments.get("limit", 20), version=version, signing_key=state.config.jwt_secret, envelope=envelope)
-    skipped = offset
+    for item in dynamic[offset:]:
+        if not await asyncio.to_thread(builder.add, item):
+            await check()
+            return builder.finish()
+        if len(builder.items) == builder.limit:
+            await check()
+            return builder.finish()
+    skipped = max(0, offset - len(dynamic))
     for kind, label, count in counts:
         if skipped >= count:
             skipped -= count
@@ -179,8 +189,5 @@ async def resource_page(gateway, request, arguments):
         if len(builder.items) == builder.limit:
             await check()
             return builder.finish()
-    for item in dynamic[skipped:]:
-        if not await asyncio.to_thread(builder.add, item):
-            break
     await check()
     return builder.finish()

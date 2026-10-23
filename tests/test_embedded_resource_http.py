@@ -11,6 +11,7 @@ from test_gateway import running_gateway  # noqa: F401
 @pytest.mark.parametrize("mode", ["2026-07-28", "legacy"])
 async def test_embedded_resource_native_http_roundtrip_and_cleanup(running_gateway, monkeypatch, mode):  # noqa: F811
     app, web, url, token, _row = running_gateway
+    assert (await web.patch("/api/v1/settings", json={"embedded_resource.inject": True})).status_code == 200
     class Connection:
         async def call(self, name, arguments):
             return {"structuredContent": {"result": "actual body"}, "content": [

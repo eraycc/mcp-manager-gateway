@@ -58,7 +58,7 @@ Schema 校验只解析自包含定义中的本地引用，不自动读取远程 
 
 支持 `mcp`、`keyword`、`kind`（`resource` / `prompt` / `template` / `all`）、`match`（`exact` / 默认 `fuzzy` / `keyword_only`）及下游原始 `uri_prefix`。精确匹配区分名称大小写；关键词模式跳过 embedding；模糊模式使用有界候选和向量融合，成功状态为 `hybrid` / `ready`，失败时明确报告关键词降级原因。静态资源向量在后台构建；查询不启动下游服务。
 
-默认合并当前会话的工具内嵌资源快照，返回提供方、精确 URI、`temporary` 标记及后续读取方式。系统设置 `embedded_resource.inject=false` 时隐藏临时条目并拒绝其读取，工具响应原样透传；捕获仍继续，重新开启后未过期快照恢复可用。临时资源不参与向量索引。会话要求、容量、GitHub MCP 示例与 HTTP 参数镜像见[内嵌资源兼容与检索](../guides/embedded-resources.md)。
+系统设置 `embedded_resource.inject` 默认关闭。开启时合并当前会话或租约的工具内嵌资源快照，临时资源先于静态条目、按生成时间倒序显示，返回提供方、精确 URI、`temporary` 标记及后续读取方式。`keyword` 支持 `source_uri` 子串和分词匹配，例如 `admin/layout.tsx`、`layout.tsx` 或 `admin layout tsx`。已认证无状态请求复用当前隐式 retention 租约，不因缺少显式会话头静默漏掉新快照。关闭时停止捕获并清空全部临时快照，旧 URI 不再可读，工具响应原样透传；重新开启后必须重新调用工具。临时资源不参与向量索引。会话要求、容量、GitHub MCP 示例与 HTTP 参数镜像见[内嵌资源兼容与检索](../guides/embedded-resources.md)。
 
 ## `gateway_read_resource`
 

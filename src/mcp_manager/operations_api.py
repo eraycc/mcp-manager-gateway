@@ -23,7 +23,7 @@ DEFAULTS = {"title": "MCP Manager", "registration_enabled": True, "jwt_days": 30
             "token_auth_enabled": True, "anonymous_scope_mode": "selected", "anonymous_mcp_ids": [],
             "idle_seconds": 86400, "connection_ttl_seconds": 43200, "refresh_enabled": False, "refresh_cron": "0 3 * * *",
             "bridge_heartbeat_seconds": 90, "bridge_missed_heartbeats": 3,
-            "startup_failure_threshold": 3, "timezone": "Asia/Shanghai", "embedded_resource.inject": True,
+            "startup_failure_threshold": 3, "timezone": "Asia/Shanghai", "embedded_resource.inject": False,
             "log_retention_days": 0, "cors_origins": ["*"], "allowed_hosts": ["*"],
             "update_auto_check": True, "update_check_interval_seconds": DEFAULT_AUTO_CHECK_INTERVAL_SECONDS,
             "translation_config": DEFAULT_TRANSLATION_CONFIG}
@@ -327,6 +327,9 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
             else:
                 s.add(SystemSetting(key=key, value=value))
     invalidate_setting_cache(request.app.state.db, data)
+    if data.get("embedded_resource.inject") is False:
+        # This global policy applies to every session, including idle clients.
+        request.app.state.gateway.embedded.clear()
     result = await settings(request, user)
     request.app.state.cors_origins = result["cors_origins"]
     request.app.state.allowed_hosts = result["allowed_hosts"]
