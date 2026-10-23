@@ -254,7 +254,7 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 | `gateway_read_resource` | 可选：读取精确资源或提示词 URI；提示词支持字符串类型的 `arguments` |
 | `gateway_mcp_proposals` | 可选：管理员 Token 批量提交或查询 MCP 提议 |
 
-资源搜索与读取仍由创建/编辑 Token 时的“启用资源工具”勾选项同时控制，已启用的 Token 无需重建。升级后客户端重启或重连，刷新工具目录后使用新名称。
+资源搜索与读取仍由创建/编辑 Token 时的“启用资源工具”勾选项同时控制，已启用的 Token 无需重建。升级后客户端重启或重连，刷新工具目录后使用新名称。网关工具使用简短参数说明，并分别在 `inputSchema.examples` 中提供一条最小调用示例；OAuth 提议说明包含完整的 `config.auth.auth_mode` 四态取值。
 
 一个可靠的 Agent 不应猜测工具名或参数：先搜索 MCP，再搜索工具，最后使用返回的精确名称调用。搜索和目录分页不会唤醒 `lazy` 服务。
 

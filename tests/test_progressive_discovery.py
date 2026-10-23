@@ -135,7 +135,7 @@ async def test_search_tools_declares_exact_multi_selector(discovery_env):
         "minItems": 1,
         "maxItems": 50,
         "uniqueItems": True,
-        "description": "Exact original tool names or gateway_names to disclose together.",
+        "description": "Exact original names/gateway_names; cannot combine with tool",
     }
 
 

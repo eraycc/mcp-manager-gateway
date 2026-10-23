@@ -31,61 +31,52 @@ router = APIRouter(prefix="/gateway/v1")
 RESOURCE_TOOLS = [
     {
         "name": "gateway_search_resources",
-        "description": (
-            "Search authorized MCP resources, prompts and resource templates with progressive metadata disclosure. "
-            "Filter by mcp, kind, keyword, match or source uri_prefix. Empty keyword browses authorized metadata. "
-            "Use exact for case-sensitive names, keyword_only to skip embeddings; fuzzy combines lexical, typo and optional semantic matching. "
-            "Empty arguments return the first page of at most 20 metadata entries; limit is 1-100. "
-            "Follow next_cursor with unchanged query and limit. Includes authorized session snapshots when compatibility is enabled. "
-            "Search does not start lazy services or return resource bodies; use gateway_read_resource with an exact returned URI to read content."
-        ),
+        "description": "Search authorized resource/prompt/template metadata; read content via gateway_read_resource. Paginated; does not start services.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "mcp": {"type": "string", "maxLength": 2000, "default": ""},
-                "keyword": {"type": "string", "maxLength": 2000, "default": ""},
-                "kind": {"enum": ["resource", "prompt", "template", "all"], "default": "all"},
-                "match": {"enum": ["exact", "fuzzy", "keyword_only"], "default": "fuzzy"},
-                "uri_prefix": {"type": "string", "maxLength": 2000, "default": ""},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
-                "cursor": {"type": "string", "maxLength": 2048},
+                "mcp": {"type": "string", "maxLength": 2000, "default": "",
+                        "description": "service id/slug/name; empty=all"},
+                "keyword": {"type": "string", "maxLength": 2000, "default": "",
+                            "description": "search term; empty=browse"},
+                "kind": {"enum": ["resource", "prompt", "template", "all"], "default": "all",
+                         "description": "resource/prompt/template/all (default all)"},
+                "match": {"enum": ["exact", "fuzzy", "keyword_only"], "default": "fuzzy",
+                          "description": "exact/fuzzy/keyword_only (default fuzzy)"},
+                "uri_prefix": {"type": "string", "maxLength": 2000, "default": "",
+                               "description": "URI prefix filter"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20,
+                          "description": "1-100 (default 20)"},
+                "cursor": {"type": "string", "maxLength": 2048,
+                           "description": "next_cursor from previous page; keep query/limit unchanged"},
             },
             "additionalProperties": False,
+            "examples": [{"keyword": "config", "kind": "resource"}],
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
     },
     {
         "name": "gateway_read_resource",
-        "description": (
-            "Read one authorized resource or prompt by the exact URI returned by gateway_search_resources. "
-            "Prompt URIs use prompts/get; supply string arguments when required. "
-            "Search metadata first, then read only the content needed."
-        ),
+        "description": "Read authorized resource or prompt content using a discovered URI.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "uri": {"type": "string", "minLength": 1, "maxLength": 8192},
+                "uri": {"type": "string", "minLength": 1, "maxLength": 8192,
+                        "description": "exact URI from gateway_search_resources"},
                 "arguments": {"type": "object", "maxProperties": 100,
+                              "description": "prompt-only key-value strings; omit for resources",
                               "additionalProperties": {"type": "string", "maxLength": 8192}},
             },
             "required": ["uri"],
             "additionalProperties": False,
+            "examples": [{"uri": "<returned-uri>"}],
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
     },
 ]
 PROPOSAL_TOOL = {
     "name": "gateway_mcp_proposals",
-    "description": (
-        "Submit one MCP configuration or a proposals array for administrator approval, "
-        "or list approval status. "
-        "Submit: convert configurations to the documented standard JSON first; valid proposals "
-        "return approval IDs; mode, instance isolation and OAuth config isolation are set only "
-        "by an approver. "
-        "List: pass {\"action\": \"list\"} with optional q (keyword), status "
-        "('', 'pending', 'incomplete', 'approved', 'rejected'), page and page_size (<=200) to "
-        "query proposal approval status with per-status counts."
-    ),
+    "description": "Submit MCP configurations for administrator approval or list approval status. Approver alone sets mode/isolation/config_isolation; submission does not install services.",
     "inputSchema": {
         "type": "object",
         "oneOf": [
@@ -93,16 +84,26 @@ PROPOSAL_TOOL = {
                 "type": "object",
                 "required": ["name", "transport", "config"],
                 "properties": {
-                    "name": {"type": "string", "minLength": 1, "maxLength": 128},
-                    "slug": {"type": "string", "minLength": 1, "maxLength": 64},
-                    "description": {"type": "string", "maxLength": 4000},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                    "transport": {"enum": ["stdio", "streamable-http", "http", "sse", "rest"]},
-                    "config": {"type": "object"},
-                    "source": {"type": "string", "maxLength": 128},
-                    "purpose": {"type": "string", "maxLength": 4000},
-                    "declared_capabilities": {"type": "array", "items": {"type": "string"}},
-                    "requested_permissions": {"type": "array", "items": {"type": "string"}},
+                    "name": {"type": "string", "minLength": 1, "maxLength": 128,
+                                 "description": "MCP service display name"},
+                    "slug": {"type": "string", "minLength": 1, "maxLength": 64,
+                                 "description": "Stable unique service slug; optional"},
+                    "description": {"type": "string", "maxLength": 4000,
+                                 "description": "Service purpose and capabilities"},
+                    "tags": {"type": "array", "items": {"type": "string"},
+                                 "description": "Search tags"},
+                    "transport": {"enum": ["stdio", "streamable-http", "http", "sse", "rest"],
+                                 "description": "MCP transport; http normalizes to streamable-http"},
+                    "config": {"type": "object",
+                                 "description": "Transport config; auth.type=oauth, auth.auth_mode=pre_registration/prefer_cimd_fallback_dcr/cimd_only/dcr_only; pre_registration requires auth.client_id."},
+                    "source": {"type": "string", "maxLength": 128,
+                                 "description": "Configuration origin"},
+                    "purpose": {"type": "string", "maxLength": 4000,
+                                 "description": "Reason for proposing this service"},
+                    "declared_capabilities": {"type": "array", "items": {"type": "string"},
+                                 "description": "Expected MCP capabilities"},
+                    "requested_permissions": {"type": "array", "items": {"type": "string"},
+                                 "description": "Required filesystem/network/account permissions"},
                 },
                 "additionalProperties": False,
             },
@@ -112,6 +113,7 @@ PROPOSAL_TOOL = {
                 "properties": {
                     "proposals": {
                         "type": "array", "minItems": 1, "maxItems": 100,
+                        "description": "1-100 proposals; same fields as single submission",
                         "items": {"type": "object"},
                     }
                 },
@@ -121,15 +123,23 @@ PROPOSAL_TOOL = {
                 "type": "object",
                 "required": ["action"],
                 "properties": {
-                    "action": {"const": "list"},
-                    "q": {"type": "string", "maxLength": 200},
-                    "status": {"enum": ["", "pending", "incomplete", "approved", "rejected"]},
-                    "page": {"type": "integer", "minimum": 1, "default": 1},
-                    "page_size": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20},
+                    "action": {"const": "list",
+                                  "description": "List proposal approval status"},
+                    "q": {"type": "string", "maxLength": 200,
+                                  "description": "Name/purpose/source keyword; empty=all"},
+                    "status": {"enum": ["", "pending", "incomplete", "approved", "rejected"],
+                                  "description": "Approval status filter; empty=all"},
+                    "page": {"type": "integer", "minimum": 1, "default": 1,
+                                  "description": "Page number (default 1)"},
+                    "page_size": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20,
+                                  "description": "1-200 (default 20)"},
                 },
                 "additionalProperties": False,
             },
-        ]
+        ],
+        "examples": [{"name": "Example", "transport": "streamable-http", "config": {
+            "url": "https://mcp.example/mcp", "auth": {"type": "oauth", "auth_mode": "cimd_only"},
+        }}],
     },
 }
 

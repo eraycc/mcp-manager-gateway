@@ -14,52 +14,44 @@ from .tool_index import document, fingerprint, normalize, query_text, rank, sche
 
 PAGING = {
     "limit": {"type": "integer", "minimum": 1, "maximum": 100,
-              "description": "Page size (default 20). Follow next_cursor to get all matches."},
+              "description": "1-100 (default 20)"},
     "cursor": {"type": "string", "maxLength": 2048,
-               "description": "Opaque next_cursor from the previous result; keep the query unchanged."},
+               "description": "next_cursor from previous page; keep query/limit unchanged"},
 }
 DISCOVERY = [
     {"name": "gateway_search_mcps",
-     "description": "Find authorized MCP services by name or purpose. Empty query or '*' lists ALL services "
-                    "(follow next_cursor). Returns service summaries with name-only tools_list, never tool schemas. "
-                    "Then call gateway_search_tools with an exact returned mcp id. "
-                    'Example: {"query":"*"} or {"query":"file storage"}.',
+     "description": "Search authorized service summaries, not tool schemas; then gateway_search_tools. Paginated; does not start services.",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string", "maxLength": 2000, "default": "",
-                   "description": "Service name, slug or purpose; empty/'*' lists all."},
-         **PAGING, "limit": {**PAGING["limit"], "maximum": 200, "default": 50}},
-         "additionalProperties": False},
+                   "description": "Service name/slug/purpose; empty or '*'=browse"},
+         **PAGING, "limit": {**PAGING["limit"], "maximum": 200, "default": 50,
+                             "description": "1-200 (default 50)"}},
+         "additionalProperties": False, "examples": [{"query": "files"}]},
      "annotations": {"readOnlyHint": True, "destructiveHint": False}},
     {"name": "gateway_search_tools",
-     "description": "Disclose FULL original inputSchema only for tools needed before gateway_call. "
-                    "Use tool for one exact name or natural-language purpose; use tools for several exact "
-                    "original names/gateway_names. Omit both only to intentionally enumerate a service. "
-                    "mcp scopes by service id/slug/name/purpose; empty or '*' searches all authorized services. "
-                    "Follow next_cursor when truncated, then call gateway_call with an exact gateway_name.",
+     "description": "Search tools; return full inputSchema unless names_only. Use exact gateway_name with gateway_call. Paginated; does not start services.",
      "inputSchema": {"type": "object", "properties": {
          "mcp": {"type": "string", "maxLength": 2000, "default": "",
-                 "description": "Exact returned MCP id preferred; slug/name or fuzzy purpose allowed. Empty/'*'=all."},
+                 "description": "Service id/slug/name/purpose; prefer returned id; empty or '*'=all"},
          "tool": {"type": "string", "maxLength": 2000, "default": "",
-                  "description": "One tool name, gateway_name, purpose or parameter keyword. Empty/'*'=all."},
+                  "description": "Name/gateway_name/purpose/parameter keyword; empty or '*'=browse; cannot combine with tools"},
          "tools": {"type": "array",
                    "items": {"type": "string", "minLength": 1, "maxLength": 128},
                    "minItems": 1, "maxItems": 50, "uniqueItems": True,
-                   "description": "Exact original tool names or gateway_names to disclose together."},
+                   "description": "Exact original names/gateway_names; cannot combine with tool"},
          "names_only": {"type": "boolean", "default": False,
-                        "description": "Return names and summaries without Schema; query exact names again before gateway_call."},
-         **PAGING}, "not": {"required": ["tool", "tools"]}, "additionalProperties": False},
+                        "description": "Summaries only; fetch full inputSchema before gateway_call"},
+         **PAGING}, "not": {"required": ["tool", "tools"]}, "additionalProperties": False,
+         "examples": [{"mcp": "<service-id>", "tool": "<tool-name>"}]},
      "annotations": {"readOnlyHint": True, "destructiveHint": False}},
     {"name": "gateway_call",
-     "description": "Execute ONE discovered tool. First use gateway_search_tools to read its original inputSchema. "
-                    "Copy the exact gateway_name into name; put ONLY that tool's parameters in arguments, "
-                    "respecting required, types, enum and nested schemas. Never guess a tool name. "
-                    'Example: {"name":"files__read_file","arguments":{"path":"example.txt"}}. '
-                    "The example is illustrative; use the actual discovered schema.",
+     "description": "Call one discovered tool. Copy exact gateway_name and match arguments to its gateway_search_tools inputSchema; never guess names.",
      "inputSchema": {"type": "object", "properties": {
          "name": {"type": "string", "minLength": 1, "maxLength": 128,
-                  "description": "Exact gateway_name from gateway_search_tools."},
-         "arguments": {"type": "object", "description": "Arguments matching the discovered tool's ORIGINAL inputSchema."}},
-         "required": ["name", "arguments"], "additionalProperties": False}},
+                  "description": "Exact gateway_name from gateway_search_tools"},
+         "arguments": {"type": "object", "description": "Parameters matching the discovered tool's inputSchema"}},
+         "required": ["name", "arguments"], "additionalProperties": False,
+         "examples": [{"name": "<gateway_name>", "arguments": {}}]}},
 ]
 SCHEMAS = {item["name"]: item["inputSchema"] for item in DISCOVERY}
 

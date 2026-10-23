@@ -2,6 +2,17 @@
 
 discovery Token 默认提供三个核心工具。资源与提议工具按 Token 权限额外启用。
 
+工具列表保留简短用途和必要约束，参数说明各不超过 10 个英文词；每个工具的 `inputSchema.examples` 提供一条最小调用示例。下表均为工具参数，尖括号值必须替换为搜索返回的精确值；`gateway_call.arguments` 应根据实际下游 Schema 填写。
+
+| 工具 | 最小参数示例 |
+| --- | --- |
+| `gateway_search_mcps` | `{"query":"files"}` |
+| `gateway_search_tools` | `{"mcp":"<service-id>","tool":"<tool-name>"}` |
+| `gateway_call` | `{"name":"<gateway_name>","arguments":{}}` |
+| `gateway_search_resources` | `{"keyword":"config","kind":"resource"}` |
+| `gateway_read_resource` | `{"uri":"<returned-uri>"}` |
+| `gateway_mcp_proposals` | `{"name":"Example","transport":"streamable-http","config":{"url":"https://mcp.example/mcp","auth":{"type":"oauth","auth_mode":"cimd_only"}}}` |
+
 ## `gateway_search_mcps`
 
 搜索服务或列出全部授权服务。
@@ -11,7 +22,7 @@ discovery Token 默认提供三个核心工具。资源与提议工具按 Token 
 | 参数 | 说明 |
 | --- | --- |
 | `query` | 空或 `*` 表示全部；其他值搜索名称、slug、描述和标签 |
-| `limit` | 每页数量 |
+| `limit` | 每页 1–200 条，默认 50 条 |
 | `cursor` | 下一页游标 |
 
 结果包括服务 ID、名称、slug、描述、标签、工具数量、目录状态和下一步可用的 `mcp` 值。不会返回连接配置或凭据。
@@ -79,13 +90,13 @@ Schema 校验只解析自包含定义中的本地引用，不自动读取远程 
 }
 ~~~
 
-`arguments` 只用于提示词，参数值必须是字符串。缺少必填参数或参数名错误时返回 `invalid_arguments`，并说明具体字段；不启动下游。工具响应保留完整 `messages`，同时在 `contents` 中提供完整提示词结果的 JSON。原生 `resources/read` 也可读取无需参数的兼容提示词 URI；需要参数时使用原生 `prompts/get` 或上述工具入口。
+`arguments` 只用于提示词，参数值必须是字符串；读取普通资源时应省略，非空参数会被拒绝。缺少必填参数或参数名错误时返回 `invalid_arguments`，并说明具体字段；不启动下游。工具响应保留完整 `messages`，同时在 `contents` 中提供完整提示词结果的 JSON。原生 `resources/read` 也可读取无需参数的兼容提示词 URI；需要参数时使用原生 `prompts/get` 或上述工具入口。
 
 ## `gateway_mcp_proposals`
 
 仅对启用提议权限的管理员 Token 可见。
 
-单条提交使用提议字段；批量提交使用 `proposals` 数组，最多 100 条。查询状态：
+单条提交使用提议字段；批量提交使用 `proposals` 数组，最多 100 条。OAuth 配置放在 `config.auth`，设置 `type: "oauth"`，`auth_mode` 支持 `pre_registration`、`prefer_cimd_fallback_dcr`、`cimd_only`、`dcr_only`；预注册模式需要 `client_id`。各模式前提、CIMD 元数据和 DCR 回退规则见 [OAuth 指南](../guides/oauth.md)。`mode`、`isolation`、`config_isolation` 仍由审批人设置。查询状态：
 
 ~~~json
 {
