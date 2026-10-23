@@ -18,6 +18,25 @@ MMG 提供默认关闭、适用于任何下游 MCP 的兜底兼容。客户端�
 
 只缓存真正的内嵌资源，不自动抓取 `resource_link` 或任意 URL，也不根据 GitHub 服务名做特殊处理。
 
+## 调用日志中的追加内容
+
+网关在返回客户端前，将实际追加的内容块补记到同一条调用日志的 `gateway_processing.added_content`，例如：
+
+~~~json
+{
+  "gateway_processing": {
+    "added_content": [
+      {
+        "type": "text",
+        "text": "Temporary embedded resource: mcp-manager://<server-id>/_embedded/<snapshot-id> ..."
+      }
+    ]
+  }
+}
+~~~
+
+`result` 保持原始上游结果；加工字段只记录新增提示，不重复保存原始内容块或资源正文，也不会新增业务调用次数。兼容关闭或没有追加内容时，不生成该字段。日志详情、下载和导出均保留加工信息，索引重建后也可读取。大响应继续使用现有载荷分离机制，完整加工信息应通过日志详情或下载查看。
+
 ## 资源兼容开关
 
 在“系统设置 → 工具检索 → 资源兼容”中设置“启用内嵌资源注入”，对应系统设置 `embedded_resource.inject`，默认关闭。保存后应用于原生资源协议和网关资源工具。默认值用于未保存该设置的环境；已有明确保存的开关值继续生效。
