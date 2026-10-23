@@ -208,7 +208,7 @@ Keep a backup, preserve unrelated settings, and never remove the MMG connection 
 | `gateway_read_resource` | Optionally read an exact resource or prompt URI; prompts accept string `arguments` |
 | `gateway_mcp_proposals` | Optionally submit or inspect proposals with an authorized administrator token |
 
-Resource search and reading remain an optional pair controlled by the token editor’s resource-tools checkbox; existing enabled tokens require no migration. Restart or reconnect clients after upgrading to refresh the advertised tool names.
+Resource search and reading remain an optional pair controlled by the token editor’s resource-tools checkbox; existing enabled tokens require no migration. Restart or reconnect clients after upgrading to refresh the advertised tool names. Gateway tools use concise parameter hints and one minimal `inputSchema.examples` example each; OAuth proposals describe all four `config.auth.auth_mode` values.
 
 Reliable agents do not guess tool names or arguments: search for the MCP, retrieve the tool schema, and call the exact returned name. Discovery and pagination do not wake lazy services. See the [Gateway tool reference](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/reference/gateway-tools.md). Failed services report their state without advertising executable tools; keyword search supports bounded one-character typo recovery.
 
