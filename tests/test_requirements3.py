@@ -29,7 +29,7 @@ def test_gateway_tool_count_is_token_scoped_and_bounded():
         "gateway_call",
     ]
     assert [item["name"] for item in discovery_tools(token(enable_resource_tools=True))][-2:] == [
-        "gateway_list_resources",
+        "gateway_search_resources",
         "gateway_read_resource",
     ]
     all_tools = discovery_tools(token(enable_resource_tools=True, enable_mcp_proposal=True))

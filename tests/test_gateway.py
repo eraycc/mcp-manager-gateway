@@ -112,7 +112,7 @@ async def test_discovery_feature_switches_return_six_protocol_valid_tools(runnin
         "gateway_search_mcps",
         "gateway_search_tools",
         "gateway_call",
-        "gateway_list_resources",
+        "gateway_search_resources",
         "gateway_read_resource",
         "gateway_mcp_proposals",
     ]

@@ -204,9 +204,11 @@ Keep a backup, preserve unrelated settings, and never remove the MMG connection 
 | `gateway_search_mcps` | Find MCPs visible to the current token |
 | `gateway_search_tools` | Return the full `inputSchema` and exact `gateway_name` |
 | `gateway_call` | Invoke a tool with its exact name and schema-valid arguments |
-| `gateway_list_resources` | Optionally list resources, prompts, and templates |
+| `gateway_search_resources` | Optionally search resource, prompt, and template metadata with filters, matching modes, semantic retrieval and stable pagination (default 20 per page, maximum 100) |
 | `gateway_read_resource` | Optionally read an exact resource or prompt URI; prompts accept string `arguments` |
 | `gateway_mcp_proposals` | Optionally submit or inspect proposals with an authorized administrator token |
+
+Resource search and reading remain an optional pair controlled by the token editor’s resource-tools checkbox; existing enabled tokens require no migration. Restart or reconnect clients after upgrading to refresh the advertised tool names.
 
 Reliable agents do not guess tool names or arguments: search for the MCP, retrieve the tool schema, and call the exact returned name. Discovery and pagination do not wake lazy services. See the [Gateway tool reference](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/reference/gateway-tools.md). Failed services report their state without advertising executable tools; keyword search supports bounded one-character typo recovery.
 
@@ -331,4 +333,4 @@ An `outcome_unknown` result means a request may already have reached its destina
 
 Copyright 2026 eraycc. Licensed under the [Apache License 2.0](https://github.com/eraycc/mcp-manager-gateway/blob/master/LICENSE).
 
-Large catalogs support progressive `gateway_search_tools` with `names_only: true` (no Schema reads). Query exact names again without that flag before calling. Follow `next_cursor` without changing query arguments. Native tool/resource/prompt/template listings and `gateway_list_resources` paginate; complete MCP JSON-RPC envelopes are budgeted at 1 MiB including text and structured duplication. An individually oversized complete contract returns `catalog_entry_too_large`, never a truncated Schema.
+Large catalogs support progressive `gateway_search_tools` with `names_only: true` (no Schema reads). Query exact names again without that flag before calling. Follow `next_cursor` without changing query arguments. Native tool/resource/prompt/template listings and `gateway_search_resources` paginate; complete MCP JSON-RPC envelopes are budgeted at 1 MiB including text and structured duplication. An individually oversized complete contract returns `catalog_entry_too_large`, never a truncated Schema.

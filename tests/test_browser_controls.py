@@ -48,8 +48,10 @@ async def test_frontend_controls(running_gateway):  # noqa: F811
         await page.goto(url + "/#/tokens")
         await page.get_by_role("button", name="创建令牌", exact=True).click()
         await expect(page.get_by_label("启用资源工具", exact=True)).to_be_visible()
+        await expect(page.get_by_label("启用资源工具", exact=True)).not_to_be_checked()
+        await page.get_by_label("启用资源工具", exact=True).check()
         await expect(page.get_by_label("允许 Agent 提交/查询 MCP 提案", exact=True)).to_be_visible()
-        await expect(page.get_by_text("gateway_list_resources", exact=False)).to_be_visible()
+        await expect(page.get_by_text("gateway_search_resources", exact=False)).to_be_visible()
         await expect(page.get_by_text("gateway_mcp_proposals", exact=False)).to_be_visible()
         await page.get_by_label("令牌名称", exact=True).fill("Selected snapshot")
         await page.get_by_role("button", name="选择当前页", exact=True).click()
@@ -68,6 +70,7 @@ async def test_frontend_controls(running_gateway):  # noqa: F811
         await expect(page.get_by_role("dialog", name="访问令牌", exact=True)).to_be_visible()
         row = next(x for x in (await web.get("/api/v1/tokens")).json()["items"] if x["name"] == "Selected snapshot")
         assert row["scope_mode"] == "selected" and len(row["mcp_ids"]) == 1
+        assert row["enable_resource_tools"] is True
         await page.get_by_role("dialog").get_by_role("button", name="关闭", exact=True).click()
         await page.evaluate("""async()=>{const c=await import('/core.js'); await c.jobDialog({id:'terminal-test',status:'completed'});c.toast('失败提示',false)}""")
         await expect(page.get_by_role("button", name="取消后台任务", exact=True)).to_have_count(0)

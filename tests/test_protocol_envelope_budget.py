@@ -158,15 +158,15 @@ async def test_resource_meta_pages_use_index_and_are_cursor_bound(db_app, monkey
         raise AssertionError("Resource search must not build tool directory or definitions")
     monkeypatch.setattr(db_app.app.state.gateway, "directory", forbidden)
     monkeypatch.setattr(catalog.artifacts, "read_json", forbidden)
-    first = await invoke(db_app, context, "gateway_list_resources", {"mcp": row.id, "limit": 20})
+    first = await invoke(db_app, context, "gateway_search_resources", {"mcp": row.id, "limit": 20})
     assert not first.is_error, first
     page = first.structured_content
     assert page["total"] == 61 and len(page["items"]) == 20 and wire_bytes(first) <= 1048576
     cursor, seen = page["next_cursor"], [v["uri"] for v in page["items"]]
-    changed = await invoke(db_app, context, "gateway_list_resources", {"mcp": row.id, "limit": 21, "cursor": cursor})
+    changed = await invoke(db_app, context, "gateway_search_resources", {"mcp": row.id, "limit": 21, "cursor": cursor})
     assert changed.is_error and changed.structured_content["error"]["code"] == "catalog_changed"
     while cursor:
-        result = await invoke(db_app, context, "gateway_list_resources", {"mcp": row.id, "limit": 20, "cursor": cursor})
+        result = await invoke(db_app, context, "gateway_search_resources", {"mcp": row.id, "limit": 20, "cursor": cursor})
         assert not result.is_error, result
         seen.extend(v["uri"] for v in result.structured_content["items"])
         cursor = result.structured_content.get("next_cursor")

@@ -65,7 +65,7 @@ async def test_embedded_roundtrip_session_isolation_and_release(db_app, monkeypa
     assert not result.is_error
     assert result.content[1].resource.text == "private body"
     assert result.structured_content == {"ok": True}
-    page = await invoke(db_app, ctx, "gateway_list_resources", {"kind": "resource", "uri_prefix": "github://"})
+    page = await invoke(db_app, ctx, "gateway_search_resources", {"kind": "resource", "uri_prefix": "github://"})
     assert not page.is_error, page
     items = page.structured_content["items"]
     assert len(items) == 1 and items[0]["temporary"]
@@ -97,7 +97,7 @@ async def test_resource_filters_and_keyword_only_never_embed(db_app, monkeypatch
         ({"kind": "resource", "keyword": "forecast", "match": "keyword_only"}, ["weather"]),
         ({"kind": "template", "uri_prefix": "fixture://sensor"}, ["sensor"]),
     ]:
-        page = await invoke(db_app, ctx, "gateway_list_resources", arguments)
+        page = await invoke(db_app, ctx, "gateway_search_resources", arguments)
         assert not page.is_error, page
         assert [item["name"] for item in page.structured_content["items"]] == names
         assert page.structured_content["search"]["semantic_status"] != "pending_index"
@@ -126,7 +126,7 @@ async def test_resource_vectors_include_descriptions_without_uris(db_app, monkey
     assert all("fixture://" not in text for text in inputs)
     inputs.clear()
     ctx, _sid = await enabled_context(db_app)
-    result = await invoke(db_app, ctx, "gateway_list_resources", {"kind": "resource", "keyword": "power level"})
+    result = await invoke(db_app, ctx, "gateway_search_resources", {"kind": "resource", "keyword": "power level"})
     assert not result.is_error
     assert result.structured_content["count"] == 2
     assert result.structured_content["search"]["semantic_status"] == "ready"
@@ -166,17 +166,17 @@ def test_embedded_cache_binary_expiry_and_capacity():
 async def test_fuzzy_resource_typo_and_query_bound_cursor(db_app):
     await resource_catalog(db_app)
     ctx, _ = await enabled_context(db_app)
-    result = await invoke(db_app, ctx, "gateway_list_resources", {
+    result = await invoke(db_app, ctx, "gateway_search_resources", {
         "keyword": "wether", "kind": "resource", "limit": 1,
     })
     assert not result.is_error
     assert [item["name"] for item in result.structured_content["items"]] == ["weather"]
-    result = await invoke(db_app, ctx, "gateway_list_resources", {"limit": 1})
+    result = await invoke(db_app, ctx, "gateway_search_resources", {"limit": 1})
     cursor = result.structured_content["next_cursor"]
     assert cursor
-    denied = await invoke(db_app, ctx, "gateway_list_resources", {"limit": 1, "kind": "prompt", "cursor": cursor})
+    denied = await invoke(db_app, ctx, "gateway_search_resources", {"limit": 1, "kind": "prompt", "cursor": cursor})
     assert denied.is_error
-    result = await invoke(db_app, ctx, "gateway_list_resources", {
+    result = await invoke(db_app, ctx, "gateway_search_resources", {
         "keyword": "HEALTH", "kind": "resource", "match": "exact",
     })
     assert not result.is_error and result.structured_content["count"] == 0
@@ -207,7 +207,7 @@ async def test_temporary_resource_rejects_same_token_other_session_and_changed_c
         session.add(SystemSetting(key=key, value=db_app.app.state.catalog.seal({"synthetic": "new-credential"})))
     result = await invoke(db_app, ctx, "gateway_read_resource", {"uri": uri})
     assert result.is_error
-    page = await invoke(db_app, ctx, "gateway_list_resources", {"uri_prefix": "fixture://secret"})
+    page = await invoke(db_app, ctx, "gateway_search_resources", {"uri_prefix": "fixture://secret"})
     assert not page.is_error and not page.structured_content["items"]
 
 
@@ -228,7 +228,7 @@ async def test_injection_switch_does_not_cache_while_disabled(db_app):
     assert value.structured_content == original["structuredContent"]
     assert not gateway.embedded.items
     assert (await db_app.web.patch("/api/v1/settings", json={key: True})).status_code == 200
-    listed = await invoke(db_app, ctx, "gateway_list_resources", {"uri_prefix": "fixture://switch"})
+    listed = await invoke(db_app, ctx, "gateway_search_resources", {"uri_prefix": "fixture://switch"})
     assert not listed.is_error and listed.structured_content["items"] == []
 
 async def test_revoking_stateless_lease_clears_embedded_cache(db_app):

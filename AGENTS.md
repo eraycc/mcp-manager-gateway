@@ -36,7 +36,7 @@ MMG 是 MCP 网关，不是工具本身。
 
 资源工作流：
 
-1. 使用 `gateway_list_resources` 查找资源、提示词或模板；
+1. 使用 `gateway_search_resources` 查找资源、提示词或模板；
 2. 只使用返回的精确 URI 调用 `gateway_read_resource`；
 3. 读取资源是只读操作，不把它当成业务工具执行入口。
 
