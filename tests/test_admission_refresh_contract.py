@@ -32,7 +32,7 @@ async def agent(app, web):
 @pytest.mark.parametrize("mode", ["lazy", "eager"])
 @pytest.mark.parametrize("entry", ["refresh", "refresh_index"])
 @pytest.mark.parametrize("failure", ["connection", "discovery"])
-async def test_failed_refresh_empties_all_views_and_reports_reason_without_disabling(
+async def test_failed_refresh_retains_views_until_threshold_without_disabling(
     tmp_path, mode, entry, failure,
 ):
     async with console(tmp_path) as (app, web, actor):
@@ -48,6 +48,15 @@ async def test_failed_refresh_empties_all_views_and_reports_reason_without_disab
         else:
             peer.discovery_failure = RuntimeError("tools/list temporarily failed")
         reason = "upstream temporarily offline" if failure == "connection" else "tools/list temporarily failed"
+        for count in (1, 2):
+            with pytest.raises(GatewayError):
+                await getattr(catalog, entry)(row.id)
+            retained = (await web.get("/api/v1/mcps")).json()["items"][0]
+            assert retained["cache_status"] == "ready" and retained["tool_count"] == 1
+            assert retained["startup_failure_count"] == count and retained["cache_stale"]
+            assert reason in retained["cache_error"]
+            page = (await web.get(f"/api/v1/mcps/{row.id}/capabilities")).json()
+            assert page["total"] == 1
         with pytest.raises(GatewayError):
             await getattr(catalog, entry)(row.id)
         assert (await catalog.get(row.id)).mode == mode
@@ -122,13 +131,15 @@ async def test_failure_reason_is_persisted_without_legacy_json_cache(tmp_path):
             await app.state.catalog.refresh_index(row.id)
         app.state.catalog.delete_cache(row)
         item = (await web.get("/api/v1/mcps")).json()["items"][0]
-        assert item["tool_count"] == 0 and item["cache_status"] == "error"
+        assert item["tool_count"] == 1 and item["cache_status"] == "ready"
+        assert item["cache_stale"]
         assert item["cache_error"] == "persistent refresh diagnostic"
         call = await agent(app, web)
         result = await call("gateway_search_mcps", {"query": "*"})
         service = result.structured_content["items"][0]
-        assert service["tools_list"] == []
-        assert service["failure_reason"] == "persistent refresh diagnostic"
+        assert service["tool_count"] == 1
+        assert service["cache_stale"]
+        assert service["cache_error"] == "persistent refresh diagnostic"
 
 
 async def test_late_refresh_failure_cannot_clear_newer_success(tmp_path, monkeypatch):
@@ -183,5 +194,7 @@ async def test_personal_refresh_failure_does_not_invalidate_other_owner(tmp_path
         scopes = [await catalog.index_scope(row, owner) for owner in (actor["id"], "other")]
         own = await catalog.index.list_capabilities(scopes[0], kind="tools")
         other = await catalog.index.list_capabilities(scopes[1], kind="tools")
-        assert own.items == []
+        assert [item["name"] for item in own.items] == ["first"]
+        assert catalog.cached(row, actor["id"])["startup_failure_count"] == 1
+        assert catalog.cached(row, "other")["startup_failure_count"] == 0
         assert [item["name"] for item in other.items] == ["first"]

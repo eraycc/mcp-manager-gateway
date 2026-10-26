@@ -71,7 +71,7 @@ async def test_disabled_refresh_never_connects(tmp_path):
         assert not app.state.runtime.status()
 
 
-async def test_stopped_refresh_failure_empties_catalog_and_records_error(tmp_path, monkeypatch):
+async def test_stopped_refresh_failure_retains_catalog_until_threshold(tmp_path, monkeypatch):
     async with console(tmp_path) as (app, web, _actor):
         @asynccontextmanager
         async def connect(spec):
@@ -88,8 +88,9 @@ async def test_stopped_refresh_failure_empties_catalog_and_records_error(tmp_pat
             await catalog.refresh_index(row.id)
         assert failure.value.code == "stopped"
         item = (await web.get("/api/v1/mcps")).json()["items"][0]
-        assert item["cache_at"] is None
-        assert item["tool_count"] == 0 and item["cache_status"] == "error"
+        assert item["cache_at"] is not None
+        assert item["tool_count"] == 1 and item["cache_status"] == "ready"
+        assert item["startup_failure_count"] == 1 and item["status"] == "stopped"
         assert item["last_refresh_error_code"] == "stopped"
         assert item["last_refresh_failure_at"]
         assert item["last_refresh_error"] == "MCP stopped during refresh"

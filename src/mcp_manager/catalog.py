@@ -3,7 +3,6 @@ import asyncio
 import copy
 import hashlib
 import json
-import logging
 import re
 import time
 from collections import OrderedDict
@@ -19,7 +18,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from .artifact_store import ArtifactStore
-from .catalog_store import CatalogStore
+from .catalog_operations import current_operation, tracked
+from .catalog_store import CatalogStore, scope_key
 from .catalog_types import CatalogScope
 from .credentials import PERSONAL_AUTH_TYPES, catalog_owner, credential_owner
 from .database import ApiToken, McpServer, SystemSetting, User, invalidate_setting_cache, now
@@ -44,6 +44,7 @@ FAILURE_DEFAULTS = {
     "last_refresh_error": None,
     "last_refresh_failure_at": None,
     "failed_gateway_names": [],
+    "cache_stale": False,
 }
 
 
@@ -177,6 +178,7 @@ class Catalog:
             cache_status=cache.get("cache_status"),
             cache_error_code=cache.get("cache_error_code"),
             cache_attempt_at=cache.get("cache_attempt_at"),
+            cache_stale=cache.get("cache_stale", False),
             auto_disabled=cache.get("auto_disabled", False),
             startup_failure_count=cache["startup_failure_count"],
             last_startup_error_code=cache["last_startup_error_code"],
@@ -213,6 +215,8 @@ class Catalog:
     def service_status(self, row, user_id=None):
         if row.mode == "disabled":
             return "stopped"
+        if self.cached_view(row, user_id)["runtime_status"] == "failed":
+            return "failed"
         runtime_user_id = user_id if self.failure_scope(row) == "user" else None
         instances = [
             item for item in self.runtime.status(user_id=runtime_user_id)
@@ -273,8 +277,9 @@ class Catalog:
         self.cache_store.set(key, None)
         self._cache_failures.pop(key, None)
 
-    def save_cache(self, row, value, user_id=None):
-        value = value | {"cache_generation": uuid4().hex}
+    def save_cache(self, row, value, user_id=None, *, content_changed=True):
+        generation = uuid4().hex if content_changed else value.get("cache_generation") or uuid4().hex
+        value = value | {"cache_generation": generation}
         key = self.cache_key(row, user_id)
         try:
             self.cache_store.set(key, {"revision": row.revision, "data": value})
@@ -291,182 +296,142 @@ class Catalog:
             raise error from exc
         self._cache_failures.pop(key, None)
 
-    def cache_failure(self, row, exc, user_id=None):
-        exc = safe_gateway_error(exc, config=self.unseal(row.config))
-        if (
-            self.runtime.versions.get(row.id, row.revision) != row.revision
-            or getattr(exc, "code", "") in {"credential_changed", "revision_changed"}
-        ):
+    async def record_operation_result(self, row, user_id=None, *, error=None, kind="call",
+                                      scope=None, expected_refresh=None):
+        """Persist one final result under the owner lock; retain contracts below the threshold."""
+        from jsonschema import ValidationError
+        from sqlalchemy.orm import load_only
+
+        from .catalog_models import CatalogGeneration, CatalogHead
+
+        if isinstance(error, (asyncio.CancelledError, ValidationError)):
             return
-        code = getattr(exc, "code", "discovery_failed")
+        if isinstance(error, HTTPException) and error.status_code in {401, 403, 404, 409, 422}:
+            return
+        if error is not None:
+            config = await self.credentials.materialize(row, user_id, require=False)
+            error = safe_gateway_error(error, config=config)
+            if error.code == "auth_required" and config.get("auth", {}).get("type") == "oauth":
+                error.args = ("OAuth 授权已失效，请重新授权",)
+            if error.code in {"revision_changed", "permission_revoked", "forbidden", "access_denied",
+                              "lease_expired", "disabled", "shutting_down", "generation_superseded",
+                              "tool_not_found", "invalid_arguments"}:
+                return
+        else:
+            cached = self.cached_view(row, user_id)
+            if (cached["cache_status"] == "ready" and cached["cache_at"]
+                    and cached["startup_failure_count"] == 0 and cached["runtime_status"] == "stopped"
+                    and not cached["cache_error"] and not cached.get("cache_stale")
+                    and not cached["last_startup_error"] and not cached["failed_gateway_names"]
+                    and (kind != "refresh" or not cached["last_refresh_error"])):
+                return
+        async with self.db.locked() as session:
+            current = await session.get(McpServer, row.id, options=[load_only(
+                McpServer.id, McpServer.revision, McpServer.isolation, McpServer.mode)])
+            if not current or current.revision != row.revision or current.mode == "disabled":
+                return
+            actual_scope = await self._index_scope(session, current, catalog_owner(current.isolation, user_id))
+            if scope is not None and actual_scope != scope:
+                return
+            head = await session.get(CatalogHead, scope_key(actual_scope))
+            latest = await session.get(CatalogGeneration, head.refresh_id) if head and head.refresh_id else None
+            if (error is not None and expected_refresh is not None and head
+                    and head.refresh_id != expected_refresh and (not latest or latest.status != "failed")):
+                return
+            value = self.cached(current, user_id)
+            generation = await self.index._current(session, actual_scope)
+            if generation is not None and value["cache_status"] != "ready":
+                value.update(cache_status="ready", cache_at=generation.published_at.isoformat(),
+                             **{key[:-1] + "_count": (generation.counts or {}).get(key, 0)
+                                for key in ("tools", "resources", "prompts", "templates")})
+            warning_keys = {"cache_error": None, "cache_error_code": None, "cache_stale": False}
+            if kind == "refresh":
+                warning_keys.update(last_refresh_error=None, last_refresh_error_code=None,
+                                    last_refresh_failure_at=None)
+            invalidated = False
+            if error is None:
+                value.update(startup_failure_count=0, runtime_status="stopped", failed_gateway_names=[],
+                             last_startup_error=None, last_startup_error_code=None, last_startup_failure_at=None,
+                             **warning_keys)
+                await self.index.set_health(actual_scope, warning_keys, session=session, clear=True)
+            else:
+                count = value["startup_failure_count"] + 1
+                at = now().isoformat()
+                details = {"cache_error": str(error)[:500], "cache_error_code": error.code,
+                           "cache_stale": value["cache_status"] == "ready",
+                           "cache_attempt_at": at}
+                if kind == "refresh":
+                    details.update(last_refresh_error=str(error)[:500], last_refresh_error_code=error.code,
+                                   last_refresh_failure_at=at)
+                value.update(startup_failure_count=count,
+                             runtime_status="failed" if count >= self.startup_failure_threshold else "stopped",
+                             last_startup_error_code=error.code, last_startup_error=str(error)[:500],
+                             last_startup_failure_at=at, **details)
+                if count >= self.startup_failure_threshold or error.code == "cache_write_failed":
+                    details["cache_stale"] = False
+                    head = await session.get(CatalogHead, scope_key(actual_scope))
+                    expected = expected_refresh if expected_refresh is not None else head.refresh_id if head else None
+                    if not await self.index.record_failure(
+                            actual_scope, details, expected_refresh=expected, session=session):
+                        return
+                    invalidated = True
+                    value.update(**{key: [] for key in CAPABILITY_KEYS},
+                                 **{key: 0 for key in ("tool_count", "resource_count", "prompt_count", "template_count")},
+                                 cache_status="error", cache_at=None, cache_stale=False)
+                else:
+                    if generation is not None:
+                        await self.index.set_health(actual_scope, details, session=session)
+                    else:
+                        await self.index.record_failure(actual_scope, details,
+                                                        expected_refresh=head.refresh_id if head else None,
+                                                        session=session)
+                    if value["cache_status"] != "ready":
+                        value.update(cache_status="auth_required" if error.code == "auth_required" else "error")
+            self.save_cache(current, value, user_id, content_changed=invalidated)
+        if error is not None:
+            error.details.update(self.failure_details(row, user_id))
+
+    def invalidate_authorization_cache(self, row, error, user_id=None):
+        """Explicit revocation or account/client changes invalidate the old authorization immediately."""
         value = self.cached(row, user_id)
-        value.update({key: [] for key in CAPABILITY_KEYS})
-        value.update(
-            cache_at=None,
-            cache_status="auth_required" if code == "auth_required" else "error",
-            cache_error_code=code,
-            cache_error=str(exc)[:500],
-            cache_attempt_at=now().isoformat(),
-            failure_scope=self.failure_scope(row),
-        )
-        try:
-            self.save_cache(row, value, user_id)
-        except GatewayError as write_error:
-            if write_error.code != "cache_write_failed":
-                raise
-            logging.getLogger(__name__).warning("%s", write_error)
+        value.update(**{key: [] for key in CAPABILITY_KEYS},
+                     **{key: 0 for key in ("tool_count", "resource_count", "prompt_count", "template_count")},
+                     cache_status="auth_required", cache_at=None, cache_stale=False,
+                     cache_error=str(error), cache_error_code=error.code)
+        self.save_cache(row, value, user_id)
 
     async def record_start_success(self, row, user_id=None):
-        current = await self.get(row.id)
-        if current.revision != row.revision or current.mode == "disabled":
-            raise GatewayError("revision_changed", "MCP configuration changed during startup")
-        value = self.cached(current, user_id)
-        if (
-            value["runtime_status"] == "stopped"
-            and value["startup_failure_count"] == 0
-            and value["last_startup_error"] is None
-            and not value["failed_gateway_names"]
-        ):
-            return value
-        value.update(
-            runtime_status="stopped",
-            startup_failure_count=0,
-            last_startup_error_code=None,
-            last_startup_error=None,
-            last_startup_failure_at=None,
-            failure_scope=self.failure_scope(current),
-            failed_gateway_names=[],
-        )
-        self.save_cache(current, value, user_id)
-        return value
+        await self.record_operation_result(row, user_id)
+        return self.cached(row, user_id)
 
     async def record_start_failure(self, row, exc, user_id=None):
-        config = await self.credentials.materialize(row, user_id, require=False)
-        exc = safe_gateway_error(exc, config=config)
-        code = getattr(exc, "code", "startup_failed")
-        if code in {
-            "credential_changed",
-            "revision_changed",
-            "permission_revoked",
-            "forbidden",
-            "lease_expired",
-            "queue_timeout",
-            "busy",
-            "stopped",
-            "disabled",
-            "shutting_down",
-            "tool_not_found",
-            "downstream_error",
-            "outcome_unknown",
-        }:
-            return exc
-        try:
-            scope = await self.index_scope(row, user_id)
-            expected_refresh = await self.index.refresh_version(scope)
-        except GatewayError as changed:
-            if changed.code in {"revision_changed", "credential_changed", "disabled"}:
-                return exc
-            raise
-        async with self.db.locked() as session:
-            current = await session.get(McpServer, row.id)
-            if not current or current.revision != row.revision or current.mode == "disabled":
-                return exc
-            value = self.cached(current, user_id)
-            count = int(value.get("startup_failure_count", 0)) + 1
-            failed_at = now().isoformat()
-            value.update(
-                runtime_status="failed" if count >= self.startup_failure_threshold else "stopped",
-                startup_failure_count=count,
-                last_startup_error_code=code,
-                last_startup_error=str(exc)[:500],
-                last_startup_failure_at=failed_at,
-                failure_scope=self.failure_scope(current),
-            )
-            if value["cache_status"] != "ready":
-                value.update(
-                    cache_status="error",
-                    cache_at=None,
-                    cache_error_code=code,
-                    cache_error=str(exc)[:500],
-                    cache_attempt_at=failed_at,
-                )
-            if count >= self.startup_failure_threshold:
-                names = set(value.get("failed_gateway_names", []))
-                names.update(alias(current.slug, tool["name"]) for tool in value["tools"])
-                names.update(current.id + "__" + tool["name"] for tool in value["tools"])
-                value.update(
-                    failed_gateway_names=sorted(names),
-                    cache_status="error",
-                    cache_at=None, cache_error_code=code, cache_error=str(exc)[:500],
-                    cache_attempt_at=failed_at,
-                    **{key: [] for key in CAPABILITY_KEYS},
-                    **{key: 0 for key in ("tool_count", "resource_count", "prompt_count", "template_count")},
-                )
-            self.save_cache(current, value, user_id)
-        if count >= self.startup_failure_threshold:
-            try:
-                await self.index.record_failure(scope, {
-                    "cache_error_code": code, "cache_error": str(exc)[:500], "cache_attempt_at": failed_at,
-                }, expected_refresh=expected_refresh)
-            except GatewayError as changed:
-                if changed.code not in {"revision_changed", "credential_changed", "disabled"}:
-                    raise
-        details = self.failure_details(current, user_id)
-        if not isinstance(exc, GatewayError):
-            exc = GatewayError(code, str(exc) or "MCP startup failed")
-        exc.details.update(details)
+        await self.record_operation_result(row, user_id, error=exc, kind="startup")
         exc.startup_failure_recorded = True
         return exc
 
     async def record_refresh_failure(self, row, exc, user_id=None, *, had_ready,
                                      scope=None, expected_refresh=None):
-        expected_refresh = getattr(exc, "catalog_refresh_id", expected_refresh)
         config = await self.credentials.materialize(row, user_id, require=False)
         exc = safe_gateway_error(exc, config=config)
-        code = getattr(exc, "code", "discovery_failed")
-        if (
-            self.runtime.versions.get(row.id, row.revision) != row.revision
-            or code in {"credential_changed", "revision_changed", "permission_revoked", "forbidden",
-                        "lease_expired", "disabled", "shutting_down", "generation_superseded"}
-        ):
-            return exc
-        if code == "auth_required" and config.get("auth", {}).get("type") == "oauth":
-            payload = await self.credentials.load(row.id, credential_owner(row.isolation, user_id))
-            if payload.get("oauth_state", {}).get("status") == "needs_reauth":
-                exc = GatewayError("auth_required", "授权已失效，请重新授权")
-        failed_at = now().isoformat()
-        details = {
-            "cache_error_code": code, "cache_error": str(exc)[:500],
-            "last_refresh_error_code": code, "last_refresh_error": str(exc)[:500],
-            "last_refresh_failure_at": failed_at, "cache_attempt_at": failed_at,
-        }
-        try:
-            scope = scope or await self.index_scope(row, user_id)
-            if not await self.index.record_failure(scope, details, expected_refresh=expected_refresh):
-                return exc
-        except GatewayError as changed:
-            if changed.code in {"revision_changed", "credential_changed", "disabled"}:
-                return exc
-            raise
-        if not getattr(exc, "startup_failure_recorded", False) and not had_ready and code != "auth_required":
-            exc = await self.record_start_failure(row, exc, user_id)
-        value = self.cached(row, user_id)
-        value.update(
-            **{key: [] for key in CAPABILITY_KEYS},
-            **{key: 0 for key in ("tool_count", "resource_count", "prompt_count", "template_count")},
-            **details,
-            cache_status="auth_required" if code == "auth_required" else "error",
-            cache_at=None, runtime_status="failed",
-        )
-        self.save_cache(row, value, user_id)
-        if isinstance(exc, GatewayError):
-            exc.details.update(self.failure_details(row, user_id), **details)
+        outcome = current_operation.get()
+        if outcome is not None:
+            outcome.refresh_version = getattr(exc, "catalog_refresh_id", expected_refresh)
+        else:
+            await self.record_operation_result(row, user_id, error=exc, kind="refresh",
+                                               scope=scope, expected_refresh=expected_refresh)
         return exc
+
+    async def retain_renewed_catalog(self, session, before, after):
+        await self.index.rebind_renewed_credential(session, before, after)
+        outcome = current_operation.get()
+        if outcome is not None and outcome.scope == before:
+            outcome.scope = after
 
     def mark_refreshing(self, row, user_id=None):
         if row.mode != "disabled" and self.runtime.versions.get(row.id, row.revision) == row.revision:
             value = self.cached(row, user_id)
-            value.update(cache_status="refreshing", cache_attempt_at=now().isoformat())
+            value.update(cache_status="ready" if value["cache_status"] == "ready" else "refreshing",
+                         cache_attempt_at=now().isoformat())
             self.save_cache(row, value, user_id)
 
     async def connection_starting(self, spec):
@@ -485,7 +450,7 @@ class Catalog:
             if missing.status_code == 404:
                 return
             raise
-        if row.revision == spec.revision:
+        if row.revision == spec.revision and current_operation.get() is None:
             user_id = spec.credential_owner if spec.credential_owner not in {"", "service"} else None
             exc = safe_gateway_error(exc, config=spec.config)
             failure = await self.record_start_failure(row, exc, user_id)
@@ -543,8 +508,6 @@ class Catalog:
         row = await self.get(spec.id)
         if row.revision != spec.revision:
             raise GatewayError("revision_changed", "MCP configuration changed during startup")
-        user_id = spec.credential_owner if spec.credential_owner not in {"", "service"} else None
-        await self.record_start_success(row, user_id)
 
     async def refresh_after_change(self, row, user_id=None, authorize=None):
         if row.mode == "disabled":
@@ -633,6 +596,9 @@ class Catalog:
                 if authorize:
                     await authorize()
                 prepared = await self.spec(row, user_id, with_scope=True)
+                outcome = current_operation.get()
+                if outcome is not None and outcome.row is not None and outcome.row.id == row.id:
+                    outcome.scope = prepared[1]
                 if authorize:
                     await authorize()
                 return prepared
@@ -947,6 +913,7 @@ class Catalog:
                 raise GatewayError("revision_changed", "MCP configuration changed")
             return await self._index_scope(session, current, catalog_owner(current.isolation, user_id))
 
+    @tracked("refresh")
     async def refresh_index(self, server_id, user_id=None, *, authorize=None):
         if authorize:
             await authorize()
@@ -995,6 +962,7 @@ class Catalog:
                 if lease:
                     await self.runtime.release(lease.id)
 
+    @tracked("refresh")
     async def refresh(self, server_id, user_id=None, *, authorize=None):
         if authorize:
             await authorize()
@@ -1019,6 +987,7 @@ class Catalog:
             if lease:
                 await self.runtime.release(lease.id)
 
+    @tracked("refresh")
     async def warm(self, server_id, user_id=None, *, explicit=False, authorize=None, expected_revision=None):
         row, lease, spec, success = None, None, None, False
         scope, expected_refresh = None, None
@@ -1036,6 +1005,7 @@ class Catalog:
             result = await self.runtime.perform(spec, lease.id, "discover", authorize=authorize, business=False)
             await self.store_discovery(row, result, user_id, spec=spec)
             success = True
+            return result
         except Exception as exc:
             exc = safe_gateway_error(exc, config=spec.config if spec else self.unseal(row.config) if row else {})
             if row:
@@ -1108,6 +1078,7 @@ class Catalog:
             validator = cached[0]
         await asyncio.to_thread(validate_local, validator, arguments)
 
+    @tracked("call")
     async def call(self, row, lease, name, arguments, *, user=None, token=None, authorize=None, source="gateway",
                    response_processor=None):
         if authorize:
@@ -1150,6 +1121,12 @@ class Catalog:
             finally:
                 tool_context.reset(binding)
             event.update(status="tool_error" if result.get("isError") else "success", result=result)
+            if result.get("isError"):
+                outcome = current_operation.get()
+                if outcome is not None:
+                    reason = next((block.get("text", "") for block in result.get("content", [])
+                                   if block.get("type") == "text"), "Downstream tool reported an error")
+                    outcome.error = GatewayError("tool_error", str(reason)[:500])
             response = result
         except asyncio.CancelledError:
             event.update(status="cancelled", error="Caller cancelled; dispatched side effects may have occurred")

@@ -687,6 +687,13 @@ class Gateway:
         )
 
     async def execute_exact(self, request, user, token, name, arguments, *, discovery=False):
+        from .catalog_operations import operation
+
+        async with operation(self.app.state.catalog, kind="call") as health:
+            return await self._execute_exact(request, user, token, name, arguments,
+                                             discovery=discovery, health=health)
+
+    async def _execute_exact(self, request, user, token, name, arguments, *, discovery=False, health):
         catalog = self.app.state.catalog
         identity = owner(user, token, request)
 
@@ -708,6 +715,7 @@ class Gateway:
         if ref:
             expected_scope = await catalog.index.get_generation_scope(ref.generation)
             row = await catalog.get(expected_scope.server_id)
+            await health.bind(row, user.id if user else None)
             original_name = ref.original_name
             if row.auth_type == "oauth":
                 # Renew before freezing the execution scope, never after dispatch.
@@ -733,6 +741,7 @@ class Gateway:
             row, original_name = None, None
             for candidate in candidates:
                 if candidate.mode != "disabled" and candidate.auth_type == "oauth":
+                    await health.bind(await catalog.get(candidate.id), user.id if user else None)
                     _spec, scope = await catalog.prepare_scope(
                         await catalog.get(candidate.id), user.id if user else None,
                         authorize=lambda candidate=candidate: authorize_scope(candidate),
@@ -769,6 +778,7 @@ class Gateway:
             if row is None:
                 raise GatewayError("tool_not_found", "Tool not found in authorized cache; ask an administrator to refresh")
             row = await catalog.get(row.id)
+        await health.bind(row, user.id if user else None)
 
         async def authorize():
             await authorize_scope(row, expected_scope or call_scope)
@@ -798,6 +808,12 @@ class Gateway:
         return result
 
     async def resource_value(self, request, user, token, rows, uri, arguments=None):
+        from .catalog_operations import operation
+
+        async with operation(self.app.state.catalog, kind="call") as health:
+            return await self._resource_value(request, user, token, rows, uri, arguments, health=health)
+
+    async def _resource_value(self, request, user, token, rows, uri, arguments=None, *, health):
         candidate = next((r for r in rows if uri.startswith("mcp-manager://" + r.id + "/")), None)
         if not candidate:
             raise ValueError("Resource not authorized")
@@ -808,9 +824,11 @@ class Gateway:
         if row.revision != candidate.revision:
             raise GatewayError("permission_revoked", "MCP configuration changed")
         await self.ensure(request, row)
+        await health.bind(row, user.id if user else None)
         prefix = "mcp-manager://" + row.id + "/"
         original = uri[len(prefix):]
         if original.startswith("_embedded/"):
+            health.discard = True
             if not await self.embedded_injection_enabled():
                 raise GatewayError("resource_not_found", "Temporary resource injection is disabled")
             if arguments:
@@ -977,6 +995,12 @@ class Gateway:
         return await self.native_page(ctx, params, kind="prompts")
 
     async def get_prompt(self, ctx, params):
+        from .catalog_operations import operation
+
+        async with operation(self.app.state.catalog, kind="call") as health:
+            return await self._get_prompt(ctx, params, health=health)
+
+    async def _get_prompt(self, ctx, params, *, health):
         request = ctx.request
         user, token, allowed = await self.principal(request)
         catalog = self.app.state.catalog
@@ -1010,6 +1034,7 @@ class Gateway:
             row = await catalog.get(candidate.id)
         from .prompt_resources import validate_prompt_arguments
 
+        await health.bind(row, user.id if user else None)
         validate_prompt_arguments(definition, params.arguments or {})
         async def authorize():
             fresh_user, fresh_token, current_allowed = await self.principal(request, target_id=row.id)

@@ -211,7 +211,7 @@ async def test_index_scope_does_not_load_a_sealed_full_configuration(db_app):
         event.remove(db_app.db.engine.sync_engine, "before_cursor_execute", trace)
 
 
-async def test_failed_new_generation_cannot_return_an_old_page(db_app, monkeypatch):
+async def test_failed_staging_generation_preserves_last_successful_page(db_app, monkeypatch):
     import asyncio
 
     catalog = db_app.app.state.catalog
@@ -233,8 +233,8 @@ async def test_failed_new_generation_cannot_return_an_old_page(db_app, monkeypat
     finally:
         release.set()
     response = await asyncio.wait_for(task, 5)
-    assert response.status_code == 502
-    assert response.json()["code"] == "revision_changed"
+    assert response.status_code == 200
+    assert response.json()["total"] == 2
 
 
 async def test_legacy_tools_budget_is_checked_before_copying_full_schemas(db_app, monkeypatch):

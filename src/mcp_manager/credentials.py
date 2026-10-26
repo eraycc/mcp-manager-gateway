@@ -160,9 +160,11 @@ class CredentialStore:
         value: dict,
         *,
         client: dict | None = None,
+        renewal: bool = False,
     ) -> str:
         """Save an OAuth token under the owner selected by row isolation."""
         owner = credential_owner(row.isolation, user_id)
+        before = await self.catalog._index_scope(session, row, owner) if renewal else None
         payload = await self._load(session, row.id, owner)
         payload["oauth_token"] = copy.deepcopy(value)
         if client is not None:
@@ -170,6 +172,10 @@ class CredentialStore:
         payload["oauth_epoch"] = payload.get("oauth_epoch", 0) + 1
         payload.pop("oauth_state", None)
         await self.write(session, row.id, owner, payload)
+        if renewal:
+            await session.flush()
+            after = await self.catalog._index_scope(session, row, owner)
+            await self.catalog.retain_renewed_catalog(session, before, after)
         return owner
 
     async def configuration_summaries(self, rows, user_id: str) -> dict:

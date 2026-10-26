@@ -27,6 +27,9 @@ async def permitted(request, server_id, user):
 def lightweight_status(cat, row, user_id):
     if row.mode == "disabled":
         return "stopped"
+    cache = cat.cached_view(row, user_id)
+    if cache["runtime_status"] == "failed":
+        return "failed"
     instances = [value for value in cat.runtime.status(user_id=user_id if row.isolation == "user" else None)
                  if value["server_id"] == row.id]
     if any(value["in_flight"] for value in instances):
