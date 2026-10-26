@@ -626,9 +626,9 @@ class Catalog:
                     session, server, catalog_owner(server.isolation, user_id))
         return build(config)
 
-    async def prepare_scope(self, row, user_id=None, *, authorize=None):
+    async def prepare_scope(self, row, user_id=None, *, authorize=None, retry=True):
         """Renew credentials, then atomically materialize the connection and catalog scope."""
-        for attempt in range(2):
+        for attempt in range(2 if retry else 1):
             try:
                 if authorize:
                     await authorize()
@@ -637,7 +637,7 @@ class Catalog:
                     await authorize()
                 return prepared
             except GatewayError as exc:
-                if exc.code != "credential_changed" or attempt:
+                if exc.code != "credential_changed" or attempt or not retry:
                     raise
                 # Preparation alone is retryable; no downstream business call has begun.
 
@@ -951,43 +951,49 @@ class Catalog:
         if authorize:
             await authorize()
         row = await self.get(server_id)
-        lease, spec, scope, expected_refresh = None, None, None, None
         had_ready = self.cached(row, user_id)["cache_status"] == "ready"
-        try:
-            spec, scope = await self.prepare_scope(row, user_id, authorize=authorize)
-            expected_refresh = await self.index.refresh_version(scope)
-            lease = self.runtime.create_lease(user_id or "system", "maintenance", kind="maintenance")
-            result = await self.runtime.perform(
-                spec, lease.id, "ingest_catalog", self.index, scope, authorize,
-                authorize=authorize, business=False,
-            )
-            if authorize:
-                await authorize()
-            current = await self.get(server_id)
-            if await self.index_scope(current, user_id) != scope:
-                raise GatewayError("credential_changed", "MCP scope changed while publishing capabilities")
-            cached = self.cached(current, user_id)
-            cached.update(
-                **{key: [] for key in CAPABILITY_KEYS},
-                **{key: result[key] for key in ("tool_count", "resource_count", "prompt_count", "template_count")},
-                cache_status="ready", cache_at=now().isoformat(), cache_attempt_at=now().isoformat(),
-                cache_error=None, cache_error_code=None, runtime_status="stopped",
-                startup_failure_count=0, failed_gateway_names=[], last_startup_error_code=None, last_startup_error=None,
-                last_startup_failure_at=None, last_refresh_error_code=None,
-                last_refresh_error=None, last_refresh_failure_at=None,
-            )
-            expected_refresh = await self.index.refresh_version(scope)
-            self.save_cache(current, cached, user_id)
-            return result
-        except Exception as exc:  # noqa: BLE001 - normalize third-party transport errors
-            exc = safe_gateway_error(exc, config=spec.config if spec else self.unseal(row.config))
-            failure = await self.record_refresh_failure(
-                row, exc, user_id, had_ready=had_ready, scope=scope, expected_refresh=expected_refresh,
-            )
-            raise failure
-        finally:
-            if lease:
-                await self.runtime.release(lease.id)
+        for attempt in range(2):
+            lease, spec, scope, expected_refresh = None, None, None, None
+            try:
+                spec, scope = await self.prepare_scope(row, user_id, authorize=authorize, retry=False)
+                expected_refresh = await self.index.refresh_version(scope)
+                lease = self.runtime.create_lease(user_id or "system", "maintenance", kind="maintenance")
+                result = await self.runtime.perform(
+                    spec, lease.id, "ingest_catalog", self.index, scope, authorize,
+                    authorize=authorize, business=False,
+                )
+                if authorize:
+                    await authorize()
+                current = await self.get(server_id)
+                if await self.index_scope(current, user_id) != scope:
+                    raise GatewayError("credential_changed", "MCP scope changed while publishing capabilities")
+                cached = self.cached(current, user_id)
+                cached.update(
+                    **{key: [] for key in CAPABILITY_KEYS},
+                    **{key: result[key] for key in ("tool_count", "resource_count", "prompt_count", "template_count")},
+                    cache_status="ready", cache_at=now().isoformat(), cache_attempt_at=now().isoformat(),
+                    cache_error=None, cache_error_code=None, runtime_status="stopped",
+                    startup_failure_count=0, failed_gateway_names=[], last_startup_error_code=None, last_startup_error=None,
+                    last_startup_failure_at=None, last_refresh_error_code=None,
+                    last_refresh_error=None, last_refresh_failure_at=None,
+                )
+                expected_refresh = await self.index.refresh_version(scope)
+                self.save_cache(current, cached, user_id)
+                return result
+            except Exception as exc:  # noqa: BLE001 - normalize third-party transport errors
+                config = spec.config if spec else self.unseal(row.config)
+                exc = safe_gateway_error(exc, config=config)
+                if (exc.code == "credential_changed" and attempt == 0
+                        and config.get("auth", {}).get("type") == "oauth"):
+                    # OAuth discovery is read-only; discard the stale snapshot and prepare anew.
+                    continue
+                failure = await self.record_refresh_failure(
+                    row, exc, user_id, had_ready=had_ready, scope=scope, expected_refresh=expected_refresh,
+                )
+                raise failure
+            finally:
+                if lease:
+                    await self.runtime.release(lease.id)
 
     async def refresh(self, server_id, user_id=None, *, authorize=None):
         if authorize:
