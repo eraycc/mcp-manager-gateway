@@ -49,7 +49,7 @@ async def test_failed_create_preserves_mode_and_records_first_failure(tmp_path, 
         assert response.status_code == 200
         saved = response.json()
         assert saved["mode"] == "lazy"
-        assert saved["status"] == "failed"
+        assert saved["status"] == "stopped"
         assert saved["startup_failure_count"] == 1
         assert saved["cache_status"] == "error"
         assert saved["tool_count"] == 0

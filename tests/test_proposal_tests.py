@@ -178,9 +178,12 @@ async def test_batch_test_reports_incremental_results_and_can_be_cancelled(
     cancel_a = await submit("Cancel A", "wait-a")
     cancel_b = await submit("Cancel B", "wait-b")
     entered = asyncio.Event()
+    started = set()
 
     async def waiting(spec, lease_id):
-        entered.set()
+        started.add(spec.config["command"])
+        if len(started) == 2:
+            entered.set()
         await asyncio.Event().wait()
 
     monkeypatch.setattr(app.state.runtime, "discover", waiting)

@@ -308,7 +308,14 @@ class CatalogStore:
     async def publish(self, identity, *, expected_scope):
         # Freeze staging before the bounded streaming digest pass, outside the final publish transaction.
         async with self.db.locked() as session:
-            generation, _, _ = await self._staging(session, identity)
+            generation, head, _ = await self._staging(session, identity)
+            errors = (generation.details or {}).get("capability_errors") or []
+            if errors and head.generation_id:
+                previous = await session.get(CatalogGeneration, head.generation_id)
+                lost = [item.get("capability") for item in errors if isinstance(item, dict)
+                        and (previous.counts or {}).get(item.get("capability"), 0)] if previous else []
+                if previous and generation_scope(previous) == expected_scope and lost:
+                    raise GatewayError("discovery_failed", "Capability refresh failed for: " + ", ".join(lost))
             if generation_scope(generation) != expected_scope:
                 raise GatewayError("credential_changed", "Catalog refresh does not match the current scope")
             generation.status = "publishing"
@@ -479,10 +486,10 @@ class CatalogStore:
             }
             failure = (row.status == "error" and row.revision == scope.revision
                        and row.credential_generation == scope.credential_generation)
-            if failure:
+            if ready or failure:
                 item.update({key: value for key, value in (row.details or {}).items() if key in {
                     "cache_error", "cache_error_code", "last_refresh_error", "last_refresh_error_code",
-                    "last_refresh_failure_at", "cache_attempt_at",
+                    "last_refresh_failure_at", "cache_attempt_at", "cache_stale",
                 }})
             if preview:
                 details = (row.details or {}) if ready else {}
@@ -623,29 +630,31 @@ class CatalogStore:
             head = await session.get(CatalogHead, scope_key(scope))
             return head.refresh_id if head else None
 
-    async def record_failure(self, scope, details, *, expected_refresh):
+    async def record_failure(self, scope, details, *, expected_refresh, session=None):
         """Invalidate only this scope; a late failure cannot replace newer success."""
-        async with self.db.locked() as session:
-            await self._validate_scope(session, scope)
-            key = scope_key(scope)
-            head = await session.get(CatalogHead, key)
-            failed = await session.get(CatalogGeneration, head.refresh_id) if head and head.refresh_id else None
-            if (head and head.refresh_id != expected_refresh
-                    and (head.status != "error" or not failed or failed.status != "failed")):
-                return False
-            if failed is None or failed.status != "failed" or generation_scope(failed) != scope:
-                failed = CatalogGeneration(
-                    scope_key=key, server_id=scope.server_id, owner=scope.owner, revision=scope.revision,
-                    credential_generation=scope.credential_generation, status="failed", digest="", counts={},
-                )
-                session.add(failed)
-                await session.flush()
-            failed.details = dict(details)
-            if head is None:
-                head = CatalogHead(scope_key=key, server_id=scope.server_id, owner=scope.owner)
-                session.add(head)
-            head.status, head.generation_id, head.refresh_id = "error", failed.id, failed.id
-            return True
+        if session is None:
+            async with self.db.locked() as current:
+                return await self.record_failure(scope, details, expected_refresh=expected_refresh, session=current)
+        await self._validate_scope(session, scope)
+        key = scope_key(scope)
+        head = await session.get(CatalogHead, key)
+        failed = await session.get(CatalogGeneration, head.refresh_id) if head and head.refresh_id else None
+        if (head and head.refresh_id != expected_refresh
+                and (not failed or failed.status != "failed" or generation_scope(failed) != scope)):
+            return False
+        if failed is None or failed.status != "failed" or generation_scope(failed) != scope:
+            failed = CatalogGeneration(
+                scope_key=key, server_id=scope.server_id, owner=scope.owner, revision=scope.revision,
+                credential_generation=scope.credential_generation, status="failed", digest="", counts={},
+            )
+            session.add(failed)
+            await session.flush()
+        failed.details = dict(details)
+        if head is None:
+            head = CatalogHead(scope_key=key, server_id=scope.server_id, owner=scope.owner)
+            session.add(head)
+        head.status, head.generation_id, head.refresh_id = "error", failed.id, failed.id
+        return True
 
     async def fail_refresh(self, identity):
         async with self.db.locked() as session:
@@ -655,4 +664,28 @@ class CatalogStore:
             generation.status = "failed"
             head = await session.get(CatalogHead, generation.scope_key)
             if head and head.refresh_id == identity:
-                head.status = "error"
+                previous = await session.get(CatalogGeneration, head.generation_id) if head.generation_id else None
+                head.status = "ready" if previous and previous.status == "ready" else "error"
+
+    async def set_health(self, scope, details, *, session, clear=False):
+        generation = await self._current(session, scope)
+        if generation is None:
+            return False
+        values = dict(generation.details or {})
+        if clear:
+            for key in details:
+                values.pop(key, None)
+        else:
+            values.update(details)
+        generation.details = values
+        return True
+
+    async def rebind_renewed_credential(self, session, before, after):
+        """Carry only this grant's last good contracts across renewal, never across accounts."""
+        if (before.server_id, before.owner, before.revision) != (after.server_id, after.owner, after.revision):
+            raise GatewayError("credential_changed", "Cannot transfer a catalog between credential owners")
+        head = await session.get(CatalogHead, scope_key(before))
+        generation = await session.get(CatalogGeneration, head.generation_id) if head and head.generation_id else None
+        if (head and head.status == "ready" and generation and generation.status == "ready"
+                and generation_scope(generation) == before):
+            generation.credential_generation = after.credential_generation

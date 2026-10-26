@@ -140,7 +140,7 @@ async def test_refresh_rejects_invalid_scope_before_connecting(tmp_path, case):
         assert current.mode == ("disabled" if case == "disabled" else "lazy")
 
 
-async def test_refresh_failure_empties_only_own_catalog_and_remains_retryable(tmp_path):
+async def test_first_refresh_failure_retains_own_catalog_and_remains_retryable(tmp_path):
     async with refresh_console(tmp_path) as values:
         app, _admin, client, actor, reader, row, control = values
         await app.state.catalog.refresh_index(row.id, actor["id"])
@@ -149,12 +149,14 @@ async def test_refresh_failure_empties_only_own_catalog_and_remains_retryable(tm
         response = await refresh(client, row)
         assert response.status_code >= 400
         own = (await client.get(f"/api/v1/mcps/{row.id}/capabilities?kind=tools")).json()
-        assert own["items"] == []
+        assert [item["name"] for item in own["items"]] == ["read"]
+        assert app.state.catalog.cached(row, reader["id"])["startup_failure_count"] == 1
         status = (await client.get(f"/api/v1/mcps/{row.id}/credentials/status")).json()
         assert status["refresh_allowed"] is True
         own_scope = await app.state.catalog.index_scope(row, reader["id"])
         own_summary = (await app.state.catalog.index.get_summaries([own_scope]))[row.id]
-        assert own_summary["cache_status"] == "error" and own_summary["tool_count"] == 0
+        assert own_summary["cache_status"] == "ready" and own_summary["tool_count"] == 1
+        assert own_summary["cache_stale"]
         assert "Downstream unavailable" in own_summary["cache_error"]
         other = await app.state.catalog.index.get_summary(await app.state.catalog.index_scope(row, actor["id"]))
         assert other["status"] == "ready" and other["tool_count"] == 1

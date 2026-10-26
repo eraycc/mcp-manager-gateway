@@ -180,32 +180,26 @@ class OAuth:
             if (not server or server.revision != row.revision or payload.get("oauth_token") != expected
                     or epoch is not None and payload.get("oauth_epoch", 0) != epoch):
                 return False
+            before = await self.catalog._index_scope(
+                session, server, owner if row.isolation == "user" else "service")
             payload["oauth_epoch"] = payload.get("oauth_epoch", 0) + 1
             payload["oauth_state"] = {"status": "needs_reauth", "reason": reason, "at": time.time()}
             await self.credential_store.write(session, row.id, owner, payload)
             self.catalog.runtime.credential_versions[(row.id, owner)] = "oauth-needs-reauth"
-            scope = owner if row.isolation == "user" else None
-            self.catalog.cache_failure(row, GatewayError("auth_required", "授权已失效，请点击重新授权以继续使用"), scope)
-            if reason in {"token_expired", "refresh_failed"}:
-                from .database import now
-
-                cached = self.catalog.cached(row, scope)
-                cached.update(last_refresh_error="授权已失效，请重新授权", last_refresh_error_code="auth_required",
-                              last_refresh_failure_at=now().isoformat())
-                self.catalog.save_cache(row, cached, scope)
             await session.flush()
-            failure_scope = await self.catalog._index_scope(session, server, owner if row.isolation == "user" else "service")
-        await self.record_reauth_index(failure_scope)
+            after = await self.catalog._index_scope(
+                session, server, owner if row.isolation == "user" else "service")
+            await self.catalog.retain_renewed_catalog(session, before, after)
         return True
 
     async def record_reauth_index(self, scope):
         try:
-            expected = await self.catalog.index.refresh_version(scope)
-            await self.catalog.index.record_failure(scope, {
-                "cache_error_code": "auth_required", "cache_error": "授权已失效，请重新授权",
-            }, expected_refresh=expected)
+            await self.catalog.index.record_failure(
+                scope, {"cache_error": "OAuth authorization changed; authorize again",
+                        "cache_error_code": "auth_required"},
+                expected_refresh=await self.catalog.index.refresh_version(scope))
         except GatewayError as exc:
-            if exc.code not in {"credential_changed", "revision_changed", "disabled", "generation_superseded"}:
+            if exc.code not in {"disabled", "revision_changed", "credential_changed"}:
                 raise
 
     async def mark_reauth_spec(self, spec):
@@ -288,7 +282,8 @@ class OAuth:
                         or self.resource(server) != resource_binding or self.catalog.config.public_url != callback_binding):
                     raise GatewayError("auth_required", "OAuth authorization changed during refresh")
                 await self.credential_store.save_oauth_token(
-                    session, server, user_id, refreshed, client=self.client_binding(auth, effective, resource_binding))
+                    session, server, user_id, refreshed, client=self.client_binding(auth, effective, resource_binding),
+                    renewal=True)
                 epoch += 1
                 self.catalog.runtime.credential_versions[(row.id, owner)] = None
             self.refresh_serials[key] = self.refresh_serials.get(key, 0) + 1
@@ -455,7 +450,7 @@ class OAuth:
                         item["oauth_state"] = {"status": "needs_reauth", "reason": reason, "at": time.time()}
                         await self.credential_store.write(session, row.id, owner, item)
                         self.catalog.runtime.credential_versions[(row.id, owner)] = "oauth-registration-changed"
-                        self.catalog.cache_failure(row, GatewayError("auth_required", "OAuth 客户端注册已变更，请重新授权"),
+                        self.catalog.invalidate_authorization_cache(row, GatewayError("auth_required", "OAuth 客户端注册已变更，请重新授权"),
                                                    owner if row.isolation == "user" else None)
                         invalidated.add(owner)
                     current_payload = await self.credential_store.load(row.id, config_owner, session=session)
@@ -890,7 +885,7 @@ async def disconnect(server_id: str, request: Request, user=USER):
         if legacy:
             await session.delete(legacy)
     await app.runtime.invalidate_credential(server_id, owner)
-    app.catalog.cache_failure(
+    app.catalog.invalidate_authorization_cache(
         row,
         GatewayError(
             "auth_required",
@@ -898,6 +893,7 @@ async def disconnect(server_id: str, request: Request, user=USER):
         ),
         user.id if row.isolation == "user" else None,
     )
+    await app.oauth.record_reauth_index(await app.catalog.index_scope(row, user.id))
     return {"ok": True}
 
 

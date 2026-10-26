@@ -307,6 +307,7 @@ class Discovery:
                 "failure_reason": reason,
                 "cache_error": diagnostic.get("cache_error") or cache["cache_error"],
                 "cache_error_code": diagnostic.get("cache_error_code") or cache["cache_error_code"],
+                "cache_stale": diagnostic.get("cache_stale", cache["cache_stale"]),
                 "last_refresh_error": diagnostic.get("last_refresh_error") or cache["last_refresh_error"],
                 "last_refresh_error_code": diagnostic.get("last_refresh_error_code") or cache["last_refresh_error_code"],
                 "last_refresh_failure_at": diagnostic.get("last_refresh_failure_at") or cache["last_refresh_failure_at"],

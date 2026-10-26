@@ -10,7 +10,7 @@ from test_discovery_failure_policy import Upstream
 from mcp_manager.runtime import GatewayError
 
 
-async def test_refresh_start_failures_clear_tools_immediately_and_keep_policy(tmp_path):
+async def test_refresh_start_failures_retain_tools_until_threshold_and_keep_policy(tmp_path):
     async with console(tmp_path) as (app, _web, actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
@@ -25,9 +25,9 @@ async def test_refresh_start_failures_clear_tools_immediately_and_keep_policy(tm
             current = await app.state.catalog.get(row.id)
             public = app.state.catalog.public(current, user_id=actor["id"])
             assert current.mode == "lazy"
-            assert public["status"] == "failed"
+            assert public["status"] == "stopped"
             assert public["startup_failure_count"] == expected_count
-            assert app.state.catalog.cached(current)["tools"] == []
+            assert [tool["name"] for tool in await catalog_tools(app, current)] == ["first"]
             assert caught.value.details["startup_failure_count"] == expected_count
 
         with pytest.raises(GatewayError) as caught:
@@ -74,7 +74,7 @@ async def test_successful_start_clears_failure_count_without_implicit_discovery(
         )["startup_failure_count"] == 0
 
 
-async def test_refresh_discovery_failure_invalidates_ready_cache_and_status(tmp_path):
+async def test_refresh_discovery_failure_preserves_ready_cache_with_warning(tmp_path):
     async with console(tmp_path) as (app, _web, actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
@@ -87,11 +87,11 @@ async def test_refresh_discovery_failure_invalidates_ready_cache_and_status(tmp_
         current = await app.state.catalog.get(row.id)
         cache = app.state.catalog.cached(current)
         public = app.state.catalog.public(current, user_id=actor["id"])
-        assert cache["cache_status"] == "error"
-        assert await catalog_tools(app, current) == []
+        assert cache["cache_status"] == "ready" and cache["cache_stale"]
+        assert [tool["name"] for tool in await catalog_tools(app, current)] == ["first"]
         assert cache["last_refresh_error"] == "tools/list failed"
-        assert public["status"] == "failed"
-        assert public["startup_failure_count"] == 0
+        assert public["status"] == "stopped"
+        assert public["startup_failure_count"] == 1
 
 
 async def test_first_discovery_failure_without_ready_cache_counts_as_start_failure(tmp_path):
@@ -110,11 +110,11 @@ async def test_first_discovery_failure_without_ready_cache_counts_as_start_failu
         public = app.state.catalog.public(current, user_id=actor["id"])
         assert current.mode == "lazy"
         assert public["startup_failure_count"] == 1
-        assert public["status"] == "failed"
+        assert public["status"] == "stopped"
         assert app.state.catalog.cached(current)["tools"] == []
 
 
-async def test_ready_empty_cache_is_marked_failed_on_refresh_failure(tmp_path):
+async def test_ready_empty_cache_is_preserved_on_first_refresh_failure(tmp_path):
     async with console(tmp_path) as (app, _web, actor):
         peer = Upstream()
         app.state.runtime.connector = peer.connect
@@ -128,12 +128,12 @@ async def test_ready_empty_cache_is_marked_failed_on_refresh_failure(tmp_path):
         with pytest.raises(GatewayError, match="empty tools/list failed"):
             await app.state.catalog.refresh(row.id)
         cache = app.state.catalog.cached(await app.state.catalog.get(row.id))
-        assert cache["cache_status"] == "error"
+        assert cache["cache_status"] == "ready" and cache["cache_stale"]
         assert cache["tools"] == []
         assert cache["last_refresh_error"] == "empty tools/list failed"
         assert app.state.catalog.public(
             row, user_id=actor["id"]
-        )["startup_failure_count"] == 0
+        )["startup_failure_count"] == 1
 
 
 async def test_status_filter_and_failed_agent_summary(tmp_path):
@@ -148,8 +148,9 @@ async def test_status_filter_and_failed_agent_summary(tmp_path):
              "config": {"command": "fake"}}
         )
         peer.discovery_failure = RuntimeError("connection refused")
-        with pytest.raises(GatewayError):
-            await app.state.catalog.refresh_index(failed.id)
+        for _ in range(3):
+            with pytest.raises(GatewayError):
+                await app.state.catalog.refresh_index(failed.id)
 
         listing = (await web.get("/api/v1/mcps", params={"status": "failed"})).json()
         assert [item["id"] for item in listing["items"]] == [failed.id]
@@ -172,7 +173,7 @@ async def test_status_filter_and_failed_agent_summary(tmp_path):
         assert [item["id"] for item in body["items"]] == [failed.id]
         summary = body["items"][0]
         assert summary["status"] == "failed"
-        assert summary["startup_failure_count"] == 0
+        assert summary["startup_failure_count"] == 3
         assert summary["failure_reason"] == "connection refused"
         assert summary["failure_scope"] == "global"
         assert summary["tools_list"] == []
@@ -225,7 +226,7 @@ async def test_personal_start_failure_counter_is_user_scoped(tmp_path):
                     },
                 },
             },
-            user_id=actor["id"],
+            user_id=actor["id"], discover=False,
         )
         await app.state.catalog.record_start_failure(
             row,
