@@ -821,7 +821,7 @@ async def authorization_callback(request, state, code, error, iss, user):
     await app.oauth.audit("oauth.authorized", user.id, row.id, result="success")
     if row.mode != "disabled":
         try:
-            await app.catalog.refresh(
+            await app.catalog.refresh_index(
                 row.id,
                 user.id,
                 authorize=oauth_authorizer(

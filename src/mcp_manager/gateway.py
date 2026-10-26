@@ -718,11 +718,12 @@ class Gateway:
                     expected_scope = prepared_scope
                     await catalog.ensure_ready(
                         row, user.id if user else None,
-                        authorize=lambda: authorize_scope(row, prepared_scope),
+                        authorize=lambda: authorize_scope(row),
                     )
                     fresh_ref = await self.resolve_authorized_tool(request, name)
                     if fresh_ref is None:
                         raise GatewayError("tool_not_found", "Tool is absent from the refreshed MCP directory")
+                    expected_scope = await catalog.index.get_generation_scope(fresh_ref.generation)
                     original_name = fresh_ref.original_name
         else:
             # Compatibility only: old aliases select candidate service metadata, never all schemas.
@@ -744,8 +745,9 @@ class Gateway:
                 if (summary and summary["cache_status"] != "ready") or (
                     not summary and catalog.cached_view(candidate, user.id if user else None)["cache_status"] != "ready"
                 ):
-                    async def authorize_recovery(candidate=candidate, scope=scope):
-                        await authorize_scope(candidate, scope)
+                    async def authorize_recovery(candidate=candidate):
+                        # Read-only discovery validates its own fresh credential scope.
+                        await authorize_scope(candidate)
 
                     await authorize_recovery()
                     await catalog.ensure_ready(
