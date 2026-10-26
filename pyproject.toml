@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-manager-gateway"
-version = "1.5.1"
+version = "1.5.2"
 requires-python = ">=3.12"
 description = "Multi-user MCP management and lazy proxy gateway that makes MCP work like Skills: progressive capability discovery, on-demand server startup, and one stable gateway for every agent."
 license = { file = "LICENSE" }
