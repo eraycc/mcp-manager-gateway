@@ -10,7 +10,6 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
-import uvicorn
 from filelock import FileLock
 from sqlalchemy import func, select
 
@@ -18,6 +17,7 @@ from .about import VERSION
 from .config import Settings, default_home
 from .database import Base, Database, SystemSetting
 from .home_migration import initialize_home, migrate_home, reconcile_data
+from .server import serve as run_server
 
 
 @dataclass(frozen=True)
@@ -187,7 +187,7 @@ def main():
                 config.host = args.host
             if getattr(args, 'port', None):
                 config.port = args.port
-            uvicorn.run(create_app(config), host=config.host, port=config.port, workers=1)
+            run_server(create_app(config), host=config.host, port=config.port)
         elif args.command == "migrate-db":
             print(json.dumps(asdict(asyncio.run(migrate_database(config, args.target_database_url))), ensure_ascii=False))
         elif args.command == "reconcile-data":
