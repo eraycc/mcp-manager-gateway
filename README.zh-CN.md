@@ -102,6 +102,8 @@ mmg
 
 安装后 `mmg`、`mcp-manager` 和 `mcp-manager-gateway` 是等价命令。默认启动地址为 <http://127.0.0.1:8765>。首次注册的账户是管理员，密码至少 10 个字符。
 
+按 Ctrl+C 关闭服务。HTTP 连接和请求任务最多等待 10 秒后取消，随后执行应用资源清理。
+
 首次启动会自动创建用户目录、`.env`、SQLite 数据库和密钥：
 
 - Windows：`%USERPROFILE%\.mcp-manager`

@@ -102,6 +102,8 @@ mmg
 
 `mmg`, `mcp-manager`, and `mcp-manager-gateway` are equivalent commands. The default address is <http://127.0.0.1:8765>. The first registered account becomes the administrator; passwords must contain at least 10 characters.
 
+Press Ctrl+C to stop the server. HTTP connections and request tasks have a 10-second grace period before cancellation, followed by application resource cleanup.
+
 On first start, MMG creates its configuration, SQLite database, and runtime data under:
 
 - Windows: `%USERPROFILE%\.mcp-manager`
