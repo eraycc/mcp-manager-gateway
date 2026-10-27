@@ -122,7 +122,7 @@ async function tokenEditor(row){
   '客户端直接获取当前令牌授权范围内的全部工具定义。';
  discovery.input.onchange=describe;describe();
  const expiry=field('到期时间（可选）',row?.expires_at?new Date(new Date(row.expires_at).getTime()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16):'','datetime-local');
- const resourceTools=check('启用资源工具',row?.enable_resource_tools),proposalTools=check('允许 Agent 提交/查询 MCP 提案',row?.enable_mcp_proposal),resourceHelp=el('div',{class:'stack'},resourceTools.node,el('p',{class:'muted'},'启用后新增 gateway_search_resources 与 gateway_read_resource，可按服务、类型、关键词或可选向量语义渐进搜索资源、提示词与模板，再按返回 URI 读取所需内容。')),proposalHelp=el('div',{class:'stack'},proposalTools.node,el('p',{class:'muted'},'仅管理员 Token 可启用；新增 gateway_mcp_proposals，Agent 可单条或批量提交 MCP 配置进入审批队列，也可查询提案审核状态，不会直接创建服务。')),disabled=check('禁用令牌',row?.disabled),parts=[name.node,scope.node,discovery.node,help,resourceHelp,...(admin()?[proposalHelp]:[]),expiry.node];
+ const resourceTools=check('启用资源工具',row?.enable_resource_tools),proposalTools=check('允许 Agent 提交/查询 MCP 提案',row?.enable_mcp_proposal),resourceHelp=el('div',{class:'stack'},resourceTools.node,el('p',{class:'muted'},'启用后可通过 gateway_search_resources / gateway_read_resource 按需发现与读取资源、提示词和模板。此选项独立于系统的原生资源列表开关。')),proposalHelp=el('div',{class:'stack'},proposalTools.node,el('p',{class:'muted'},'仅管理员 Token 可启用；新增 gateway_mcp_proposals，Agent 可单条或批量提交 MCP 配置进入审批队列，也可查询提案审核状态，不会直接创建服务。')),disabled=check('禁用令牌',row?.disabled),parts=[name.node,scope.node,discovery.node,help,resourceHelp,...(admin()?[proposalHelp]:[]),expiry.node];
  if(row){
   parts.push(disabled.node);let data;
   if(row.secret_available){try{data=await api('/tokens/'+row.id+'/secret')}catch(e){if(e.code!=='token_secret_unavailable')throw e}}

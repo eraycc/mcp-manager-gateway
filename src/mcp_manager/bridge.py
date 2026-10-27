@@ -1,16 +1,20 @@
 """A lightweight stdio client bridge; all children remain owned by the gateway."""
 import asyncio
 import contextlib
+import logging
 
 import httpx
 import httpx2
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from .about import NAME, VERSION
 from .protocol_errors import is_request_error
+from .resource_notifications import ResourceNotifications, ResourceServer
+
+logger = logging.getLogger(__name__)
 
 
 class BridgeUpstream:
@@ -21,6 +25,7 @@ class BridgeUpstream:
         self.queue = asyncio.Queue(maxsize=64)
         self.dispatch_limit = 64
         self.stale = False
+        self.resource_notifications = ResourceNotifications()
 
     async def __aenter__(self):
         self.ready = asyncio.get_running_loop().create_future()
@@ -60,6 +65,31 @@ class BridgeUpstream:
                 if detection_enabled and missed_heartbeats > 0 and failures >= missed_heartbeats:
                     self.stale = True
 
+    async def forward_resource_events(self, events):
+        try:
+            async for event in events:
+                await self.resource_notifications.publish(event)
+        except Exception:
+            # SDK stream failures reconnect before the next request.
+            self.stale = True
+            logger.warning("Bridge resource notification stream disconnected", exc_info=True)
+
+    @contextlib.asynccontextmanager
+    async def resource_events(self, client):
+        capabilities = client.server_capabilities
+        resources = bool(capabilities.resources and capabilities.resources.list_changed)
+        prompts = bool(capabilities.prompts and capabilities.prompts.list_changed)
+        if client.session.protocol_version not in MODERN_PROTOCOL_VERSIONS or not (resources or prompts):
+            yield
+            return
+        async with client.listen(resources_list_changed=resources, prompts_list_changed=prompts) as events:
+            task = asyncio.create_task(self.forward_resource_events(events))
+            try:
+                yield
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
     @contextlib.asynccontextmanager
     async def connection(self):
         headers = {"Authorization": "Bearer " + self.token} if self.token else {}
@@ -87,6 +117,7 @@ class BridgeUpstream:
                         cache=None,
                         read_timeout_seconds=300,
                     ) as client,
+                    self.resource_events(client),
                 ):
                     yield client
             finally:
@@ -209,9 +240,13 @@ def create_bridge_server(upstream):
     async def prompt(ctx, params):
         return await upstream.request("get_prompt", params.name, params.arguments or {})
 
-    return Server(NAME, version=VERSION, on_list_tools=tools, on_call_tool=call,
-                  on_list_resources=resources, on_list_resource_templates=templates,
-                  on_read_resource=read, on_list_prompts=prompts, on_get_prompt=prompt)
+    notifications = upstream.resource_notifications
+    server = ResourceServer(NAME, version=VERSION, on_list_tools=tools, on_call_tool=call,
+                            on_list_resources=resources, on_list_resource_templates=templates,
+                            on_read_resource=read, on_list_prompts=prompts, on_get_prompt=prompt,
+                            on_subscriptions_listen=notifications.listen)
+    server.middleware.append(notifications.track_legacy)
+    return server
 
 
 async def run_bridge(url, token):

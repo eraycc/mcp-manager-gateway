@@ -262,7 +262,9 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 
 [渐进式发现](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/concepts/progressive-discovery.md)解释了搜索、分页、完整 Schema 与精确路由的契约。
 
-工具响应中的内嵌资源（包括 GitHub MCP 文件正文）保持原样，并以有容量限制的会话快照供原生资源协议及可选资源工具读取。资源检索支持 `kind`、`match`、原始 `uri_prefix` 筛选，静态资源、提示词和模板接入后台向量索引；“系统设置 → 工具检索 → 资源兼容”的 `embedded_resource.inject` 默认关闭，客户端不支持 embedded resource 或上游未提供等价可读资源模板时开启。关闭后停止捕获并清空全部临时快照，重新开启需再次调用工具。临时资源优先显示且最新在前，支持来源 URI 子串与分词搜索；已认证无状态请求复用现有隐式 retention 租约，需要独立快照的 Agent 应使用独立 Token 或显式租约。HTTP 转发根据已授权的缓存 Schema 镜像 `x-mcp-header` 参数。调用日志保留原始上游 `result`，只将临时 URI 提示等新增加工内容补记到 `gateway_processing.added_content`。容量、隔离与关键词降级规则见[内嵌资源兼容与检索](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/embedded-resources.md)。
+工具响应中的内嵌资源（包括 GitHub MCP 文件正文）保持原样，并以有容量限制的会话快照供原生资源协议及可选资源工具读取。资源检索支持 `kind`、`match`、原始 `uri_prefix` 筛选，静态资源、提示词和模板接入后台向量索引；“系统设置 → 工具检索 → 资源兼容”的 `embedded_resource.inject` 默认关闭，客户端不支持 embedded resource 或上游未提供等价可读资源模板时开启。关闭后停止捕获并清空全部临时快照，重新开启需再次调用工具。临时资源优先显示且最新在前，支持来源 URI 子串与分词搜索；已认证无状态请求复用现有隐式 retention 租约，需要独立快照的 Agent 应使用独立 Token 或显式租约。HTTP 转发根据已授权的缓存 Schema 镜像 `x-mcp-header` 参数。调用日志保留原始上游 `result`，只将临时 URI 提示等新增加工内容补记到 `gateway_processing.added_content`。
+
+同组的 `exposeNativeResources`（“对外暴露原生资源”）默认开启；关闭仅让原生 `resources/list`、`prompts/list`、`resources/templates/list` 返回空，包含临时快照索引。已知标识的原生 `resources/read`、`prompts/get` 仍按既有权限可用。令牌的“启用资源工具”独立控制 `gateway_search_resources`、`gateway_read_resource`，两个开关互不联动。容量、隔离与关键词降级规则见[内嵌资源兼容与检索](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/embedded-resources.md)。
 
 ## 管理能力概览
 
