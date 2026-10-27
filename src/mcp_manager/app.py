@@ -14,6 +14,7 @@ from jsonschema import ValidationError
 from sqlalchemy import select
 
 from . import (
+    audit_api,
     catalog_api,
     credentials_api,
     embedding_api,
@@ -24,6 +25,7 @@ from . import (
     proposals,
     storage_api,
 )
+from .audit_context import AuditContextMiddleware
 from .catalog import Catalog
 from .config import PACKAGE_ROOT, Settings
 from .credentials import CredentialStore
@@ -240,6 +242,7 @@ async def _log_retention(app):
 
             cutoff = now() - timedelta(days=days, microseconds=1)
             await state.logs.delete(to_time=cutoff.isoformat())
+            await state.logs.audits.retain(days, at=now())
         from .retention import run_startup_cache_cleanup, run_storage_retention
 
         if not state.cache_cleanup_done:
@@ -430,6 +433,7 @@ def create_app(config=None):
         catalog_api.router,
         credentials_api.router,
         operations_api.router,
+        audit_api.router,
         leases_api.router,
         storage_api.router,
         oauth_router,
@@ -447,6 +451,7 @@ def create_app(config=None):
             raise
     from .cors import GatewayCORSMiddleware
     app.add_middleware(GatewayCORSMiddleware, root_app=app)
+    app.add_middleware(AuditContextMiddleware)
     frontend = PACKAGE_ROOT / "static"
     if frontend.exists():
         app.mount("/", StaticFiles(directory=frontend, html=True), name="console")

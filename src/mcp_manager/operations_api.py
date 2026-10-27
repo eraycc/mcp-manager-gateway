@@ -123,6 +123,7 @@ async def logs(request: Request, page: int = 1, page_size: int = 20, user=USER):
 async def export_logs(request: Request, user=USER):
     filters = log_filters(request, user)
     store = request.app.state.logs
+    await store.audit("logs.export", user.id, {"format": "json", "filters": filters})
     # Freeze the upper time boundary; keyset pagination remains stable as older
     # records are deleted or newer calls arrive during export.
     from .database import now
@@ -168,7 +169,11 @@ async def rebuild_logs(request: Request, user=ADMIN):
     user = await web_authorizer(request)()
     async def operation(_):
         await web_authorizer(request)()
-        return await request.app.state.logs.rebuild()
+        await request.app.state.logs.audit("logs.rebuild", user.id, {"phase": "started"}, result="pending")
+        await request.app.state.logs.rebuild()
+        await request.app.state.logs.audits.rebuild()
+        await request.app.state.logs.audit("logs.rebuild", user.id, {"phase": "completed"})
+        return {"rebuilt": True}
     return await request.app.state.jobs.submit("logs.rebuild", ["index"], operation, user.id)
 
 
@@ -315,6 +320,7 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
     ZoneInfo(result["timezone"])
     CronTrigger.from_crontab(result["refresh_cron"], timezone=result["timezone"])
     native_resources_changed = False
+    audit_changes = {}
     async with request.app.state.db.locked() as s:
         user = await web_authorizer(request)(s)
         interval = await s.get(SystemSetting, "bridge_heartbeat_seconds")
@@ -324,6 +330,9 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
             data = {"bridge_heartbeat_seconds": 90, "bridge_missed_heartbeats": 0} | data
         for key, value in data.items():
             row = await s.get(SystemSetting, key)
+            old_value = row.value if row else DEFAULTS.get(key)
+            if old_value != value:
+                audit_changes[key] = {"old": old_value, "new": value}
             if key == "exposeNativeResources":
                 native_resources_changed = (row.value if row else True) != value
             if row:
@@ -346,7 +355,9 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
     request.app.state.refresh_next = None
     if "log_retention_days" in data:
         request.app.state.retention_next = 0
-    await request.app.state.logs.audit("settings.update", user.id, data)
+    if audit_changes:
+        await request.app.state.logs.audit("settings.update", user.id, {"changes": audit_changes},
+                                           target_type="settings")
     if native_resources_changed:
         await request.app.state.gateway.resource_notifications.changed()
     return result

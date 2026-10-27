@@ -243,7 +243,7 @@ Browser translation can send visible page text to the configured translation pro
 - `lazy`, `eager`, and `disabled` lifecycle modes;
 - shared, per-user, and per-session runtime isolation;
 - OAuth isolation for personal credentials and runtime instances;
-- call logs, audit logs, background jobs, caches, and failure diagnostics;
+- call logs, audit logs, background jobs, caches, and failure diagnostics; administrator audit management includes filtered inspection, JSON/CSV export, confirmed background cleanup, shared retention policy, and recoverable index rebuilding ([audit guide](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/audit-logs.md));
 - light, dark, and system themes;
 - optional translation with provider and ignore-rule controls;
 - optional PyPI update detection: the About page's automatic check interval sets the lifetime of cached PyPI latest-version information, defaulting to 86,400 seconds (24 hours). After that time has elapsed since the last successful check, the next login, About-page visit or refresh queries PyPI; otherwise it reads the cache. Check results update the mounted About panel and both notification dots without a page reload. Manual checks always query PyPI. The interval remains editable and can be saved when automatic checks are disabled;

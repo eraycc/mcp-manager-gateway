@@ -28,4 +28,7 @@ def migrate_audit_index(conn):
             INSERT INTO audit_schema_versions VALUES(1);
             COMMIT;
         """)
+    if version < 2:
+        conn.execute("ALTER TABLE audit_index_offsets ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
+        conn.execute("INSERT INTO audit_schema_versions VALUES(2)")
     conn.commit()

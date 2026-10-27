@@ -104,14 +104,14 @@ class AuditStore:
             self.skipped.pop(name, None)
         for path in paths:
             info = path.stat()
-            saved = self.conn.execute("SELECT offset,mtime_ns FROM audit_index_offsets WHERE path=?", [path.name]).fetchone()
+            saved = self.conn.execute("SELECT offset,mtime_ns,skipped FROM audit_index_offsets WHERE path=?", [path.name]).fetchone()
             rescan = full or saved is None or saved["offset"] > info.st_size or (
                 saved["offset"] == info.st_size and saved["mtime_ns"] != info.st_mtime_ns)
             start = 0 if rescan else saved["offset"]
             if not rescan and start == info.st_size:
                 continue
             scan_id = uuid.uuid4().hex
-            skipped = 0 if rescan else self.skipped.get(path.name, 0)
+            skipped = 0 if rescan else saved["skipped"]
             committed = start
             with path.open("rb") as stream:
                 stream.seek(start)
@@ -137,9 +137,9 @@ class AuditStore:
                         skipped += 1
             if rescan:
                 self.conn.execute("DELETE FROM audit_events WHERE path=? AND scan_id!=?", [path.name, scan_id])
-            self.conn.execute("INSERT INTO audit_index_offsets VALUES(?,?,?) ON CONFLICT(path) DO UPDATE SET "
-                              "offset=excluded.offset,mtime_ns=excluded.mtime_ns",
-                              [path.name, committed, info.st_mtime_ns])
+            self.conn.execute("INSERT INTO audit_index_offsets(path,offset,mtime_ns,skipped) VALUES(?,?,?,?) "
+                              "ON CONFLICT(path) DO UPDATE SET offset=excluded.offset,mtime_ns=excluded.mtime_ns,skipped=excluded.skipped",
+                              [path.name, committed, info.st_mtime_ns, skipped])
             self.skipped[path.name] = skipped
         self.conn.commit()
 
@@ -184,7 +184,7 @@ class AuditStore:
 
     @staticmethod
     def _summary(row):
-        return {key: row[key] for key in (*COLUMNS, "summary")}
+        return {"id": row["event_id"], **{key: row[key] for key in (*COLUMNS, "summary")}}
 
     def _detail(self, row):
         if row is None:
@@ -228,7 +228,7 @@ class AuditStore:
                 return {"events": row[0], "oldest": row[1], "newest": row[2], "files": len(files),
                         "bytes": sum(path.stat().st_size for path in files), "write_failures": self.write_failures,
                         "index_failures": self.index_failures, "last_error": self.last_error,
-                        "skipped_records": sum(self.skipped.values()),
+                        "skipped_records": self.conn.execute("SELECT COALESCE(SUM(skipped),0) FROM audit_index_offsets").fetchone()[0],
                         "pending_deletions": len(list(self.journals.glob("*.jsonl")))}
         return await asyncio.to_thread(read)
 
@@ -237,7 +237,12 @@ class AuditStore:
             with self.lock:
                 self._recover()
                 self._sync(full=True)
-        await asyncio.to_thread(run)
+        task = asyncio.create_task(asyncio.to_thread(run))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
 
     def _rewrite_targets(self, operation_id):
         paths = self.conn.execute("SELECT DISTINCT path FROM audit_delete_targets WHERE operation_id=?", [operation_id]).fetchall()
@@ -295,7 +300,13 @@ class AuditStore:
             journal.unlink()
 
     async def delete(self, ids=None, *, actor=None, max_seq=None, action="audit.delete", **filters):
-        return await asyncio.to_thread(self._delete, ids, actor or {}, max_seq, action, filters)
+        task = asyncio.create_task(asyncio.to_thread(self._delete, ids, actor or {}, max_seq, action, filters))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Finish or durably journal the physical mutation before SQLite can close.
+            await task
+            raise
 
     def _delete(self, ids, actor, max_seq, action, filters):
         with self.lock:
@@ -310,10 +321,11 @@ class AuditStore:
             operation_id = uuid.uuid4().hex
             actor = {key: value for key, value in actor.items() if key != "user_id"} | {"source": actor.get("source", "system"),
                                                                                      "user_id": actor.get("user_id")}
-            self._append(build_event(action, actor["user_id"], {"operation_id": operation_id, "phase": "started"},
+            marker_id = self._append(build_event(action, actor["user_id"], {"operation_id": operation_id, "phase": "started"},
                                      **{key: value for key, value in actor.items() if key != "user_id"}, result="pending"))
             # Freeze targets before the start marker's sequence so no management event deletes itself.
-            marker_seq = self.conn.execute("SELECT MAX(seq) FROM audit_events").fetchone()[0]
+            self._sync()
+            marker_seq = self.conn.execute("SELECT seq FROM audit_events WHERE event_id=?", [marker_id]).fetchone()[0]
             where += (" AND " if where else " WHERE ") + "seq<?"
             args.append(marker_seq)
             count, files = self.conn.execute("SELECT COUNT(*),COUNT(DISTINCT path) FROM audit_events" + where, args).fetchone()

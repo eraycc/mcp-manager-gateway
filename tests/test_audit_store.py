@@ -112,3 +112,128 @@ async def test_audit_retention_uses_utc_age_and_zero_is_unlimited(tmp_path):
         assert not (tmp_path / "logs" / "audit" / (stamp - timedelta(days=8)).strftime("%Y-%m-%d.jsonl")).exists()
     finally:
         await logs.close()
+
+
+async def test_partial_tail_and_malformed_lines_are_reported_without_losing_legacy(tmp_path):
+    root = tmp_path / "logs" / "audit"
+    root.mkdir(parents=True)
+    path = root / "2026-10-27.jsonl"
+    valid = {"event_id": "first", "timestamp": "2026-10-27T01:00:00Z", "action": "mcp.create",
+             "user_id": None, "details": {"mcp_id": "one"}}
+    tail = {"event_id": "tail", "timestamp": "2026-10-27T01:00:01Z", "action": "mcp.create",
+            "user_id": None, "details": {"mcp_id": "two"}}
+    path.write_text(json.dumps(valid) + "\nnot-json\n" + json.dumps(tail), encoding="utf-8")
+    logs = LogStore(tmp_path)
+    try:
+        assert (await logs.audits.query())["total"] == 1
+        assert (await logs.audits.status())["skipped_records"] == 1
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write("\n")
+        assert (await logs.audits.query())["total"] == 2
+        assert (await logs.audits.status())["skipped_records"] == 1
+    finally:
+        await logs.close()
+
+
+async def test_utc_retention_preserves_exact_boundary_and_unrelated_calls(tmp_path):
+    logs = LogStore(tmp_path)
+    try:
+        at = datetime(2026, 10, 27, 16, tzinfo=UTC)
+        boundary = at - timedelta(days=7)
+        expired = await logs.audit("mcp.create", None, {}, timestamp=(boundary - timedelta(microseconds=1)).isoformat())
+        kept = await logs.audit("mcp.create", None, {}, timestamp=boundary.isoformat())
+        await logs.append({"id": "unrelated", "status": "success"})
+        await logs.audits.retain(7, at=at)
+        assert await logs.audits.detail(expired) is None
+        assert await logs.audits.detail(kept)
+        assert (await logs.query())["total"] == 1
+    finally:
+        await logs.close()
+
+
+async def test_export_watermark_survives_rebuild_and_excludes_new_events(tmp_path):
+    logs = LogStore(tmp_path)
+    try:
+        ids = {await logs.audit("mcp.create", None, {"mcp_id": str(i)}) for i in range(3)}
+        ceiling = await logs.audits.watermark()
+        rows, cursor = await logs.audits.export_batch(max_seq=ceiling, limit=1)
+        await logs.audit("mcp.create", None, {"mcp_id": "new"})
+        await logs.audits.rebuild()
+        more, _ = await logs.audits.export_batch(max_seq=ceiling, cursor=cursor)
+        assert {event["event_id"] for event in rows + more} == ids
+    finally:
+        await logs.close()
+
+
+async def test_projection_failure_keeps_durable_event_for_incremental_recovery(tmp_path, monkeypatch):
+    logs = LogStore(tmp_path)
+    original = logs.audits._index
+    try:
+        def fail(*args):
+            raise RuntimeError("projection unavailable")
+        monkeypatch.setattr(logs.audits, "_index", fail)
+        identity = await logs.audit("mcp.create", None, {"mcp_id": "recover"})
+        assert identity and logs.audits.index_failures == 1
+        monkeypatch.setattr(logs.audits, "_index", original)
+        assert (await logs.audits.detail(identity))["target_id"] == "recover"
+    finally:
+        await logs.close()
+
+
+async def test_failed_projection_cannot_allow_untracked_audit_deletion(tmp_path, monkeypatch):
+    logs = LogStore(tmp_path)
+    original = logs.audits._index
+    identity = await logs.audit("mcp.create", None, {"mcp_id": "keep"})
+    await logs.audit("mcp.create", None, {"mcp_id": "second"})
+    try:
+        def fail(*args):
+            raise RuntimeError("projection unavailable")
+        monkeypatch.setattr(logs.audits, "_index", fail)
+        with pytest.raises(RuntimeError):
+            await logs.audits.delete([identity], actor={"user_id": "admin"})
+        monkeypatch.setattr(logs.audits, "_index", original)
+        assert await logs.audits.detail(identity)
+    finally:
+        await logs.close()
+
+
+async def test_cancellation_waits_for_audit_file_mutation_to_finish(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    logs = LogStore(tmp_path)
+    started, release = threading.Event(), threading.Event()
+    identity = await logs.audit("mcp.create", None, {"mcp_id": "cancel"})
+    original = logs.audits._rewrite_targets
+    def paused(operation_id):
+        started.set()
+        assert release.wait(5)
+        return original(operation_id)
+    monkeypatch.setattr(logs.audits, "_rewrite_targets", paused)
+    task = asyncio.create_task(logs.audits.delete([identity], actor={"user_id": "admin"}))
+    try:
+        assert await asyncio.to_thread(started.wait, 3)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await logs.audits.detail(identity) is None
+    finally:
+        release.set()
+        await logs.close()
+
+
+async def test_malformed_record_diagnostics_survive_process_restart(tmp_path):
+    root = tmp_path / "logs" / "audit"
+    root.mkdir(parents=True)
+    (root / "2026-10-27.jsonl").write_text("broken-json\n", encoding="utf-8")
+    logs = LogStore(tmp_path)
+    assert (await logs.audits.status())["skipped_records"] == 1
+    await logs.close()
+    logs = LogStore(tmp_path)
+    try:
+        assert (await logs.audits.status())["skipped_records"] == 1
+    finally:
+        await logs.close()

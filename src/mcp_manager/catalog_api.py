@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
+from .audit_context import audited
 from .catalog import restore, web_authorizer
 from .credentials import PERSONAL_AUTH_TYPES
 from .database import McpServer, SystemSetting, get_setting, invalidate_setting_cache
@@ -138,7 +139,6 @@ async def listing(request: Request, q: str = "", page: int = 1, page_size: int =
 async def create(data: dict, request: Request, user=ADMIN):
     cat = request.app.state.catalog
     row = await cat.create(data, authorize=web_authorizer(request), user_id=user.id)
-    await request.app.state.logs.audit("mcp.create", user.id, {"mcp_id": row.id})
     return await cat.detail(row, user.id)
 
 
@@ -354,14 +354,12 @@ async def detail(server_id: str, request: Request, response: Response,
 @router.patch("/mcps/{server_id}")
 async def update(server_id: str, data: dict, request: Request, user=ADMIN):
     row = await request.app.state.catalog.update(server_id, data, authorize=web_authorizer(request), user_id=user.id)
-    await request.app.state.logs.audit("mcp.update", user.id, {"mcp_id": row.id, "revision": row.revision})
     return await request.app.state.catalog.detail(row, user.id)
 
 
 @router.delete("/mcps/{server_id}")
 async def remove(server_id: str, request: Request, user=ADMIN):
     await request.app.state.catalog.delete(server_id, authorize=web_authorizer(request))
-    await request.app.state.logs.audit("mcp.delete", user.id, {"mcp_id": server_id})
     return {"ok": True}
 
 
@@ -462,6 +460,7 @@ async def cached_tools(server_id: str, request: Request, user=USER):
 
 
 @router.post("/mcps/{server_id}/refresh")
+@audited("mcp.refresh", target_type="mcp", id_param="server_id")
 async def refresh(server_id: str, request: Request, user=ADMIN):
     cat = request.app.state.catalog
     if await cat.retry_disabled(server_id, user.id, authorize=web_authorizer(request)):
@@ -476,6 +475,7 @@ async def refresh(server_id: str, request: Request, user=ADMIN):
 
 
 @router.post("/mcps/{server_id}/start")
+@audited("mcp.start", target_type="mcp", id_param="server_id")
 async def start(server_id: str, request: Request, user=ADMIN):
     cat = request.app.state.catalog
     await cat.retry_disabled(server_id, user.id, authorize=web_authorizer(request), allow_manual=True)
@@ -484,6 +484,7 @@ async def start(server_id: str, request: Request, user=ADMIN):
 
 
 @router.post("/mcps/{server_id}/stop")
+@audited("mcp.stop", target_type="mcp", id_param="server_id")
 async def stop(server_id: str, request: Request, user=ADMIN):
     await request.app.state.catalog.get(server_id)
     await web_authorizer(request)()

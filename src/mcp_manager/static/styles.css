@@ -217,3 +217,23 @@ dialog{max-width:calc(100vw - 28px);overflow:hidden}
 .resource-compat-option .check{min-height:32px}
 .resource-compat-option .muted{padding-left:27px;overflow-wrap:anywhere}
 .resource-compatibility [role="status"]:empty{display:none}
+
+/* Audit management reuses the existing table and disclosure patterns. */
+.audit-overview{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.audit-volume,.audit-retention{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.audit-volume strong{font-size:24px;line-height:1.2}
+.audit-overview>p{flex-basis:100%;margin:0}
+.audit-advanced{margin-bottom:16px}
+.audit-advanced>summary{cursor:pointer;font-weight:600}
+.audit-filters{padding-top:16px}
+.audit-page .table-card{min-width:0}
+.audit-target{max-width:180px;overflow-wrap:anywhere}
+.audit-target .subtext{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px}
+.audit-time{white-space:nowrap}
+.audit-summary{display:block;max-width:260px;overflow-wrap:anywhere}
+.audit-action-code{font-size:11px;overflow-wrap:anywhere}
+.audit-detail-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0}
+.audit-detail-facts dt{color:var(--muted);font-size:12px}
+.audit-detail-facts dd{margin:3px 0 0;overflow-wrap:anywhere}
+.audit-page .page-title{align-items:flex-start}
+@media(max-width:720px){.audit-detail-facts{grid-template-columns:1fr}.audit-overview{align-items:flex-start}.audit-retention{width:100%;justify-content:space-between}.audit-page .toolbar>input,.audit-page .toolbar>select{min-width:0;flex:1 1 140px}}

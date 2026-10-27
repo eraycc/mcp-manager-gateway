@@ -219,7 +219,13 @@ async def rebuild(config):
     from .logs import LogStore
     with FileLock(str(config.data_dir / "runtime.lock"), timeout=0):
         store = LogStore(config.data_dir)
-        await store.close()
+        try:
+            await store.audit("logs.rebuild", None, {"phase": "started"}, source="cli", result="pending")
+            await store.rebuild()
+            await store.audits.rebuild()
+            await store.audit("logs.rebuild", None, {"phase": "completed"}, source="cli")
+        finally:
+            await store.close()
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ LOGGER = logging.getLogger(__name__)
 AUDIT_CONTEXT = ContextVar("mmg_audit_context", default=None)
 MAX_DETAILS_BYTES = 16384
 COMMON = {"mcp_id", "server_id", "token_id", "owner_id", "user_id", "proposal_id", "lease_id",
-          "name", "revision", "result", "count", "job_id", "reason_code", "error_type"}
+          "name", "revision", "result", "count", "job_id", "reason_code", "error_type", "user_agent"}
 POLICIES = {
     "identity.login": set(), "identity.login_failed": {"reason_code"}, "identity.logout": set(),
     "identity.register": set(), "identity.session.revoke": {"count"}, "identity.password.change": set(),
