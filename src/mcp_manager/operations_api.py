@@ -24,6 +24,7 @@ DEFAULTS = {"title": "MCP Manager", "registration_enabled": True, "jwt_days": 30
             "idle_seconds": 86400, "connection_ttl_seconds": 43200, "refresh_enabled": False, "refresh_cron": "0 3 * * *",
             "bridge_heartbeat_seconds": 90, "bridge_missed_heartbeats": 3,
             "startup_failure_threshold": 3, "timezone": "Asia/Shanghai", "embedded_resource.inject": False,
+            "exposeNativeResources": True,
             "log_retention_days": 0, "cors_origins": ["*"], "allowed_hosts": ["*"],
             "update_auto_check": True, "update_check_interval_seconds": DEFAULT_AUTO_CHECK_INTERVAL_SECONDS,
             "translation_config": DEFAULT_TRANSLATION_CONFIG}
@@ -284,7 +285,7 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     for key in ("registration_enabled", "token_auth_enabled", "refresh_enabled", "update_auto_check",
-                "embedded_resource.inject"):
+                "embedded_resource.inject", "exposeNativeResources"):
         if not isinstance(result[key], bool):
             raise HTTPException(422, key + " must be a boolean")
     for key in ("jwt_days", "idle_seconds", "log_retention_days"):
@@ -313,6 +314,7 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
         data["allowed_hosts"] = result["allowed_hosts"]
     ZoneInfo(result["timezone"])
     CronTrigger.from_crontab(result["refresh_cron"], timezone=result["timezone"])
+    native_resources_changed = False
     async with request.app.state.db.locked() as s:
         user = await web_authorizer(request)(s)
         interval = await s.get(SystemSetting, "bridge_heartbeat_seconds")
@@ -322,6 +324,8 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
             data = {"bridge_heartbeat_seconds": 90, "bridge_missed_heartbeats": 0} | data
         for key, value in data.items():
             row = await s.get(SystemSetting, key)
+            if key == "exposeNativeResources":
+                native_resources_changed = (row.value if row else True) != value
             if row:
                 row.value = value
             else:
@@ -343,6 +347,8 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
     if "log_retention_days" in data:
         request.app.state.retention_next = 0
     await request.app.state.logs.audit("settings.update", user.id, data)
+    if native_resources_changed:
+        await request.app.state.gateway.resource_notifications.changed()
     return result
 
 

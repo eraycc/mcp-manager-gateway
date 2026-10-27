@@ -11,7 +11,6 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from jsonschema import Draft202012Validator, ValidationError
 from mcp import types
-from mcp.server.lowlevel import Server
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
 from sqlalchemy import select
@@ -24,6 +23,7 @@ from .discovery import DISCOVERY, Discovery, result_json, validate_meta, validat
 from .identity import authenticate_token, expired
 from .paging import McpPageBuilder, decode_cursor
 from .proposals import list_proposals, resource_index, submit_proposals
+from .resource_notifications import ResourceNotifications, ResourceServer
 from .runtime import GatewayError
 
 router = APIRouter(prefix="/gateway/v1")
@@ -224,6 +224,7 @@ class Gateway:
         self.discovery = Discovery(self)
         from .embedded_resources import EmbeddedResources
         self.embedded = EmbeddedResources()
+        self.resource_notifications = ResourceNotifications()
 
     async def close_session(self, sid):
         self.embedded.release(("session", sid))
@@ -891,10 +892,24 @@ class Gateway:
             **result,
         })
 
+    async def native_resources_exposed(self):
+        from .database import get_setting
+
+        return await get_setting(self.app.state.db, "exposeNativeResources", True) is True
+
     async def native_page(self, ctx, params, *, kind):
         from .tool_index import fingerprint
 
         user, token, allowed = await self.principal(ctx.request)
+        factories = {
+            "tools": (types.ListToolsResult, "tools", types.Tool),
+            "resources": (types.ListResourcesResult, "resources", types.Resource),
+            "templates": (types.ListResourceTemplatesResult, "resourceTemplates", types.ResourceTemplate),
+            "prompts": (types.ListPromptsResult, "prompts", types.Prompt),
+        }
+        result_type, field, entry_type = factories[kind]
+        if kind != "tools" and not await self.native_resources_exposed():
+            return result_type.model_validate({field: []})
         catalog = self.app.state.catalog
         rows = [row for row in await catalog.rows(ids=allowed, metadata_only=True) if row.mode != "disabled"]
         expected = await self.search_scope(ctx.request, user, token, rows)
@@ -933,13 +948,6 @@ class Gateway:
                     for server_id, value in leading] + selected
         if cursor and offset >= total:
             raise GatewayError("invalid_cursor", "Native cursor is outside the result")
-        factories = {
-            "tools": (types.ListToolsResult, "tools", types.Tool),
-            "resources": (types.ListResourcesResult, "resources", types.Resource),
-            "templates": (types.ListResourceTemplatesResult, "resourceTemplates", types.ResourceTemplate),
-            "prompts": (types.ListPromptsResult, "prompts", types.Prompt),
-        }
-        result_type, field, entry_type = factories[kind]
         def envelope(page):
             return result_type.model_validate({field: page["items"], "nextCursor": page["next_cursor"]})
         builder = await asyncio.to_thread(
@@ -965,6 +973,8 @@ class Gateway:
         await self.revalidate_search_scope(ctx.request, expected)
         if kind == "resources" and await self.temporary_summaries(ctx.request, user, token, rows) != temporary:
             raise GatewayError("catalog_changed", "Temporary resource catalog changed during paging")
+        if kind != "tools" and not await self.native_resources_exposed():
+            return result_type.model_validate({field: []})
         return builder.finish()
 
     async def list_resources(self, ctx, params):
@@ -1105,10 +1115,12 @@ class MCPAuthMiddleware:
 
 def install_gateway(app):
     gateway = Gateway(app)
-    protocol = Server(NAME, version=VERSION, on_list_tools=gateway.list_tools,
+    protocol = ResourceServer(NAME, version=VERSION, on_list_tools=gateway.list_tools,
                       on_call_tool=gateway.call_tool, on_list_resources=gateway.list_resources,
                       on_list_resource_templates=gateway.list_templates, on_read_resource=gateway.read_resource,
-                      on_list_prompts=gateway.list_prompts, on_get_prompt=gateway.get_prompt)
+                      on_list_prompts=gateway.list_prompts, on_get_prompt=gateway.get_prompt,
+                      on_subscriptions_listen=gateway.resource_notifications.listen)
+    protocol.middleware.append(gateway.resource_notifications.track_legacy)
     security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
     endpoint = protocol.streamable_http_app(streamable_http_path="/mcp", session_idle_timeout=None,
                                              transport_security=security)

@@ -1,4 +1,4 @@
-import{el,api,button,field,check}from './core.js';
+import{el,api,button,field,check,toast}from './core.js';
 
 export async function embeddingSettings(signal){
  const [saved,system]=await Promise.all([api('/settings/embedding',{signal}),api('/settings',{signal})]);
@@ -45,18 +45,27 @@ export async function embeddingSettings(signal){
  card.append(enabled.node,grid,el('p',{class:'notice'},'仅向该接口发送服务与工具的描述性元数据和检索语句，不发送 MCP 连接凭据或实际工具调用参数。'),
   el('div',{class:'actions'},save,probe),status,errors);
  const inject=check('启用内嵌资源注入',system['embedded_resource.inject']===true);
+ const native=check('对外暴露原生资源',system.exposeNativeResources!==false);
+ const nativeHint=el('p',{class:'notice',hidden:native.input.checked},'需要按需发现资源时，可在访问令牌中开启「启用资源工具」。该选项独立控制 MMG 的资源搜索与读取工具。');
+ native.input.onchange=()=>nativeHint.hidden=native.input.checked;
  const compatibilityStatus=el('p',{role:'status','aria-live':'polite'}),compatibilityError=el('p',{class:'error',role:'alert',hidden:true});
  const compatibilitySave=button('保存资源兼容设置',async()=>{
-  compatibilitySave.disabled=true;compatibilityError.hidden=true;compatibilityStatus.textContent='正在保存…';
+  compatibilitySave.disabled=true;inject.input.disabled=true;native.input.disabled=true;compatibilityError.hidden=true;compatibilityStatus.textContent='正在保存…';
   try{
-   const result=await api('/settings',{method:'PATCH',body:{'embedded_resource.inject':inject.input.checked}});
-   inject.input.checked=result['embedded_resource.inject'];compatibilityStatus.textContent='资源兼容设置已保存。';
+   const result=await api('/settings',{method:'PATCH',body:{'embedded_resource.inject':inject.input.checked,exposeNativeResources:native.input.checked}});
+   inject.input.checked=result['embedded_resource.inject'];native.input.checked=result.exposeNativeResources;
+   nativeHint.hidden=native.input.checked;compatibilityStatus.textContent='资源兼容设置已保存。';
+   if(!native.input.checked)toast('已隐藏原生资源列表。需要按需发现资源的令牌可开启「启用资源工具」；已知 URI 仍可读取。','warning');
   }catch(e){compatibilityStatus.textContent='';compatibilityError.textContent=e.message;compatibilityError.hidden=false}
-  finally{compatibilitySave.disabled=false}
+  finally{compatibilitySave.disabled=false;inject.input.disabled=false;native.input.disabled=false}
  },'primary');
- const compatibility=el('section',{class:'card stack'},el('h2',{},'资源兼容'),inject.node,
-  el('p',{class:'muted'},'默认关闭。客户端不支持 embedded resource 或上游未提供等价资源模板时开启，将内嵌资源（如 GitHub 文件正文）注入资源列表与读取接口。'),
-  el('p',{class:'notice'},'关闭后停止捕获并清空所有会话与租约的临时快照，上游响应原样透传；重新开启后需再次调用工具生成资源。'),
-  el('div',{class:'actions'},compatibilitySave),compatibilityStatus,compatibilityError);
+ inject.input.setAttribute('aria-describedby','embedded-resource-hint');
+ native.input.setAttribute('aria-describedby','native-resource-hint');
+ const compatibility=el('section',{class:'card resource-compatibility'},el('h2',{},'资源兼容'),
+  el('div',{class:'resource-compat-option'},inject.node,
+   el('p',{id:'embedded-resource-hint',class:'muted'},'默认关闭。客户端不支持 embedded resource 时可开启，生成会话临时快照。关闭注入会清空快照。')),
+  el('div',{class:'resource-compat-option'},native.node,
+   el('p',{id:'native-resource-hint',class:'muted'},'默认开启。关闭后仅隐藏原生资源、提示词与模板列表（含临时资源），已知 URI 仍可读取。')),
+  nativeHint,el('div',{class:'actions'},compatibilitySave),compatibilityStatus,compatibilityError);
  return el('div',{class:'stack'},card,compatibility);
 }

@@ -208,3 +208,12 @@ dialog{max-width:calc(100vw - 28px);overflow:hidden}
 .oauth-mode-help{min-width:0}
 .oauth-mode-help>summary{cursor:pointer;min-height:44px;padding:10px 0}
 .oauth-mode-help>.stack{margin-top:8px}
+
+/* Resource compatibility keeps each policy and its explanation together. */
+.resource-compatibility{display:grid;gap:16px}
+.resource-compatibility h2,.resource-compatibility p{margin:0}
+.resource-compat-option{display:grid;gap:6px;min-width:0}
+.resource-compat-option+.resource-compat-option{border-top:1px solid var(--line);padding-top:16px}
+.resource-compat-option .check{min-height:32px}
+.resource-compat-option .muted{padding-left:27px;overflow-wrap:anywhere}
+.resource-compatibility [role="status"]:empty{display:none}
