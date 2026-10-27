@@ -5,11 +5,12 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 
 from .audit_events import ACTIONS, AUDIT_CONTEXT, clean
 from .audit_store import COLUMNS, FILTERS
 from .catalog import web_authorizer
-from .database import get_setting
+from .database import McpServer, get_setting
 from .identity import admin_user
 
 router = APIRouter(prefix="/api/v1/audit-logs", tags=["audit"])
@@ -43,10 +44,25 @@ def actor_for(request, user):
             "request_id": (AUDIT_CONTEXT.get() or {}).get("request_id")}
 
 
+async def resolve_mcp_names(request, events):
+    """Fill missing names for old events without changing stored name snapshots."""
+    ids = {event["target_id"] for event in events
+           if event.get("target_type") == "mcp" and event.get("target_id") and not event.get("target_name")}
+    if not ids:
+        return
+    async with request.app.state.db.session() as session:
+        rows = await session.execute(select(McpServer.id, McpServer.name).where(McpServer.id.in_(ids)))
+        names = {identity: clean(name) for identity, name in rows}
+    for event in events:
+        if event.get("target_type") == "mcp" and not event.get("target_name"):
+            event["target_name"] = names.get(event.get("target_id"))
+
+
 @router.get("")
 async def query_audits(request: Request, page: int = Query(1, ge=1),
                        page_size: int = Query(20, ge=1, le=200), user=ADMIN):
     result = await request.app.state.logs.audits.query(page=page, page_size=page_size, **filters_for(request))
+    await resolve_mcp_names(request, result["items"])
     await web_authorizer(request)()
     return result
 
@@ -54,7 +70,7 @@ async def query_audits(request: Request, page: int = Query(1, ge=1),
 @router.get("/status")
 async def audit_status(request: Request, user=ADMIN):
     result = await request.app.state.logs.audits.status()
-    result["retention_days"] = await get_setting(request.app.state.db, "log_retention_days", 0)
+    result["retention_days"] = await get_setting(request.app.state.db, "audit_log_retention_days", 0)
     result["timezone"] = str(request.app.state.logs.timezone)
     await web_authorizer(request)()
     return result
@@ -94,6 +110,8 @@ async def export_audits(request: Request, format: str = "json", user=ADMIN):
                 rows, cursor = await store.audits.export_batch(max_seq=ceiling, cursor=cursor, **filters)
                 if not rows:
                     break
+                await resolve_mcp_names(request, rows)
+                await web_authorizer(request)()
                 for event in rows:
                     if format == "json":
                         yield ("" if first else ",") + json.dumps(event, ensure_ascii=False)
@@ -159,6 +177,8 @@ async def audit_detail(event_id: str, request: Request, user=ADMIN):
     await web_authorizer(request)()
     if result is None:
         raise HTTPException(404, "Audit event not found")
+    await resolve_mcp_names(request, [result])
+    await web_authorizer(request)()
     return clean(result)
 
 

@@ -129,3 +129,51 @@ async def test_legacy_audit_json_and_long_columns_stay_bounded(running_gateway, 
         await expect(detail).to_contain_text(long_ip)
         await expect(detail).to_contain_text(long_name)
         await browser.close()
+
+async def test_oauth_audit_mcp_name_and_independent_retention_settings(running_gateway, tmp_path):
+    from mcp_manager.database import McpServer
+
+    app, web, url, _, _ = running_gateway
+    async with app.state.db.locked() as session:
+        session.add(McpServer(id="oauth-audit-mcp", slug="oauth-audit-mcp", name="OAuth Audit MCP",
+                              transport="stdio", mode="disabled", config={}))
+    identity = await app.state.logs.audit("oauth.refresh", None, {"mcp_id": "oauth-audit-mcp"})
+    async with async_playwright() as pw:
+        executable = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+        browser = await pw.chromium.launch(headless=True, executable_path=executable if os.path.exists(executable) else None)
+        page = await browser.new_page(viewport={"width": 1440, "height": 1000})
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        await login(page, url)
+        await page.get_by_role("link", name="审计日志", exact=True).click()
+        row = page.locator(f'tr[data-row-id="{identity}"]')
+        await expect(row).to_contain_text("OAuth Audit MCP")
+        await expect(row).to_contain_text("oauth-audit-mcp")
+        await row.get_by_role("button", name="详情", exact=True).click()
+        await expect(page.get_by_role("dialog", name="审计详情", exact=True)).to_contain_text("OAuth Audit MCP")
+        await page.get_by_role("dialog", name="审计详情", exact=True).get_by_role("button", name="关闭", exact=True).click()
+        await page.locator("#main").screenshot(path=str(tmp_path / "oauth-audit-name.png"))
+        await page.get_by_role("link", name="系统设置", exact=True).click()
+        await page.get_by_role("tab", name="运行与日志", exact=True).click()
+        call_days = page.get_by_label("调用日志保留天数（0 为无限）", exact=True)
+        audit_days = page.get_by_label("审计日志保留天数（0 为无限）", exact=True)
+        await expect(call_days).to_have_value("0")
+        await expect(audit_days).to_have_value("0")
+        await call_days.fill("7")
+        await audit_days.fill("30")
+        async with page.expect_response(lambda response: response.url.endswith("/api/v1/settings")
+                                        and response.request.method == "PATCH") as pending:
+            await page.get_by_role("button", name="保存设置", exact=True).click()
+        assert (await pending.value).status == 200
+        await page.reload()
+        await page.get_by_role("tab", name="运行与日志", exact=True).click()
+        await expect(call_days).to_have_value("7")
+        await expect(audit_days).to_have_value("30")
+        assert (await web.get("/api/v1/audit-logs/status")).json()["retention_days"] == 30
+        await page.locator("#main").screenshot(path=str(tmp_path / "independent-retention.png"))
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await expect(call_days).to_be_visible()
+        await expect(audit_days).to_be_visible()
+        assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+        assert errors == []
+        await browser.close()

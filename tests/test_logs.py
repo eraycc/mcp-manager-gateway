@@ -40,3 +40,30 @@ async def test_search_and_pagination(tmp_path):
     assert page["total_pages"] == 3
     assert len(page["items"]) == 2
     await logs.close()
+
+@pytest.mark.parametrize("filtered", [False, True])
+async def test_deleting_last_call_removes_empty_day_and_allows_new_writes(tmp_path, filtered):
+    logs = LogStore(tmp_path)
+    try:
+        await logs.append({"id": "a", "timestamp": "2026-09-01T00:00:00Z", "status": "running"})
+        await logs.append({"id": "a", "timestamp": "2026-09-01T00:01:00Z", "status": "success"})
+        await logs.append({"id": "b", "timestamp": "2026-09-02T00:00:00Z", "status": "success"})
+        empty_day = logs.root / "2026-09-01.jsonl"
+        if filtered:
+            assert await logs.delete(to_time="2026-09-01T23:59:59Z") == 1
+        else:
+            assert await logs.delete(["a"]) == 1
+        assert not empty_day.exists()
+        assert (await logs.detail("b"))["id"] == "b"
+        await logs.rebuild()
+        assert await logs.detail("a") is None
+        await logs.append({"id": "c", "timestamp": "2026-09-01T02:00:00Z", "status": "success"})
+        assert (await logs.detail("c"))["id"] == "c"
+        assert await logs.delete() == 2
+        assert not list(logs.root.glob("????-??-??.jsonl"))
+        # Older versions may have left empty files even when the index is empty.
+        empty_day.touch()
+        assert await logs.delete() == 0
+        assert not empty_day.exists()
+    finally:
+        await logs.close()

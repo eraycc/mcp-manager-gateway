@@ -98,3 +98,47 @@ async def test_audit_export_escapes_spreadsheet_formulas(db_app):
     response = await db_app.web.get("/api/v1/audit-logs/export?format=csv")
     rows = list(csv.DictReader(io.StringIO(response.text.lstrip("\ufeff"))))
     assert any(row["target_name"] == "'=HYPERLINK(attacker)" for row in rows)
+
+async def test_mcp_names_resolve_for_legacy_audits_without_overwriting_snapshots(db_app):
+    from mcp_manager.database import McpServer
+
+    async with db_app.db.locked() as session:
+        session.add(McpServer(id="named-mcp", slug="named-mcp", name="Current MCP",
+                              transport="stdio", config={}, mode="disabled"))
+    logs = db_app.app.state.logs
+    legacy = await logs.audit("oauth.refresh", None, {"mcp_id": "named-mcp"})
+    snapshot = await logs.audit("mcp.update", None, {"mcp_id": "named-mcp"}, target_name="Original MCP")
+    missing = await logs.audit("oauth.refresh", None, {"mcp_id": "removed-mcp"})
+    web = db_app.web
+    rows = (await web.get("/api/v1/audit-logs")).json()["items"]
+    names = {row["event_id"]: row["target_name"] for row in rows}
+    assert names[legacy] == "Current MCP"
+    assert names[snapshot] == "Original MCP"
+    assert not names[missing]
+    assert (await web.get("/api/v1/audit-logs/" + legacy)).json()["target_name"] == "Current MCP"
+    exported = (await web.get("/api/v1/audit-logs/export?action=oauth.refresh")).json()
+    assert next(row for row in exported if row["event_id"] == legacy)["target_name"] == "Current MCP"
+    # Enrichment is read-only: authoritative records retain their original metadata.
+    assert not (await logs.audits.detail(legacy))["target_name"]
+    async with db_app.db.locked() as session:
+        await session.delete(await session.get(McpServer, "named-mcp"))
+    assert not (await web.get("/api/v1/audit-logs/" + legacy)).json()["target_name"]
+
+
+async def test_log_retention_settings_are_independent_and_default_to_unlimited(db_app):
+    web = db_app.web
+    settings = (await web.get("/api/v1/settings")).json()
+    assert settings["log_retention_days"] == 0
+    assert settings["audit_log_retention_days"] == 0
+    response = await web.patch("/api/v1/settings", json={"log_retention_days": 7})
+    assert response.status_code == 200
+    assert response.json()["audit_log_retention_days"] == 0
+    assert (await web.get("/api/v1/audit-logs/status")).json()["retention_days"] == 0
+    db_app.app.state.retention_next = float("inf")
+    response = await web.patch("/api/v1/settings", json={"audit_log_retention_days": 30})
+    assert response.status_code == 200
+    assert response.json()["log_retention_days"] == 7
+    assert db_app.app.state.retention_next == 0
+    assert (await web.get("/api/v1/audit-logs/status")).json()["retention_days"] == 30
+    for invalid in [-1, True, "7"]:
+        assert (await web.patch("/api/v1/settings", json={"audit_log_retention_days": invalid})).status_code == 422
