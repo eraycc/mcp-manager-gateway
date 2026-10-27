@@ -277,7 +277,7 @@ async def _maintenance_cycle(app):
                 await state.logs.audit(
                     "maintenance.error",
                     None,
-                    {"step": step.__name__, "error": str(exc)},
+                    {"step": step.__name__, "error_type": type(exc).__name__},
                 )
 
 

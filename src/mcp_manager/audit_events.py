@@ -5,6 +5,7 @@ import re
 import uuid
 from contextvars import ContextVar
 from datetime import UTC, datetime
+from urllib.parse import unquote
 
 from .diagnostics import SECRET_KEYS
 
@@ -39,23 +40,41 @@ POLICIES = {
 }
 for _action in ("start", "authorized", "refresh", "client", "reset", "state_invalidated", "cimd_verify", "cimd_fallback"):
     POLICIES["oauth." + _action] = {"registration_mode", "reason", "auth_mode", "code", "status"}
+FAILURE_ACTIONS = {"identity.login_failed", "mcp.start.failed", "maintenance.error", "storage.startup.error"}
 ACTIONS = [{"action": action, "category": action.split(".")[0]} for action in sorted(POLICIES)]
 SENSITIVE = SECRET_KEYS | {"state", "code", "code_challenge", "set-cookie", "set_cookie", "session_id"}
 TOKEN_PATTERN = re.compile(r"(?i)(?:bearer\s+[^\s,;]+|mcpm_[a-z0-9_-]+)")
-URL_SECRET = re.compile(r"(?i)([?&](?:code|state|token|access_token|api_key|password|secret)=)[^&\s]*")
+URL_PARAMETER = re.compile(r"([?&#])([^=&#\s]{1,128})=([^&#\s]*)")
+URL_USERINFO = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@")
+SENSITIVE_NAMES = {re.sub(r"[^a-z0-9]", "", key.lower()) for key in SENSITIVE}
+IDENTIFIER_NAMES = {"tokenid", "ownerid", "userid", "requestid", "targetid", "mcpid", "serverid", "leaseid", "proposalid"}
+
+
+def sensitive_key(key):
+    name = re.sub(r"[^a-z0-9]", "", unquote(str(key)).lower())
+    return name not in IDENTIFIER_NAMES and (name in SENSITIVE_NAMES or any(
+        part in name for part in ("token", "secret", "password", "authorization", "apikey")))
+
+
+def scrub_parameter(match):
+    key = match.group(2)
+    secret = sensitive_key(key) or unquote(key).lower() == "key"
+    return match.group(1) + key + "=" + ("[REDACTED]" if secret else match.group(3))
 
 
 def clean(value, *, depth=0):
     if depth > 8:
         return "[DEPTH_LIMIT]"
     if isinstance(value, dict):
-        return {str(key)[:128]: "[REDACTED]" if str(key).lower() in SENSITIVE
+        return {str(key)[:128]: "[REDACTED]" if sensitive_key(key)
                 or str(key).lower() in {"env", "headers", "env_headers"} else clean(item, depth=depth + 1)
                 for key, item in list(value.items())[:200]}
     if isinstance(value, (list, tuple)):
         return [clean(item, depth=depth + 1) for item in value[:200]]
     if isinstance(value, str):
-        return URL_SECRET.sub(r"\1[REDACTED]", TOKEN_PATTERN.sub("[REDACTED]", value))[:4096]
+        value = TOKEN_PATTERN.sub("[REDACTED]", value)
+        value = URL_USERINFO.sub(r"\1[REDACTED]@", value)
+        return URL_PARAMETER.sub(scrub_parameter, value)[:4096]
     if isinstance(value, datetime):
         return value.isoformat()
     if value is None or isinstance(value, (int, float, bool)):
@@ -85,6 +104,12 @@ def timestamp(value=None):
 
 
 def normalize(event, *, fallback_id=None):
+    for key in ("event_id", "timestamp", "action", "user_id", "username", "actor_type",
+                "target_type", "target_id", "target_name", "result", "source", "ip", "request_id"):
+        if event.get(key) is not None and not isinstance(event[key], str):
+            raise TypeError("Audit metadata must be scalar text: " + key)
+    if event.get("details") is not None and not isinstance(event["details"], dict):
+        raise TypeError("Audit details must be an object")
     action = str(event.get("action") or "unknown")[:128]
     details = safe_details(action, event.get("details"), historical=True)
     raw_result = event.get("result", details.get("result", "unknown"))
@@ -125,5 +150,6 @@ def build_event(action, user_id, details, **context):
                   event_id=uuid.uuid4().hex)
     values.setdefault("source", "system")
     values.setdefault("actor_type", "user" if user_id else "anonymous" if values["source"] == "web" else "system")
-    values.setdefault("result", details.get("result", "success") if isinstance(details, dict) else "success")
+    default_result = "failure" if action in FAILURE_ACTIONS else "success"
+    values.setdefault("result", details.get("result", default_result) if isinstance(details, dict) else default_result)
     return normalize(values)

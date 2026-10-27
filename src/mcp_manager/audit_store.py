@@ -83,6 +83,10 @@ class AuditStore:
         value = json.loads(raw)
         if not isinstance(value, dict):
             raise TypeError("Audit event must be an object")
+        if not isinstance(value.get("timestamp"), str) or not value["timestamp"]:
+            raise ValueError("Raw audit event must have its original timestamp")
+        if not isinstance(value.get("action"), str) or not value["action"]:
+            raise ValueError("Raw audit event must have an action")
         digest = hashlib.sha256(path.name.encode() + str(offset).encode() + raw).hexdigest()
         return normalize(value, fallback_id=digest)
 
