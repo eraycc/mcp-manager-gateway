@@ -58,7 +58,7 @@ async def test_maintenance_steps_continue_after_one_failure(monkeypatch):
     await app_module._maintenance_cycle(SimpleNamespace(state=state))
     assert calls == ["failed", "succeeded"]
     assert audits == [
-        ("maintenance.error", None, {"step": "failed", "error": "first failed"})
+        ("maintenance.error", None, {"step": "failed", "error_type": "RuntimeError"})
     ]
 
 
