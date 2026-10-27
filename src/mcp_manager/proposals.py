@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import func, or_, select
 
+from .audit_context import audited
 from .catalog import masked, restore, validate_slug, web_authorizer
 from .database import ApiToken, McpProposal, McpServer, User, now
 from .diagnostics import safe_gateway_error
@@ -229,6 +230,9 @@ async def submit_proposals(app, user, token, value):
         await session.flush()
         result = [{"id": row.id, "name": app.state.catalog.unseal(row.payload)["name"], "status": row.status}
                   for row in rows]
+    await app.state.logs.audit("mcp.proposal.submit", user.id,
+        {"count": len(result), "ids": [item["id"] for item in result]},
+        username=user.username, source="gateway", target_type="proposal")
     return {"items": result, "message": "MCP 提议已提交，请前往控制面板审批"}
 
 
@@ -352,6 +356,7 @@ async def _configure(row, values, catalog, session=None):
 
 
 @router.patch("/{proposal_id}")
+@audited("mcp.proposal.configure", target_type="proposal", id_param="proposal_id")
 async def configure(proposal_id: str, data: dict, request: Request, user=ADMIN):
     async with request.app.state.db.locked() as session:
         await web_authorizer(request)(session)
@@ -579,11 +584,12 @@ async def approve(proposal_id: str, data: dict, request: Request, user=ADMIN):
     await catalog.refresh_after_change(created, actor.id, web_authorizer(request))
     await request.app.state.logs.audit("mcp.proposal.approve", actor.id, {
         "proposal_id": proposal_id, "mcp_id": created.id,
-    })
+    }, target_type="proposal", target_id=proposal_id, target_name=created.name)
     return result
 
 
 @router.post("/{proposal_id}/reject")
+@audited("mcp.proposal.reject", target_type="proposal", id_param="proposal_id")
 async def reject(proposal_id: str, data: dict, request: Request, user=ADMIN):
     reason = str(data.get("reason", "")).strip()
     if not reason:
@@ -604,6 +610,7 @@ async def reject(proposal_id: str, data: dict, request: Request, user=ADMIN):
 
 
 @router.delete("/{proposal_id}")
+@audited("mcp.proposal.delete", target_type="proposal", id_param="proposal_id")
 async def remove(proposal_id: str, request: Request, user=ADMIN):
     async with request.app.state.db.locked() as session:
         await web_authorizer(request)(session)

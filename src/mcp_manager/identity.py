@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
+from .audit_context import audited, bind_actor, enrich
 from .database import ApiToken, AuthSession, Database, McpServer, SystemSetting, User, get_setting, now, uid
 from .token_secrets import decrypt_token_secret, encrypt_token_secret
 
@@ -219,6 +220,7 @@ async def revalidate_user(request: Request, session, *, require_admin: bool = Fa
     if require_admin and user.role != "admin":
         raise HTTPException(403, "Administrator required")
     request.state.session_id = auth.id
+    bind_actor(request, user)
     return user
 
 
@@ -388,6 +390,7 @@ async def bootstrap(request: Request):
 
 
 @router.post("/auth/register")
+@audited("identity.register", target_type="user")
 async def register(data: Register, request: Request):
     origin_check(request)
     db = request.app.state.db
@@ -413,6 +416,7 @@ async def register(data: Register, request: Request):
 
 
 @router.post("/auth/login")
+@audited("identity.login", target_type="user")
 async def login(data: Login, request: Request, response: Response):
     origin_check(request)
     db, config = request.app.state.db, request.app.state.config
@@ -459,6 +463,7 @@ async def login(data: Login, request: Request, response: Response):
             user_agent=(request.headers.get("user-agent") or "")[:1024] or None,
         )
         s.add(session)
+        bind_actor(request, user)
         payload = {"sub": user.id, "jti": session.id, "iss": ISSUER, "aud": AUDIENCE, "iat": now()}
         if expiry:
             payload["exp"] = expiry
@@ -476,6 +481,7 @@ ADMIN_USER = Depends(admin_user)
 
 
 @router.post("/auth/logout")
+@audited("identity.logout", target_type="user")
 async def logout(request: Request, response: Response, user=CURRENT_USER):
     async with request.app.state.db.locked() as s:
         await revalidate_user(request, s)
@@ -492,6 +498,7 @@ async def me(user=CURRENT_USER):
 
 
 @router.patch("/me")
+@audited("user.update", target_type="user")
 async def update_me(data: ProfilePatch, request: Request, user=CURRENT_USER):
     db = request.app.state.db
     values = data.model_dump(exclude_unset=True, exclude_none=True)
@@ -535,6 +542,7 @@ async def sessions(request: Request, user=CURRENT_USER):
 
 
 @router.post("/me/sessions/revoke-others")
+@audited("identity.session.revoke", target_type="user")
 async def revoke_other_sessions(request: Request, user=CURRENT_USER):
     async with request.app.state.db.locked() as s:
         user = await revalidate_user(request, s)
@@ -548,6 +556,7 @@ async def revoke_other_sessions(request: Request, user=CURRENT_USER):
 
 
 @router.post("/me/sessions/delete-others")
+@audited("identity.session.revoke", target_type="user")
 async def delete_other_sessions(request: Request, user=CURRENT_USER):
     async with request.app.state.db.locked() as s:
         user = await revalidate_user(request, s)
@@ -561,6 +570,7 @@ async def delete_other_sessions(request: Request, user=CURRENT_USER):
 
 
 @router.delete("/me/sessions/{session_id}")
+@audited("identity.session.revoke", target_type="user")
 async def revoke_session(session_id: str, request: Request, user=CURRENT_USER):
     async with request.app.state.db.locked() as s:
         user = await revalidate_user(request, s)
@@ -572,6 +582,7 @@ async def revoke_session(session_id: str, request: Request, user=CURRENT_USER):
 
 
 @router.delete("/me/sessions/{session_id}/permanent")
+@audited("identity.session.revoke", target_type="user")
 async def delete_session(session_id: str, request: Request, user=CURRENT_USER):
     async with request.app.state.db.locked() as s:
         user = await revalidate_user(request, s)
@@ -614,6 +625,7 @@ async def users(request: Request, q: str = "", page: int = 1, page_size: int = 2
 
 
 @router.post("/users")
+@audited("user.create", target_type="user")
 async def create_user(data: UserCreate, request: Request, user=ADMIN_USER):
     values = data.model_dump(exclude={"password"})
     encoded = await _password_call(request, "hash", data.password)
@@ -626,6 +638,7 @@ async def create_user(data: UserCreate, request: Request, user=ADMIN_USER):
 
 
 @router.post("/users/batch")
+@audited("user.batch", target_type="user")
 async def batch_users(data: Batch, request: Request, user=ADMIN_USER):
     async with request.app.state.db.locked() as s:
         await revalidate_user(request, s, require_admin=True)
@@ -643,6 +656,7 @@ async def batch_users(data: Batch, request: Request, user=ADMIN_USER):
 
 
 @router.patch("/users/{user_id}")
+@audited("user.update", target_type="user", id_param="user_id")
 async def patch_user(user_id: str, data: UserPatch, request: Request, user=ADMIN_USER):
     encoded = await _password_call(request, "hash", data.password) if data.password else None
     async with request.app.state.db.locked() as s:
@@ -650,7 +664,11 @@ async def patch_user(user_id: str, data: UserPatch, request: Request, user=ADMIN
         target = await s.get(User, user_id)
         if not target:
             raise HTTPException(404, "User not found")
+        old_role = target.role
         values = data.model_dump(exclude_unset=True, exclude_none=True, exclude={"current_password", "password"})
+        enrich(details={"changed_fields": sorted(values), "changes": {
+            key: {"old": getattr(target, key), "new": value} for key, value in values.items()
+            if key in {"role", "disabled", "scope_mode", "mcp_ids"}}})
         for key, value in values.items():
             setattr(target, key, value)
         if data.password:
@@ -659,16 +677,23 @@ async def patch_user(user_id: str, data: UserPatch, request: Request, user=ADMIN
             target.auth_version += 1
         await commit_user(s)
         await last_admin(s)
-        return public(target)
+        result = public(target)
+    if old_role != target.role:
+        await request.app.state.logs.audit("user.role_change", user.id,
+            {"old_role": old_role, "new_role": target.role}, target_type="user", target_id=user_id,
+            target_name=target.username)
+    return result
 
 
 @router.delete("/users/{user_id}")
+@audited("user.delete", target_type="user", id_param="user_id")
 async def delete_user(user_id: str, request: Request, user=ADMIN_USER):
     async with request.app.state.db.locked() as s:
         await revalidate_user(request, s, require_admin=True)
         target = await s.get(User, user_id)
         if not target:
             raise HTTPException(404, "User not found")
+        enrich(target_name=target.username)
         await remove_user(s, target)
         await s.flush()
         await last_admin(s)
@@ -736,6 +761,7 @@ async def tokens(request: Request, q: str = "", page: int = 1, page_size: int = 
 
 
 @router.post("/tokens")
+@audited("token.create", target_type="token")
 async def create_token(data: TokenCreate, request: Request, response: Response, user=CURRENT_USER):
     db = request.app.state.db
     async with db.locked() as s:
@@ -768,12 +794,13 @@ async def revoke_token_leases(request, token_id):
 
 
 @router.get("/tokens/{token_id}/secret")
+@audited("token.secret.reveal", target_type="token", id_param="token_id")
 async def reveal_token_secret(token_id: str, request: Request, response: Response, user=CURRENT_USER):
     async with request.app.state.db.locked() as session:
         user = await revalidate_user(request, session)
         token = await owned_token(session, token_id, user)
         secret = decrypt_token_secret(request.app.state.config, token.token_secret) if token.token_secret else None
-        owner_id = token.user_id
+        enrich(target_name=token.name)
     if secret is None:
         return JSONResponse(
             {
@@ -783,14 +810,12 @@ async def reveal_token_secret(token_id: str, request: Request, response: Respons
             status_code=409,
             headers={"Cache-Control": "no-store"},
         )
-    logs = getattr(request.app.state, "logs", None)
-    if logs:
-        await logs.audit("token.secret.reveal", user.id, {"token_id": token_id, "owner_id": owner_id})
     response.headers["Cache-Control"] = "no-store"
     return {"token": secret}
 
 
 @router.patch("/tokens/{token_id}")
+@audited("token.update", target_type="token", id_param="token_id")
 async def patch_token(token_id: str, data: TokenPatch, request: Request, user=CURRENT_USER):
     db = request.app.state.db
     async with db.locked() as s:
@@ -802,6 +827,9 @@ async def patch_token(token_id: str, data: TokenPatch, request: Request, user=CU
             raise HTTPException(403, "Only administrators may enable MCP proposals")
         scope_changed = ((data.scope_mode is not None and data.scope_mode != token.scope_mode)
                          or (data.mcp_ids is not None and set(data.mcp_ids) != set(token.mcp_ids)))
+        enrich(target_name=token.name, details={"changed_fields": sorted(values), "changes": {
+            key: {"old": getattr(token, key), "new": value} for key, value in values.items()
+            if key in {"disabled", "scope_mode", "mcp_ids", "enable_resource_tools", "enable_mcp_proposal", "expires_at"}}})
         for key, value in values.items():
             if value is not None or key == "expires_at":
                 setattr(token, key, value)
@@ -818,16 +846,19 @@ async def patch_token(token_id: str, data: TokenPatch, request: Request, user=CU
 
 
 @router.delete("/tokens/{token_id}")
+@audited("token.delete", target_type="token", id_param="token_id")
 async def delete_token(token_id: str, request: Request, user=CURRENT_USER):
     async with request.app.state.db.locked() as s:
         user = await revalidate_user(request, s)
         token = await owned_token(s, token_id, user)
+        enrich(target_name=token.name)
         await s.delete(token)
     await revoke_token_leases(request, token_id)
     return {"ok": True}
 
 
 @router.post("/tokens/{token_id}/rotate")
+@audited("token.rotate", target_type="token", id_param="token_id")
 async def rotate_token(token_id: str, request: Request, response: Response, user=CURRENT_USER):
     async with request.app.state.db.locked() as s:
         user = await revalidate_user(request, s)

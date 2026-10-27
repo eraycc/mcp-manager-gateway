@@ -98,6 +98,9 @@ class LogStore:
         self.conn.execute("CREATE INDEX IF NOT EXISTS payload_artifact ON payloads(artifact_id)")
         self.conn.commit()
         self._rebuild()
+        from .audit_store import AuditStore
+
+        self.audits = AuditStore(self)
 
     async def append(self, event):
         async with self.capacity:
@@ -530,16 +533,8 @@ class LogStore:
                         for row in rows}
         return await asyncio.to_thread(query)
 
-    async def audit(self, action, user_id, details):
-        await asyncio.to_thread(self._audit, action, user_id, details)
-
-    def _audit(self, action, user_id, details):
-        path = self.root / "audit"
-        path.mkdir(exist_ok=True)
-        event = {"event_id": uuid.uuid4().hex, "timestamp": datetime.now(UTC).isoformat(),
-                 "action": action, "user_id": user_id, "details": redact(details)}
-        with self.lock, (path / (datetime.now(self.timezone).strftime("%Y-%m-%d") + ".jsonl")).open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+    async def audit(self, action, user_id, details, **context):
+        return await self.audits.append(action, user_id, details, **context)
 
     async def close(self):
         with self.lock:

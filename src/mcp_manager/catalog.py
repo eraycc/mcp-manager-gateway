@@ -666,6 +666,8 @@ class Catalog:
                 row = await self.create_in_session(session, values, user_id=user_id)
         except IntegrityError:
             raise HTTPException(409, "MCP slug already exists") from None
+        await self.logs.audit("mcp.create", user_id, {"mcp_id": row.id},
+                              target_type="mcp", target_id=row.id, target_name=row.name)
         self.runtime.versions[row.id] = row.revision
         if discover:
             await self.refresh_after_change(row, user_id, authorize)
@@ -724,6 +726,9 @@ class Catalog:
                     await s.flush()
                     if oauth_changed and self.oauth:
                         cleared_states = self.oauth.flows.invalidate(server_id)
+                await self.logs.audit("mcp.update", user_id,
+                    {"mcp_id": row.id, "revision": row.revision, "changed_fields": sorted(values)},
+                    target_type="mcp", target_id=row.id, target_name=row.name)
                 if oauth_changed and self.oauth:
                     await self.oauth.audit("oauth.state_invalidated", user_id, server_id,
                                            reason="config_changed", cleared_states=cleared_states)
@@ -760,6 +765,10 @@ class Catalog:
                     anonymous = await s.get(SystemSetting, "anonymous_mcp_ids")
                     if anonymous:
                         anonymous.value = [item for item in anonymous.value if item != server_id]
+                from .audit_events import AUDIT_CONTEXT
+
+                await self.logs.audit("mcp.delete", (AUDIT_CONTEXT.get() or {}).get("user_id"),
+                    {"mcp_id": server_id}, target_type="mcp", target_id=server_id, target_name=row.name)
                 invalidate_setting_cache(
                     self.db, ["tests:" + server_id, "anonymous_mcp_ids"]
                 )
@@ -1012,7 +1021,7 @@ class Catalog:
                 exc = await self.record_refresh_failure(
                     row, exc, user_id, had_ready=had_ready, scope=scope, expected_refresh=expected_refresh,
                 )
-            await self.logs.audit("mcp.start.failed", user_id, {"server_id": server_id, "error": str(exc)})
+            await self.logs.audit("mcp.start.failed", user_id, {"server_id": server_id, "error_type": type(exc).__name__})
             raise
         finally:
             if lease:
