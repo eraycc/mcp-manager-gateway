@@ -227,11 +227,21 @@ dialog{max-width:calc(100vw - 28px);overflow:hidden}
 .audit-advanced>summary{cursor:pointer;font-weight:600}
 .audit-filters{padding-top:16px}
 .audit-page .table-card{min-width:0}
-.audit-target{max-width:180px;overflow-wrap:anywhere}
-.audit-target .subtext{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px}
+.audit-page .table-card table{table-layout:fixed;min-width:1100px}
+.audit-page .table-card th:nth-child(1){width:44px}
+.audit-page .table-card th:nth-child(2){width:168px}
+.audit-page .table-card th:nth-child(3){width:124px}
+.audit-page .table-card th:nth-child(4){width:144px}
+.audit-page .table-card th:nth-child(5){width:160px}
+.audit-page .table-card th:nth-child(6){width:76px}
+.audit-page .table-card th:nth-child(7){width:140px}
+.audit-page .table-card th:nth-child(9){width:76px}
+.audit-cell-text{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.audit-target{min-width:0}
+.audit-target .subtext{max-width:100%}
 .audit-time{white-space:nowrap}
-.audit-summary{display:block;max-width:260px;overflow-wrap:anywhere}
-.audit-action-code{font-size:11px;overflow-wrap:anywhere}
+.audit-summary{display:-webkit-box;max-width:260px;max-height:3.1em;overflow:hidden;white-space:normal;overflow-wrap:anywhere;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2}
+.audit-action-code{font-size:11px}
 .audit-detail-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0}
 .audit-detail-facts dt{color:var(--muted);font-size:12px}
 .audit-detail-facts dd{margin:3px 0 0;overflow-wrap:anywhere}

@@ -1,4 +1,5 @@
 """Audit management in a real browser against an isolated temporary gateway."""
+import json
 import os
 
 from playwright.async_api import async_playwright, expect
@@ -67,4 +68,64 @@ async def test_non_admin_cannot_open_audit_page(running_gateway):
         await expect(page.get_by_role("link", name="审计日志", exact=True)).to_have_count(0)
         await page.goto(url + "/#/audit-logs")
         await expect(page).to_have_url(url + "/#/dashboard")
+        await browser.close()
+
+
+async def test_legacy_audit_json_and_long_columns_stay_bounded(running_gateway, tmp_path):
+    app, _web, url, _, _ = running_gateway
+    long_name = "历史操作人-" + "account-" * 40
+    long_ip = "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255"
+    records = [
+        {"event_id": "legacy-lease-overflow", "action": "lease.disconnect", "details": {
+            "lease_id": "499a8fa10c17450f936be969ea024c58", "ok": True, "released": True,
+            "already_released": False, "session_cleanup_ok": True,
+            "instances": [{"name": "historical-instance-" * 20, "phase": "stopped"} for _ in range(5)]}},
+        {"event_id": "legacy-storage-overflow", "action": "storage.startup", "details": {
+            "database": "main", "before": {"page_bytes": 64917504, "free_bytes": 41172992,
+            "free_percent": 63.42355984604707, "diagnostic": "historical-storage-detail-" * 30},
+            "after": {"page_bytes": 23744512, "free_bytes": 0}}},
+    ]
+    legacy = app.state.logs.audits.root / "2026-09-11.jsonl"
+    legacy.write_text("".join(json.dumps(record | {
+        "timestamp": "2026-09-11T01:00:00Z", "user_id": "legacy-user", "username": long_name,
+        "target_name": "历史对象-" + "target-" * 40, "ip": long_ip,
+    }, ensure_ascii=False) + "\n" for record in records), encoding="utf-8")
+    async with async_playwright() as pw:
+        executable = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+        browser = await pw.chromium.launch(headless=True, executable_path=executable if os.path.exists(executable) else None)
+        page = await browser.new_page(viewport={"width": 1440, "height": 1000})
+        await login(page, url)
+        await page.goto(url + "/#/audit-logs")
+        for width in [1440, 390, 320]:
+            await page.set_viewport_size({"width": width, "height": 1000})
+            for record in records:
+                row = page.locator('tr[data-row-id="' + record["event_id"] + '"]')
+                await expect(row).to_be_visible()
+                bounds = await row.evaluate("""row => {
+                    const table = row.closest('table'), scroll = table.parentElement;
+                    const summary = row.cells[7].firstElementChild, ip = row.cells[6].firstElementChild;
+                    return {
+                        table: table.getBoundingClientRect().width, container: scroll.clientWidth,
+                        summaryHeight: summary.getBoundingClientRect().height,
+                        lineHeight: parseFloat(getComputedStyle(summary).lineHeight),
+                        summaryOverflow: getComputedStyle(summary).overflow,
+                        ipEllipsis: ip ? getComputedStyle(ip).textOverflow : null,
+                        rowHeight: row.getBoundingClientRect().height
+                    };
+                }""")
+                assert bounds["table"] <= max(1100, bounds["container"]) + 2, bounds
+                assert bounds["summaryHeight"] <= bounds["lineHeight"] * 2 + 1, bounds
+                assert bounds["summaryOverflow"] == "hidden", bounds
+                assert bounds["ipEllipsis"] == "ellipsis", bounds
+                assert bounds["rowHeight"] <= 80, bounds
+            assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+            if width in [1440, 390]:
+                await page.wait_for_function("!document.querySelector('#toast')?.classList.contains('show')")
+                await page.locator("#main").screenshot(path=str(tmp_path / ("audit-overflow-" + str(width) + ".png")))
+        row = page.locator('tr[data-row-id="legacy-lease-overflow"]')
+        await row.get_by_role("button", name="详情", exact=True).click()
+        detail = page.get_by_role("dialog", name="审计详情", exact=True)
+        await expect(detail).to_contain_text("historical-instance-" * 20)
+        await expect(detail).to_contain_text(long_ip)
+        await expect(detail).to_contain_text(long_name)
         await browser.close()

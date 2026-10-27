@@ -15,6 +15,7 @@ const actors={user:'用户',system:'系统',anonymous:'未登录用户'};
 const sources={web:'控制台',gateway:'网关',system:'系统',cli:'命令行',unknown:'历史记录'};
 const fieldNames={title:'站点名称',role:'角色',disabled:'启用状态',scope_mode:'授权范围',mcp_ids:'授权服务',log_retention_days:'日志保留天数',enable_resource_tools:'资源工具',enable_mcp_proposal:'提议权限',exposeNativeResources:'原生资源列表'};
 const size=value=>value<1024?value+' B':value<1048576?(value/1024).toFixed(1)+' KiB':(value/1048576).toFixed(1)+' MiB';
+const cellText=(value,className='')=>el('span',{class:'audit-cell-text '+className,title:String(value??'—')},value??'—');
 const outcome=value=>el('span',{class:'badge '+(value==='success'?'good':value==='failure'?'bad':'blue')},results[value]||value);
 const localInput=value=>value?new Date(new Date(value).getTime()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16):'';
 function summary(row){
@@ -82,11 +83,11 @@ export async function auditLogs(main,signal){
   for(let start=0;start<ids.length;start+=500){if(!await execute('/audit-logs/delete',{method:'POST',body:{ids:ids.slice(start,start+500)}}))return false}return true;
  });
  reload=await tablePage(main,{path:'/audit-logs',signal,onData:data=>{matching=data.total},columns:[
-  ['时间',row=>el('span',{class:'audit-time'},date(row.timestamp))],
-  ['操作人',row=>el('div',{},row.username||actors[row.actor_type]||'未知',el('span',{class:'subtext'},sources[row.source]||row.source))],
-  ['动作',row=>el('div',{},labels[row.action]||row.action,el('span',{class:'subtext audit-action-code'},row.action))],
-  ['对象',row=>el('div',{class:'audit-target',title:row.target_id||''},row.target_name||row.target_type||'—',el('span',{class:'subtext'},row.target_id||''))],
-  ['结果',row=>outcome(row.result)],['IP',row=>row.ip||'—'],['摘要',row=>el('span',{class:'audit-summary'},summary(row))]
+  ['时间',row=>cellText(date(row.timestamp),'audit-time')],
+  ['操作人',row=>el('div',{},cellText(row.username||actors[row.actor_type]||'未知'),cellText(sources[row.source]||row.source,'subtext'))],
+  ['动作',row=>el('div',{},cellText(labels[row.action]||row.action),cellText(row.action,'subtext audit-action-code'))],
+  ['对象',row=>el('div',{class:'audit-target'},cellText(row.target_name||row.target_type||'—'),cellText(row.target_id||'','subtext'))],
+  ['结果',row=>outcome(row.result)],['IP',row=>cellText(row.ip)],['摘要',row=>{const text=summary(row);return el('span',{class:'audit-summary',title:text},text)}]
  ],filters:[['category','类别',Object.entries(categories)],['result','结果',Object.entries(results)]],
  actions:[button('删除全部匹配',filteredDelete,'danger')],rowActions:row=>[button('详情',()=>showDetail(row))],
  bulk:[['删除选中',removeSelected]]});
