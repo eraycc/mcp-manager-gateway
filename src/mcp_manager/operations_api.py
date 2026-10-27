@@ -25,7 +25,7 @@ DEFAULTS = {"title": "MCP Manager", "registration_enabled": True, "jwt_days": 30
             "bridge_heartbeat_seconds": 90, "bridge_missed_heartbeats": 3,
             "startup_failure_threshold": 3, "timezone": "Asia/Shanghai", "embedded_resource.inject": False,
             "exposeNativeResources": True,
-            "log_retention_days": 0, "cors_origins": ["*"], "allowed_hosts": ["*"],
+            "log_retention_days": 0, "audit_log_retention_days": 0, "cors_origins": ["*"], "allowed_hosts": ["*"],
             "update_auto_check": True, "update_check_interval_seconds": DEFAULT_AUTO_CHECK_INTERVAL_SECONDS,
             "translation_config": DEFAULT_TRANSLATION_CONFIG}
 FILTERS = {"q", "username", "user_id", "token_id", "mcp_id", "tool_name", "status", "source",
@@ -293,7 +293,7 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
                 "embedded_resource.inject", "exposeNativeResources"):
         if not isinstance(result[key], bool):
             raise HTTPException(422, key + " must be a boolean")
-    for key in ("jwt_days", "idle_seconds", "log_retention_days"):
+    for key in ("jwt_days", "idle_seconds", "log_retention_days", "audit_log_retention_days"):
         if not isinstance(result[key], (int, float)) or isinstance(result[key], bool) or result[key] < 0:
             raise HTTPException(422, key + " must be nonnegative")
     update_interval = result["update_check_interval_seconds"]
@@ -353,7 +353,7 @@ async def update_settings(data: dict, request: Request, user=ADMIN):
     request.app.state.catalog.startup_failure_threshold = result["startup_failure_threshold"]
     request.app.state.logs.timezone = ZoneInfo(result["timezone"])
     request.app.state.refresh_next = None
-    if "log_retention_days" in data:
+    if {"log_retention_days", "audit_log_retention_days"} & data.keys():
         request.app.state.retention_next = 0
     if audit_changes:
         await request.app.state.logs.audit("settings.update", user.id, {"changes": audit_changes},

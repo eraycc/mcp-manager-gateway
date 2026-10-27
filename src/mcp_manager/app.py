@@ -242,7 +242,9 @@ async def _log_retention(app):
 
             cutoff = now() - timedelta(days=days, microseconds=1)
             await state.logs.delete(to_time=cutoff.isoformat())
-            await state.logs.audits.retain(days, at=now())
+        audit_days = await get_setting(state.db, "audit_log_retention_days", 0)
+        if audit_days:
+            await state.logs.audits.retain(audit_days, at=now())
         from .retention import run_startup_cache_cleanup, run_storage_retention
 
         if not state.cache_cleanup_done:

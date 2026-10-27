@@ -13,7 +13,7 @@ const categories={identity:'身份认证',token:'访问令牌',user:'用户权�
 const results={success:'成功',failure:'失败',pending:'进行中',unknown:'未知'};
 const actors={user:'用户',system:'系统',anonymous:'未登录用户'};
 const sources={web:'控制台',gateway:'网关',system:'系统',cli:'命令行',unknown:'历史记录'};
-const fieldNames={title:'站点名称',role:'角色',disabled:'启用状态',scope_mode:'授权范围',mcp_ids:'授权服务',log_retention_days:'日志保留天数',enable_resource_tools:'资源工具',enable_mcp_proposal:'提议权限',exposeNativeResources:'原生资源列表'};
+const fieldNames={title:'站点名称',role:'角色',disabled:'启用状态',scope_mode:'授权范围',mcp_ids:'授权服务',log_retention_days:'调用日志保留天数',audit_log_retention_days:'审计日志保留天数',enable_resource_tools:'资源工具',enable_mcp_proposal:'提议权限',exposeNativeResources:'原生资源列表'};
 const size=value=>value<1024?value+' B':value<1048576?(value/1024).toFixed(1)+' KiB':(value/1048576).toFixed(1)+' MiB';
 const cellText=(value,className='')=>el('span',{class:'audit-cell-text '+className,title:String(value??'—')},value??'—');
 const outcome=value=>el('span',{class:'badge '+(value==='success'?'good':value==='failure'?'bad':'blue')},results[value]||value);

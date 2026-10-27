@@ -449,6 +449,9 @@ class LogStore:
             if ids is not None:
                 selected.intersection_update(ids)
             if not selected:
+                for path in self.root.glob("????-??-??.jsonl"):
+                    if path.stat().st_size == 0:
+                        path.unlink()
                 return 0
             journal = self.root / "deletions" / (datetime.now(self.timezone).strftime("%Y-%m-%d") + ".jsonl")
             with journal.open("a", encoding="utf-8") as f:
@@ -489,7 +492,10 @@ class LogStore:
                                 target.write(raw)
                         target.flush()
                         os.fsync(target.fileno())
-                    os.replace(temp, path)
+                    if temp.stat().st_size:
+                        os.replace(temp, path)
+                    else:
+                        path.unlink()
                 finally:
                     temp.unlink(missing_ok=True)
 

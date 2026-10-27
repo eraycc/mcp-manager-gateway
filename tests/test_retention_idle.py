@@ -161,3 +161,20 @@ async def test_idle_zero_keeps_gateway_session_until_explicit_close():
         assert connection.closed == 1
     finally:
         await runtime.close()
+
+@pytest.mark.parametrize(("call_days", "audit_days"), [(0, 0), (7, 0), (0, 7), (7, 7)])
+async def test_call_and_audit_retention_are_independent(retention_app, monkeypatch, call_days, audit_days):
+    state = retention_app.state
+    await set_setting(state.db, "log_retention_days", call_days)
+    await set_setting(state.db, "audit_log_retention_days", audit_days)
+    audits = {}
+    for identity, stamp in EVENTS:
+        await state.logs.append({"id": identity, "timestamp": stamp, "status": "success"})
+        audits[identity] = await state.logs.audit("test.retention", None, {}, timestamp=stamp)
+    await maintenance_pass(retention_app, monkeypatch)
+    expected_calls = {"boundary", "recent"} if call_days else {identity for identity, _ in EVENTS}
+    expected_audits = {"boundary", "recent"} if audit_days else {identity for identity, _ in EVENTS}
+    assert {row["id"] for row in (await state.logs.query())["items"]} == expected_calls
+    for identity, event_id in audits.items():
+        assert bool(await state.logs.audits.detail(event_id)) == (identity in expected_audits)
+    assert all(path.stat().st_size > 0 for path in state.logs.root.glob("????-??-??.jsonl"))
