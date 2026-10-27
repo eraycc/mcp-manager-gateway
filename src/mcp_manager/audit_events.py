@@ -40,7 +40,12 @@ POLICIES = {
 }
 for _action in ("start", "authorized", "refresh", "client", "reset", "state_invalidated", "cimd_verify", "cimd_fallback"):
     POLICIES["oauth." + _action] = {"registration_mode", "reason", "auth_mode", "code", "status"}
-FAILURE_ACTIONS = {"identity.login_failed", "mcp.start.failed", "maintenance.error", "storage.startup.error"}
+POLICIES["oauth.callback_failed"] = {"reason", "state_reason", "state_prefix"}
+POLICIES["oauth.state_invalidated"].add("cleared_states")
+POLICIES["oauth.reset"].update({"cleared_states", "cleared_client"})
+FAILURE_ACTIONS = {
+    "identity.login_failed", "mcp.start.failed", "maintenance.error", "storage.startup.error", "oauth.callback_failed",
+}
 ACTIONS = [{"action": action, "category": action.split(".")[0]} for action in sorted(POLICIES)]
 SENSITIVE = SECRET_KEYS | {"state", "code", "code_challenge", "set-cookie", "set_cookie", "session_id"}
 TOKEN_PATTERN = re.compile(r"(?i)(?:bearer\s+[^\s,;]+|mcpm_[a-z0-9_-]+)")

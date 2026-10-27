@@ -52,9 +52,11 @@ async def test_new_start_replaces_previous_state_in_same_scope(db_app, monkeypat
 @pytest.fixture
 def audit_events(db_app, monkeypatch):
     events = []
+    emit = db_app.app.state.catalog.logs.audit
 
-    async def audit(action, actor, details):
+    async def audit(action, actor, details, **context):
         events.append((action, actor, copy.deepcopy(details)))
+        return await emit(action, actor, details, **context)
 
     monkeypatch.setattr(db_app.app.state.catalog.logs, "audit", audit)
     return events
@@ -709,3 +711,51 @@ async def test_reset_blocks_inflight_cimd_to_dcr_fallback(db_app, monkeypatch):
     assert shared["oauth_registration"]["mode"] == "cimd"
     personal = await db_app.app.state.credentials.load(row.id, db_app.actor["id"])
     assert not personal.get("oauth_token")
+
+
+@pytest.mark.parametrize("kind", ["issuer", "exchange", "provider", "used"])
+async def test_failed_callback_persists_failure_classification_and_safe_context(db_app, monkeypatch, kind):
+    discovery(monkeypatch, cimd=False)
+    row = await server(db_app)
+    pending = (await begin(db_app, row))["state"][0]
+
+    async def exchange(auth, data):
+        if kind == "exchange":
+            raise GatewayError("oauth_failed", "synthetic exchange rejection")
+        return {"access_token": "synthetic-access", "expires_at": None}
+
+    monkeypatch.setattr(db_app.app.state.oauth, "exchange", exchange)
+    if kind == "used":
+        assert (await callback(db_app, pending)).status_code == 303
+    params = {"iss": "https://wrong.test"} if kind == "issuer" else (
+        {"error": "access_denied"} if kind == "provider" else {})
+    response = await callback(db_app, pending, **params)
+    assert response.status_code >= 400
+    store = db_app.app.state.logs.audits
+    page = await store.query(action="oauth.callback_failed", result="failure")
+    assert page["total"] == 1
+    record = await store.detail(page["items"][0]["event_id"])
+    assert record["target_id"] == row.id
+    assert record["details"]["state_prefix"] == pending[:8]
+    assert record["details"]["reason"] and record["details"]["state_reason"]
+    assert pending not in repr(record)
+
+
+async def test_reset_and_config_invalidation_keep_persisted_cleanup_counts(db_app, monkeypatch):
+    discovery(monkeypatch, cimd=False)
+    row = await server(db_app)
+    await begin(db_app, row)
+    await reset(db_app, row)
+    store = db_app.app.state.logs.audits
+    page = await store.query(action="oauth.reset")
+    record = await store.detail(page["items"][0]["event_id"])
+    assert record["details"]["cleared_states"] == 1
+    assert record["details"]["cleared_client"] is True
+
+    await begin(db_app, row)
+    db_app.app.state.config.public_url = "http://localhost:8765"
+    assert (await db_app.web.get(f"/api/v1/mcps/{row.id}/oauth/status")).status_code == 200
+    page = await store.query(action="oauth.state_invalidated")
+    record = await store.detail(page["items"][0]["event_id"])
+    assert record["details"]["reason"] == "config_changed"
+    assert record["details"]["cleared_states"] >= 1

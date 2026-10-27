@@ -95,11 +95,11 @@ async def test_stdio_bridge_advertises_the_same_project_identity():
     factory = getattr(bridge, "create_bridge_server", None)
     assert factory is not None, "bridge server factory is missing"
 
-    class Upstream:
+    class Upstream(bridge.BridgeUpstream):
         async def request(self, *_args, **_kwargs):
             raise AssertionError("protocol discovery must not call an upstream capability")
 
-    server = factory(Upstream())
+    server = factory(Upstream("http://not-contacted.test", ""))
     async with Client(server, cache=None) as client:
         assert client.protocol_version == "2026-07-28"
         assert client.server_info.name == PROJECT_NAME
