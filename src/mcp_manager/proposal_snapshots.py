@@ -6,7 +6,13 @@ from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from .catalog_models import ArtifactObject, ProposalTestEntry
-from .catalog_store import CatalogStore, bounded_summary_rows, digest, metadata_summary
+from .catalog_store import (
+    CatalogStore,
+    bounded_summary_rows,
+    digest,
+    metadata_summary,
+    tool_annotation_summary,
+)
 from .catalog_types import ArtifactRef, CatalogPage, GenerationRef
 from .database import McpProposal, now
 from .db_types import strict_json_dumps
@@ -65,6 +71,10 @@ class ProposalSnapshotStore(CatalogStore):
             for key in ("description", "title"):
                 if isinstance(entry.get(key), str):
                     summary[key] = entry[key][:1024]
+            if kind == "tools":
+                annotations = tool_annotation_summary(entry.get("annotations"))
+                if annotations:
+                    summary["annotations"] = annotations
             if kind in {"resources", "templates"}:
                 summary["uri" if kind == "resources" else "uriTemplate"] = name
             prepared.append((ref, ProposalTestEntry(

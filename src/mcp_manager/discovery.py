@@ -27,7 +27,8 @@ DISCOVERY = [
          **PAGING, "limit": {**PAGING["limit"], "maximum": 200, "default": 50,
                              "description": "1-200 (default 50)"}},
          "additionalProperties": False, "examples": [{"query": "files"}]},
-     "annotations": {"readOnlyHint": True, "destructiveHint": False}},
+     "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                     "idempotentHint": True, "openWorldHint": False}},
     {"name": "gateway_search_tools",
      "description": "Search tools; return full inputSchema unless names_only. Use exact gateway_name with gateway_call. Paginated; does not start services.",
      "inputSchema": {"type": "object", "properties": {
@@ -43,7 +44,8 @@ DISCOVERY = [
                         "description": "Summaries only; fetch full inputSchema before gateway_call"},
          **PAGING}, "not": {"required": ["tool", "tools"]}, "additionalProperties": False,
          "examples": [{"mcp": "<service-id>", "tool": "<tool-name>"}]},
-     "annotations": {"readOnlyHint": True, "destructiveHint": False}},
+     "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                     "idempotentHint": True, "openWorldHint": False}},
     {"name": "gateway_call",
      "description": "Call one discovered tool. Copy exact gateway_name and match arguments to its gateway_search_tools inputSchema; never guess names.",
      "inputSchema": {"type": "object", "properties": {
@@ -51,7 +53,9 @@ DISCOVERY = [
                   "description": "Exact gateway_name from gateway_search_tools"},
          "arguments": {"type": "object", "description": "Parameters matching the discovered tool's inputSchema"}},
          "required": ["name", "arguments"], "additionalProperties": False,
-         "examples": [{"name": "<gateway_name>", "arguments": {}}]}},
+         "examples": [{"name": "<gateway_name>", "arguments": {}}]},
+     "annotations": {"readOnlyHint": False, "destructiveHint": True,
+                     "idempotentHint": False, "openWorldHint": True}},
 ]
 SCHEMAS = {item["name"]: item["inputSchema"] for item in DISCOVERY}
 

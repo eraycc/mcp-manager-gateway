@@ -136,8 +136,13 @@ button.is-busy .button-label{opacity:.72}
 .capability-toolbar input{max-width:none}
 .capability-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;animation:content-in var(--motion-base) var(--ease-out)}
 .capability-card{min-width:0;margin:0;padding:18px}
-.capability-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.capability-heading{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:12px}
+.capability-identity{flex:1 1 10rem;min-width:0;overflow-wrap:anywhere}
 .capability-name{min-width:0;overflow-wrap:anywhere}
+.capability-subtitle{display:block;margin-top:4px;font-size:12px;overflow-wrap:anywhere}
+.capability-annotations{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;max-width:100%;margin-left:auto}
+.capability-annotations .orange{background:#f59e0b1a;color:#b45309}
+body.dark .capability-annotations .orange{color:#fbbf24}
 .capability-card p{margin:8px 0 14px;overflow-wrap:anywhere}
 .capability-definition{margin-top:14px;border-top:1px solid var(--line);padding-top:14px}
 .capability-definition pre{max-height:320px;margin:0}

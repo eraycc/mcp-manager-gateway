@@ -115,7 +115,8 @@ def _source(data, channel):
         if channel == "codex":
             data = tomllib.loads(data)
         elif channel == "dsh":
-            # Cordis script tags become inert markers; unrelated plugin fields are ignored.
+            # CordisLoader inherits yaml.SafeLoader, blocking arbitrary Python object construction.
+            # Its !js/!!js constructors only return inert markers and never execute scripts.
             data = yaml.load(data, Loader=CordisLoader)
         else:
             data = json.loads(data)

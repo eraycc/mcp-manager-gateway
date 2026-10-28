@@ -106,6 +106,18 @@ def metadata_summary(metadata):
     return result
 
 
+def tool_annotation_summary(annotations):
+    """Keep display hints bounded without changing the full upstream definition."""
+    if not isinstance(annotations, dict):
+        return {}
+    result = {key: annotations[key] for key in (
+        "readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"
+    ) if type(annotations.get(key)) is bool}
+    if isinstance(annotations.get("title"), str):
+        result["title"] = annotations["title"][:256]
+    return result
+
+
 def searchable_text(entry):
     from .tool_index import normalize, schema_text
 
@@ -235,6 +247,10 @@ class CatalogStore:
             for field, limit in (("title", 256), ("description", 1024)):
                 if isinstance(entry.get(field), str):
                     summary[field] = entry[field][:limit]
+            if kind == "tools":
+                annotations = tool_annotation_summary(entry.get("annotations"))
+                if annotations:
+                    summary["annotations"] = annotations
             if kind != "tools":
                 from .embeddings import resource_vector_hash
 
