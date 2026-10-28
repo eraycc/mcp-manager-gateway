@@ -53,7 +53,8 @@ RESOURCE_TOOLS = [
             "additionalProperties": False,
             "examples": [{"keyword": "config", "kind": "resource"}],
         },
-        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": False},
     },
     {
         "name": "gateway_read_resource",
@@ -71,7 +72,8 @@ RESOURCE_TOOLS = [
             "additionalProperties": False,
             "examples": [{"uri": "<returned-uri>"}],
         },
-        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "annotations": {"readOnlyHint": True, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": False},
     },
 ]
 PROPOSAL_TOOL = {
@@ -141,6 +143,8 @@ PROPOSAL_TOOL = {
             "url": "https://mcp.example/mcp", "auth": {"type": "oauth", "auth_mode": "cimd_only"},
         }}],
     },
+    "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                    "idempotentHint": False, "openWorldHint": False},
 }
 
 

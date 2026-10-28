@@ -45,6 +45,25 @@ MCP 服务的“能力/测试”、MCP 审批的“能力目录”和个人资�
 
 能力列表保持摘要分页。用户显式打开单项完整定义或执行单工具测试时，控制台显示完整响应，通过后台格式化和分批更新保持界面响应；服务器端传输与存储大小预算仍然有效，超预算返回明确错误而非成功截断。
 
+## 工具注解展示
+
+服务“能力/测试”、审批测试能力目录和个人资料“查看能力”共用工具注解展示：`annotations.title` 显示在工具名下方；`readOnlyHint`、`destructiveHint`、`idempotentHint`、`openWorldHint` 仅在严格等于布尔值 `true` 时显示绿色「只读」、红色「破坏性」、蓝色「幂等」、橙色「开放世界」标签。缺失、null、错误类型及 false 均不显示标签。提示语明确标注“上游声明，非网关保证”。
+
+分页摘要仅保留四项有效布尔字段及最多 256 字符的注解标题；未知扩展、无效值不进入摘要。完整定义仍保留原始 `annotations`，可用“查看完整定义”检查。读取摘要不会读取完整定义或启动下游。升级前已生成的服务目录需刷新，审批快照需重新测试，才能补齐注解摘要。
+
+网关自身六个工具显式声明以下注解（四项均为布尔值）：
+
+| 工具 | readOnlyHint | destructiveHint | idempotentHint | openWorldHint |
+| --- | --- | --- | --- | --- |
+| `gateway_search_mcps` | true | false | true | false |
+| `gateway_search_tools` | true | false | true | false |
+| `gateway_call` | false | true | false | true |
+| `gateway_search_resources` | true | false | true | false |
+| `gateway_read_resource` | true | false | true | false |
+| `gateway_mcp_proposals` | false | false | false | false |
+
+`gateway_call` 可代理任意已授权上游工具，使用保守声明；注解不替代权限检查或审批。
+
 ## 定时与手动刷新
 
 定时刷新使用系统设置中的 Cron 表达式和时区。例如 `0 3 * * *` 配合 `Asia/Shanghai` 表示每天北京时间 03:00。启用后按后续触发时间执行，不补跑网关停机期间错过的时间点。

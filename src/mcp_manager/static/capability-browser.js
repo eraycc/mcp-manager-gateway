@@ -1,4 +1,4 @@
-import{api,badge,button,dialog,el,empty,loading,renderFullJson}from './core.js';
+import{api,button,dialog,el,empty,loading,renderFullJson}from './core.js';
 
 export const CAPABILITY_PAGE_SIZE=50;
 export const capabilityKinds=[
@@ -14,6 +14,19 @@ export function capabilityListUrl(resource,{kind='tools',q='',cursor=null,limit=
 export function capabilityDetailUrl(resource,kind,item){
  const name=typeof item==='string'?item:kind==='resources'?item.uri:kind==='templates'?item.uriTemplate:item.name;
  return resource+'/'+encodeURIComponent(kind)+'/'+encodeURIComponent(name);
+}
+
+function toolAnnotationHeading(item){
+ const value=item.annotations;
+ const annotations=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
+ const title=typeof annotations.title==='string'?annotations.title.trim():'';
+ const badges=[
+  ['readOnlyHint','只读','good'],['destructiveHint','破坏性','bad'],
+  ['idempotentHint','幂等','blue'],['openWorldHint','开放世界','orange']
+ ].filter(([key])=>annotations[key]===true).map(([,label,color])=>
+  el('span',{class:'badge '+color,title:'上游声明，非网关保证'},label));
+ return{subtitle:title?el('span',{class:'muted capability-subtitle'},title):null,
+  badges:badges.length?el('div',{class:'capability-annotations'},...badges):null};
 }
 
 export function capabilityBrowser({resource,signal,title='能力目录',initialKind='tools',onTool,actions=[],refreshAction}){
@@ -80,9 +93,11 @@ export function capabilityBrowser({resource,signal,title='能力目录',initialK
    const card=el('article',{class:'card capability-card'});
    const detailButton=button('查看完整定义',()=>showDefinition(item,card,detailButton));
    detailButton.setAttribute('aria-expanded','false');
+   const annotations=kind==='tools'?toolAnnotationHeading(item):{};
    card.append(
-    el('div',{class:'capability-heading'},el('strong',{class:'capability-name'},nameOf(item)),
-     item.annotations?.readOnlyHint?badge('只读'):null),
+    el('div',{class:'capability-heading'},
+     el('div',{class:'capability-identity'},el('strong',{class:'capability-name'},nameOf(item)),annotations.subtitle),
+     annotations.badges),
     el('p',{class:'muted'},item.description||item.mimeType||'暂无描述'),
     el('div',{class:'actions'},detailButton,
      kind==='tools'&&onTool?button('调用测试',async()=>{

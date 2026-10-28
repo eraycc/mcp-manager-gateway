@@ -116,5 +116,17 @@ async def test_discovery_feature_switches_return_six_protocol_valid_tools(runnin
         "gateway_read_resource",
         "gateway_mcp_proposals",
     ]
-    assert tools.tools[3].annotations.read_only_hint is True
-    assert tools.tools[4].annotations.read_only_hint is True
+    expected = {
+        "gateway_search_mcps": (True, False, True, False),
+        "gateway_search_tools": (True, False, True, False),
+        "gateway_call": (False, True, False, True),
+        "gateway_search_resources": (True, False, True, False),
+        "gateway_read_resource": (True, False, True, False),
+        "gateway_mcp_proposals": (False, False, False, False),
+    }
+    fields = ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
+    for tool in tools.tools:
+        assert tool.annotations is not None, tool.name
+        annotations = tool.annotations.model_dump(by_alias=True, exclude_none=True)
+        assert annotations == dict(zip(fields, expected[tool.name], strict=True)), tool.name
+        assert all(type(value) is bool for value in annotations.values()), tool.name
