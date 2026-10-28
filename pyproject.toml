@@ -15,7 +15,7 @@ authors = [
     { name = "Eray", email = "admin@eray.cc" }
 ]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Framework :: FastAPI",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
