@@ -376,6 +376,8 @@ node --test tests/frontend/core.test.mjs
 uv build
 ~~~
 
+日常 `uv run pytest -q` 默认以最多 4 个进程运行功能回归，包含浏览器和安全边界测试；长耗时性能测试及真实外部服务测试需显式选择。可用 `--suite quick`、`--suite backend`、`--suite browser`、`--domain oauth` 或 `--changed-from <GIT_REF>` 缩小验证范围，`-n 0` 强制串行。`--suite performance` 显式运行压测，默认串行；`--suite all` 包含性能测试，真实外部服务仍需 `--run-live`。每次运行输出初始化、执行和清理耗时。详见[测试分组与保留覆盖的优化](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/development/testing.md)。
+
 - 后端：`src/mcp_manager/`
 - 前端静态资源：`src/mcp_manager/static/`
 - 数据库迁移：`src/mcp_manager/migrations/`

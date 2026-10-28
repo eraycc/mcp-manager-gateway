@@ -39,7 +39,9 @@ async def test_audit_redacts_allowlists_and_bounds_details(tmp_path):
         assert "unregistered" not in detail["details"]
         assert detail["username"] == "alice" and detail["result"] == "success"
         assert detail["details"]["changes"]["title"]["new"] == "After"
-        await logs.audit("mcp.update", "u", {"mcp_id": "x", "name": "z" * 100000})
+        # One character over the field limit covers truncation without a stress-sized input.
+        bounded = await logs.audit("mcp.update", "u", {"mcp_id": "x", "name": "z" * 4097})
+        assert (await logs.audits.detail(bounded))["details"]["name"] == "z" * 4096
         assert (await logs.audits.status())["events"] == 2
     finally:
         await logs.close()

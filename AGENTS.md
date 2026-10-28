@@ -210,10 +210,23 @@ Agent 不得声称 `pending` 或 `incomplete` 的服务已经可用。`approved`
 ~~~console
 uv sync --frozen --group dev
 uv run mmg --version
-uv run pytest tests -q
+uv run pytest -q
+uv run pytest -q --suite quick
+uv run pytest -q --suite performance
 node --test tests/frontend/core.test.mjs
 uv build
 ~~~
+
+### 测试选择与耗时
+
+- `uv run pytest -q` 是日常功能回归，包含浏览器和安全边界测试，默认最多 4 个 worker；`-n 0` 串行调试，显式 `-n N` 优先。
+- 长耗时压力测试标为 `performance`，默认排除；只有显式 `--suite performance`、`--run-performance`、正向 `-m performance` 或指定对应文件/节点才运行。性能集默认串行。
+- 真实外部服务测试标为 `live`，需显式选择且仍需原有凭据/环境开关；`--suite all` 不隐式运行 live。
+- `--suite quick/backend/browser`、`--domain <name>` 和 `--changed-from <GIT_REF>` 可做定向验证。未知源码或基础授权/配置/数据库/运行时改动应保守扩大到日常回归。
+- 分类维护在 `tests/suite_manifest.py`，不得仅按文件名中的 capacity/scale/browser 排除测试。新增未分类测试默认进入 integration，并覆盖所有业务域，避免漏测。
+- 每次运行保存 setup/call/teardown JSON 耗时报告；默认路径为 `.pytest_cache/d/mmg/timings.json`，可用 `--timing-report <PATH>` 保留独立报告。
+- 用例合并、删除和缩小数据须列明保留的断言、边界与替代位置；授权隔离、撤权竞态、未知结果不重放等关键回归不得因耗时直接删除。
+- 分组及完整命令详见 `wiki/development/testing.md`。报告必须区分定向、日常功能、性能、live 和数据库后端矩阵的验证结果。
 
 ### 代码边界
 
