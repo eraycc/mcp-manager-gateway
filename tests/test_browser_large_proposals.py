@@ -1,20 +1,16 @@
 """Diagnostic UI requests summary-only payloads for very large tool sets."""
+import json
 from contextlib import asynccontextmanager
 
+from catalog_fixture import oversized_tool_definitions
 from test_discovery_ingestion import PagedClient
 
 from mcp_manager.transports import SdkConnection
 
 
 async def test_large_diagnostic_response_is_summary_only(db_app, monkeypatch):
-    tools = [
-        {
-            "name": f"tool-{index:04}",
-            "description": "large tool",
-            "inputSchema": {"type": "object", "description": "x" * 2_000},
-        }
-        for index in range(1_000)
-    ]
+    tools = oversized_tool_definitions()
+    assert len(json.dumps(tools).encode()) > 1024 * 1024
 
     @asynccontextmanager
     async def connector(spec):
@@ -32,5 +28,5 @@ async def test_large_diagnostic_response_is_summary_only(db_app, monkeypatch):
     )
     assert response.status_code == 200, response.text
     assert len(response.content) <= 16_384
-    assert response.json()["tool_count"] == 1_000
+    assert response.json()["tool_count"] == len(tools)
     assert "tools" not in response.json()

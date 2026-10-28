@@ -1,11 +1,14 @@
 """Web catalog GETs must use indexed summaries and never start a lazy process."""
+import json
+
+from catalog_fixture import oversized_tool_definitions
 from sqlalchemy import select
 
 from mcp_manager.database import ApiToken, McpServer, User
 from mcp_manager.proposals import submit_proposals
 
 
-async def indexed_catalog(harness, count=301):
+async def indexed_catalog(harness, count=251):
     catalog = harness.app.state.catalog
     row = await catalog.create({
         "name": "Large catalog", "mode": "disabled", "transport": "stdio",
@@ -34,7 +37,7 @@ async def test_first_page_is_bounded_schema_free_and_get_never_starts_lazy(db_ap
     response = await db_app.web.get(f"/api/v1/mcps/{row.id}/capabilities", params={"kind": "tools", "limit": 50})
     assert response.status_code == 200
     page = response.json()
-    assert page["total"] == 301 and len(page["items"]) == 50 and page["next_cursor"]
+    assert page["total"] == 251 and len(page["items"]) == 50 and page["next_cursor"]
     assert len(response.content) <= 131072
     assert all("inputSchema" not in item for item in page["items"])
     next_page = await db_app.web.get(f"/api/v1/mcps/{row.id}/capabilities", params={
@@ -86,8 +89,8 @@ async def test_summary_test_response_excludes_large_tool_json(db_app, monkeypatc
     from mcp_manager.transports import SdkConnection
 
     identity = await propose(db_app)
-    tools = [{"name": f"tool-{index}", "inputSchema": {"type": "object", "description": "x" * 2000}}
-             for index in range(1000)]
+    tools = oversized_tool_definitions()
+    assert len(json.dumps(tools).encode()) > 1024 * 1024
     @asynccontextmanager
     async def connector(spec):
         yield SdkConnection(PagedClient([{"tools": tools}]), spec.config)
@@ -95,7 +98,7 @@ async def test_summary_test_response_excludes_large_tool_json(db_app, monkeypatc
     response = await db_app.web.post(f"/api/v1/mcp-proposals/{identity}/test", params={"summary": True})
     assert response.status_code == 200
     assert len(response.content) <= 16384 and "capabilities" not in response.json()
-    assert response.json()["tool_count"] == 1000
+    assert response.json()["tool_count"] == len(tools)
 
 
 async def test_large_summary_pages_obey_byte_budget_without_skipping_names(db_app):

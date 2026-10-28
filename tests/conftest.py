@@ -2,6 +2,8 @@
 import pytest
 import pytest_asyncio
 
+pytest_plugins = ("suite_policy",)
+
 
 @pytest.fixture(autouse=True)
 def isolated_user_home(tmp_path, monkeypatch):

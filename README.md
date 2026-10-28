@@ -316,6 +316,8 @@ node --test tests/frontend/core.test.mjs
 uv build
 ~~~
 
+Daily `uv run pytest -q` runs functional regressions, including browser and safety-boundary tests, with up to four workers. Long performance tests and live external-service tests require explicit selection. Use `--suite quick`, `--suite backend`, `--suite browser`, `--domain oauth`, or `--changed-from <GIT_REF>` for focused work; `-n 0` forces serial execution. `--suite performance` explicitly runs stress tests serially by default; `--suite all` includes performance but still requires `--run-live` for external services. Each run reports setup/call/teardown timings. See [test suites and coverage-preserving optimization](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/development/testing.md).
+
 Contributor guidance is in [Contributing](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/development/contributing.md); transport extension details are in [Transport plugins](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/development/transport-plugins.md).
 
 ## Documentation map

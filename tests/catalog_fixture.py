@@ -17,3 +17,11 @@ async def publish_tools(app, row, tools, user_id=None):
     for start in range(0, len(tools), 100):
         await app.state.catalog.index.stage_page(generation.id, "tools", tools[start:start + 100])
     await app.state.catalog.index.publish(generation.id, expected_scope=scope)
+
+
+def oversized_tool_definitions():
+    """Cross one summary page and the legacy 1 MiB budget with 51 artifacts."""
+    return [
+        {"name": f"tool-{index:04}", "inputSchema": {"type": "object", "description": "x" * 24_000}}
+        for index in range(51)
+    ]

@@ -36,6 +36,7 @@
 - [CLI 参考](reference/cli.md)
 - [传输插件](development/transport-plugins.md)
 - [参与开发](development/contributing.md)
+- [测试分组、耗时与精简规则](development/testing.md)
 
 ## 文档边界
 
