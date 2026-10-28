@@ -191,13 +191,15 @@ def changed_paths(config):
     ref = config.getoption("changed_from")
     if not ref:
         return None
-    def git(*args):
+    def git(*args, nul=False):
         result = subprocess.run(["git", *args], cwd=config.rootpath, capture_output=True, text=True, encoding="utf-8", check=False)
         if result.returncode:
             raise pytest.UsageError("Cannot resolve --changed-from; no tests were silently excluded.")
-        return result.stdout.splitlines()
+        return [path for path in result.stdout.split("\0") if path] if nul else result.stdout.splitlines()
     commit = git("rev-parse", "--verify", "--end-of-options", ref + "^{commit}")[0]
-    return git("diff", "--name-only", commit, "--") + git("ls-files", "--others", "--exclude-standard")
+    return git("diff", "--name-only", "-z", commit, "--", nul=True) + git(
+        "ls-files", "--others", "--exclude-standard", "-z", nul=True
+    )
 
 
 @pytest.hookimpl(tryfirst=True)

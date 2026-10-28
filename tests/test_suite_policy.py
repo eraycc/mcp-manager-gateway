@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from suite_policy import affected_selection, explicit_path, layer_for, marker_requested
+from suite_policy import affected_selection, changed_paths, explicit_path, layer_for, marker_requested
 
 pytest_plugins = ["pytester"]
 
@@ -18,7 +18,7 @@ def test_layers_keep_small_capacity_regressions_and_static_budgets_daily():
     assert layer_for("test_mysql_live.py", ["db_settings", "db_backend"]) == "integration"
 
 
-def test_change_routing_is_conservative_and_includes_fixture_dependants():
+def test_change_routing_is_conservative_and_includes_fixture_dependants(tmp_path, monkeypatch):
     assert affected_selection(["src/mcp_manager/identity.py"]) is None
     assert affected_selection(["src/mcp_manager/embedding_models.py"]) is None
     assert affected_selection(["src/mcp_manager/oauth_config.py"]) is None
@@ -30,6 +30,19 @@ def test_change_routing_is_conservative_and_includes_fixture_dependants():
     assert "test_browser_capability_text_wrap.py" in tests
     assert "test_gateway.py" in tests
     assert affected_selection(["README.md"]) == (set(), set())
+
+    responses = iter(["a" * 40 + "\n", "wiki/demo/示例 文件.svg\0", ""])
+    commands = []
+    def git(args, **kwargs):
+        commands.append(args)
+        assert kwargs["encoding"] == "utf-8"
+        return SimpleNamespace(returncode=0, stdout=next(responses))
+    monkeypatch.setattr("suite_policy.subprocess.run", git)
+    config = SimpleNamespace(rootpath=tmp_path, getoption=lambda _name: "HEAD")
+    paths = changed_paths(config)
+    assert paths == ["wiki/demo/示例 文件.svg"]
+    assert affected_selection(paths) == (set(), set())
+    assert all("-z" in args for args in commands[1:])
 
 
 def test_explicit_paths_do_not_treat_the_whole_test_tree_as_a_benchmark_request(tmp_path):
