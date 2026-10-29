@@ -91,7 +91,15 @@ class AuditStore:
         return normalize(value, fallback_id=digest)
 
     def _index(self, event, path, offset, size, scan_id):
-        summary = json.dumps(event["details"], ensure_ascii=False, separators=(",", ":"))[:300]
+        preview = event["details"]
+        if event["action"] == "mcp.stop" and preview.get("instance_id"):
+            preview = {key: str(preview[key])[:64] for key in ("reason_code", "instance_id", "lease_id")
+                       if preview.get(key) is not None}
+        elif event["action"] == "lease.disconnect" and preview.get("reason_code") in {
+                "lease_timeout", "bridge_heartbeat_timeout"}:
+            ids = preview.get("instance_ids", [])
+            preview = {"reason_code": preview["reason_code"], "instance_count": len(ids) if isinstance(ids, list) else 0}
+        summary = json.dumps(preview, ensure_ascii=False, separators=(",", ":"))[:300]
         fields = COLUMNS + ("summary", "path", "offset", "size", "scan_id")
         values = [event.get(key) for key in COLUMNS] + [summary, path.name, offset, size, scan_id]
         updates = ",".join(key + "=excluded." + key for key in fields if key != "event_id")

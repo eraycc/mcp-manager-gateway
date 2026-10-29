@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 import uuid
 from collections import Counter, deque
@@ -12,6 +13,8 @@ from typing import Any
 from weakref import WeakValueDictionary
 
 from .protocol_errors import is_request_error
+
+LOGGER = logging.getLogger(__name__)
 
 
 def startup_failure_reason(exc):
@@ -209,6 +212,7 @@ class ServerSpec:
     credential_scope: str = ""
     credential_owner: str = ""
     credential_epoch: int | None = None
+    name: str = ""
 
 
 @dataclass
@@ -248,6 +252,7 @@ class Instance:
     owner: asyncio.Task | None = None
     stop_task: asyncio.Task | None = None
     force_stop: bool = False
+    stop_context: dict = field(default_factory=dict)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     closed: asyncio.Event = field(default_factory=asyncio.Event)
@@ -284,9 +289,42 @@ class Runtime:
         self.on_starting = None
         self.on_start_failure = None
         self.on_auth_failure = None
+        self.on_lifecycle = None
         self._closing = False
         self.versions: dict[str, int] = {}
         self.credential_versions: dict[tuple, str | None] = {}
+
+    async def _emit_lifecycle(self, action, details, *, target_type, target_id, target_name=None, result="success"):
+        if self.on_lifecycle is None:
+            return
+        try:
+            await self.on_lifecycle(action, None, details, source="system", actor_type="system",
+                                    username=None, ip=None, request_id=None, target_type=target_type,
+                                    target_id=target_id, target_name=target_name, result=result)
+        except Exception as exc:  # noqa: BLE001 - auditing must never prevent lifecycle cleanup
+            LOGGER.warning("Lifecycle audit failed for %s: %s", action, type(exc).__name__)
+
+    async def _emit_stop(self, instance):
+        context = dict(instance.stop_context)
+        reason = context.pop("reason_code", "connection_error" if instance.failure else "stop_requested")
+        # The control-plane operation already audits an explicit manual stop.
+        if reason == "manual_stop":
+            return
+        details = {
+            "mcp_id": instance.spec.id, "instance_id": instance.generation,
+            "mode": instance.spec.mode, "isolation": instance.spec.isolation,
+            "revision": instance.spec.revision,
+            "owner_id": instance.spec.credential_owner or (
+                "service" if instance.spec.isolation == "service" else instance.admitted_user),
+            "reason_code": reason, "force": instance.force_stop,
+            "lease_count": len(instance.refs & self.leases.keys()), **context,
+        }
+        if instance.failure:
+            details.update(error_type=type(instance.failure).__name__,
+                           error_code=getattr(instance.failure, "code", "connection_error"))
+        await self._emit_lifecycle("mcp.stop", details, target_type="mcp", target_id=instance.spec.id,
+                                   target_name=instance.spec.name or None,
+                                   result="failure" if instance.failure else "success")
 
     def create_lease(self, user_id: str, token_id: str, *, ttl: float | None = None,
                      kind: str = "agent") -> Lease:
@@ -345,6 +383,7 @@ class Runtime:
 
     async def _owner(self, instance: Instance):
         """Enter and exit SDK/AnyIO transport contexts in this one task."""
+        was_ready = False
         try:
             timeout = float(instance.spec.config.get("startup_timeout", 30))
             async with asyncio.timeout(timeout) as startup:
@@ -357,6 +396,7 @@ class Runtime:
                     startup.reschedule(None)
                     if instance.phase == "starting":
                         instance.phase = "ready"
+                    was_ready = True
                     instance.ready.set()
                     await instance.stop.wait()
         except asyncio.CancelledError:
@@ -394,10 +434,14 @@ class Runtime:
             if instance.phase != "failed":
                 instance.phase = "stopped"
             instance.ready.set()
-            instance.closed.set()
-            async with self._instance_lock:
-                if self.instances.get(instance.key) is instance:
-                    self.instances.pop(instance.key, None)
+            try:
+                if was_ready:
+                    await self._emit_stop(instance)
+            finally:
+                instance.closed.set()
+                async with self._instance_lock:
+                    if self.instances.get(instance.key) is instance:
+                        self.instances.pop(instance.key, None)
 
     def _available(self, spec):
         if self._closing:
@@ -428,7 +472,7 @@ class Runtime:
                 victim = min(idle, key=lambda item: item.last_activity)
         if victim is None:
             raise GatewayError("busy", "Runtime instance capacity is full; retry later")
-        await self._stop_instance(victim, idle_seconds=0,
+        await self._stop_instance(victim, idle_seconds=0, reason="capacity_eviction",
                                   expected_activity=victim.last_activity, clear_refs=True)
 
     async def _acquire(self, spec: ServerSpec, lease_id: str) -> Instance:
@@ -448,7 +492,8 @@ class Runtime:
                               and k[-1] == key[-1] and not i.closed.is_set()), None)
                 if other:
                     if other.phase not in {"draining", "stopping"}:
-                        asyncio.create_task(self._stop_instance(other))
+                        asyncio.create_task(self._stop_instance(other, reason=(
+                            "credential_changed" if other.spec.revision == spec.revision else "configuration_changed")))
                     wait_closed = other.closed
                 instance = self.instances.get(key)
                 if wait_closed:
@@ -610,6 +655,8 @@ class Runtime:
             lock = self._locks.setdefault(instance.key, asyncio.Lock())
             async with lock:
                 instance.phase = "draining"
+                if not instance.stop_context:
+                    instance.stop_context = {"reason_code": "connection_error", "error_type": type(exc).__name__}
                 instance.refs.clear()
             code = "outcome_unknown" if business else "connection_error"
             raise GatewayError(code, str(exc) or "Downstream did not return a result") from exc
@@ -652,15 +699,16 @@ class Runtime:
         """Reject unavailable revisions through the public runtime boundary."""
         self._available(spec)
 
-    async def stop_instance(self, instance: Instance, *, force=False, only_unreferenced=False, clear_refs=False):
+    async def stop_instance(self, instance: Instance, *, force=False, only_unreferenced=False, clear_refs=False,
+                            reason=None):
         """Stop one runtime instance without exposing lifecycle internals."""
         await self._stop_instance(
-            instance, force=force, only_unreferenced=only_unreferenced, clear_refs=clear_refs
+            instance, force=force, only_unreferenced=only_unreferenced, clear_refs=clear_refs, reason=reason
         )
 
     async def _stop_instance(self, instance: Instance, *, force=False, only_unreferenced=False,
                              idle_seconds=None, expected_activity=None, clear_refs=False,
-                             require_idle=False):
+                             require_idle=False, reason=None, lease_id=None, operation_id=None):
         lock = self._locks.setdefault(instance.key, asyncio.Lock())
         async with lock:
             if (instance.closed.is_set() or instance.phase == "stopped"
@@ -675,6 +723,17 @@ class Runtime:
                 return
             if require_idle and (instance.in_flight or instance.phase == "starting"):
                 raise GatewayError("busy", "MCP has active calls or is starting; retry after completion")
+            if not instance.stop_context:
+                instance.stop_context = {"reason_code": reason or (
+                    "idle_timeout" if idle_seconds is not None else
+                    "unreferenced" if only_unreferenced else "stop_requested")}
+                if lease_id:
+                    instance.stop_context["lease_id"] = lease_id
+                if operation_id:
+                    instance.stop_context["operation_id"] = operation_id
+                if idle_seconds is not None:
+                    instance.stop_context.update(idle_seconds=max(0., self.clock() - instance.last_activity),
+                                                 idle_limit_seconds=idle_seconds)
             if clear_refs:
                 instance.refs.clear()
             instance.force_stop |= force
@@ -706,35 +765,52 @@ class Runtime:
                 instance.owner.cancel()
                 await asyncio.gather(instance.owner, return_exceptions=True)
 
-    async def release(self, lease_id: str, *, keep_alive=False, if_expired=False):
+    async def release(self, lease_id: str, *, keep_alive=False, if_expired=False, reason="lease_released"):
         lease = self.leases.get(lease_id)
         if if_expired and (not lease or not self.lease_expired(lease)):
             return False
         self.leases.pop(lease_id, None)
-        for instance in list(self.instances.values()):
-            if lease_id not in instance.refs:
-                continue
+        affected = [instance for instance in self.instances.values() if lease_id in instance.refs]
+        operation_id = None
+        if if_expired and lease:
+            operation_id = uuid.uuid4().hex
+            interval, missed = self.bridge_heartbeat_policy(lease)
+            heartbeat_lost = interval > 0 and self.clock() - lease.heartbeat_tick >= interval * missed
+            # The lease has already been revoked. Instance closures are separate facts.
+            await self._emit_lifecycle("lease.disconnect", {
+                "lease_id": lease_id, "owner_id": lease.user_id, "token_id": lease.token_id,
+                "kind": lease.kind, "operation_id": operation_id,
+                "reason_code": "bridge_heartbeat_timeout" if heartbeat_lost else "lease_timeout",
+                "idle_seconds": max(0., self.clock() - lease.touched),
+                "timeout_seconds": self.lease_timeout(lease),
+                "heartbeat_timeout_seconds": interval * missed if interval else None,
+                "mcp_ids": sorted({instance.spec.id for instance in affected}),
+                "instance_ids": [instance.generation for instance in affected], "released": True,
+            }, target_type="lease", target_id=lease_id)
+        for instance in affected:
             lock = self._locks.setdefault(instance.key, asyncio.Lock())
             async with lock:
                 instance.refs.discard(lease_id)
                 stop = not keep_alive and not instance.refs and instance.spec.mode == "lazy"
             if stop:
-                await self._stop_instance(instance, only_unreferenced=True)
+                await self._stop_instance(instance, only_unreferenced=True,
+                                          reason="lease_expired" if if_expired else reason,
+                                          lease_id=lease_id, operation_id=operation_id)
         return lease is not None
 
-    async def stop_server(self, server_id: str, *, force=False, require_idle=False, revision=None):
+    async def stop_server(self, server_id: str, *, force=False, require_idle=False, revision=None, reason=None):
         instances = [i for i in self.instances.values() if i.spec.id == server_id
                      and (revision is None or i.spec.revision == revision)]
         if require_idle and any(i.in_flight or i.phase == "starting" for i in instances):
             raise GatewayError("busy", "MCP has active calls or is starting; retry after completion")
         for instance in instances:
-            await self._stop_instance(instance, force=force, require_idle=require_idle, clear_refs=True)
+            await self._stop_instance(instance, force=force, require_idle=require_idle, clear_refs=True, reason=reason)
 
     async def invalidate_credential(self, server_id, owner):
         self.credential_versions[(server_id, owner)] = None
         for instance in list(self.instances.values()):
             if instance.spec.id == server_id and instance.spec.credential_owner == owner:
-                await self._stop_instance(instance, clear_refs=True)
+                await self._stop_instance(instance, clear_refs=True, reason="credential_changed")
 
     async def restrict_lease(self, lease_id, allowed):
         for instance in list(self.instances.values()):
@@ -858,7 +934,7 @@ class Runtime:
     async def close(self):
         self._closing = True
         self.leases.clear()
-        await asyncio.gather(*(self._stop_instance(i, force=True)
+        await asyncio.gather(*(self._stop_instance(i, force=True, reason="shutdown")
                                for i in list(self.instances.values())))
 
 

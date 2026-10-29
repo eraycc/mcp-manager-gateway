@@ -177,3 +177,113 @@ async def test_oauth_audit_mcp_name_and_independent_retention_settings(running_g
         assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
         assert errors == []
         await browser.close()
+
+
+async def test_scheduled_refresh_audit_shows_each_mcp_and_actual_result(running_gateway, tmp_path):
+    import asyncio
+    from contextlib import asynccontextmanager
+    from datetime import timedelta
+
+    from mcp_manager import app as app_module
+    from mcp_manager.database import set_setting
+    from mcp_manager.runtime import GatewayError
+
+    app, _web, url, _, _ = running_gateway
+    class Connection:
+        def __init__(self, failed):
+            self.failed = failed
+
+        async def discover(self):
+            if self.failed:
+                raise GatewayError("discovery_failed", "Fixture list unavailable")
+            return {"tools": [{"name": "echo", "inputSchema": {"type": "object"}}],
+                    "resources": [], "prompts": [], "templates": []}
+
+    @asynccontextmanager
+    async def connect(spec):
+        yield Connection(spec.config["command"] == "fail")
+
+    app.state.runtime.connector = connect
+    for name, command in [("Scheduled success", "ok"), ("Scheduled failure", "fail")]:
+        await app.state.catalog.create({"name": name, "mode": "lazy", "config": {"command": command}},
+                                       discover=False)
+    await set_setting(app.state.db, "refresh_enabled", True)
+    app.state.refresh_next = app_module.now() - timedelta(seconds=1)
+    await app_module._scheduled_refresh(app)
+    _identity, task = next(iter(app.state.jobs.tasks.items()))
+    await asyncio.wait_for(task, 10)
+    async with async_playwright() as pw:
+        executable = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+        browser = await pw.chromium.launch(headless=True, executable_path=executable if os.path.exists(executable) else None)
+        page = await browser.new_page(viewport={"width": 1440, "height": 1000})
+        await login(page, url)
+        await page.get_by_role("link", name="审计日志", exact=True).click()
+        good = page.locator("tr").filter(has_text="Scheduled success").filter(has_text="刷新目录")
+        bad = page.locator("tr").filter(has_text="Scheduled failure").filter(has_text="刷新目录")
+        await expect(good).to_have_count(1)
+        await expect(good).to_contain_text("系统")
+        await expect(good.locator(".badge.good")).to_have_text("成功")
+        await expect(good).to_contain_text("工具 1 · 资源 0 · 提示词 0 · 模板 0")
+        await expect(bad).to_have_count(1)
+        await expect(bad.locator(".badge.bad")).to_have_text("失败")
+        await expect(bad).to_contain_text("刷新失败：discovery_failed")
+        await bad.get_by_role("button", name="详情", exact=True).click()
+        detail = page.get_by_role("dialog", name="审计详情", exact=True)
+        await expect(detail).to_contain_text("owner_id")
+        await expect(detail).to_contain_text("discovery_failed")
+        await detail.get_by_role("button", name="关闭", exact=True).click()
+        await page.locator("#main").screenshot(path=str(tmp_path / "scheduled-refresh-audit.png"))
+        await browser.close()
+
+
+async def test_idle_and_expired_lease_reclamation_reuse_existing_audit_actions(running_gateway):
+    from mcp_manager.database import set_setting
+
+    app, web, url, _, _ = running_gateway
+    ticks = [0.]
+    runtime = app.state.runtime
+    runtime.clock = lambda: ticks[0]
+    runtime.idle_seconds = 5
+    runtime.connection_ttl_seconds = 0
+    from test_runtime_lifecycle import Connection
+    runtime.connector = Connection().connect
+    await set_setting(app.state.db, "refresh_enabled", False)
+    first = await app.state.catalog.create({"name": "Idle recycle MCP", "config": {"command": "fixture"}},
+                                           discover=False)
+    retained = runtime.create_lease("alice", "token-id")
+    await runtime.call(await app.state.catalog.spec(first), retained.id, "call", {})
+    ticks[0] = 6
+    await runtime.reap()
+    second = await app.state.catalog.create({"name": "Expired recycle MCP", "config": {"command": "fixture"}},
+                                            discover=False)
+    expiring = runtime.create_lease("alice", "token-id", kind="retention")
+    runtime.connection_ttl_seconds = 10
+    await runtime.call(await app.state.catalog.spec(second), expiring.id, "call", {})
+    ticks[0] = 17
+    await runtime.reap()
+    records = (await web.get("/api/v1/audit-logs", params={
+        "action": "lease.disconnect", "target_id": expiring.id,
+    })).json()["items"]
+    assert len(records) == 1
+    async with async_playwright() as pw:
+        executable = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+        browser = await pw.chromium.launch(headless=True, executable_path=executable if os.path.exists(executable) else None)
+        page = await browser.new_page(viewport={"width": 1440, "height": 1000})
+        await login(page, url)
+        await page.get_by_role("link", name="审计日志", exact=True).click()
+        idle = page.locator("tr").filter(has_text="Idle recycle MCP").filter(has_text="停止服务")
+        expired = page.locator("tr").filter(has_text="Expired recycle MCP").filter(has_text="停止服务")
+        await expect(idle).to_have_count(1)
+        await expect(idle).to_contain_text("空闲回收")
+        await expect(expired).to_have_count(1)
+        await expect(expired).to_contain_text("租期过期后无引用")
+        released = page.locator('tr[data-row-id="' + records[0]["event_id"] + '"]')
+        await expect(released).to_contain_text("断开租期")
+        await expect(released).to_contain_text("租期超时释放 · 关联 1 个实例")
+        await expired.get_by_role("button", name="详情", exact=True).click()
+        detail = page.get_by_role("dialog", name="审计详情", exact=True)
+        await expect(detail).to_contain_text(expiring.id)
+        await expect(detail).to_contain_text("instance_id")
+        await expect(detail).to_contain_text("operation_id")
+        await expect(detail).to_contain_text("lease_expired")
+        await browser.close()

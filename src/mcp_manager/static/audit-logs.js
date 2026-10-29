@@ -4,7 +4,7 @@ const labels={
  'identity.login':'登录','identity.login_failed':'登录失败','identity.logout':'退出登录','identity.register':'注册账户','identity.session.revoke':'会话撤销',
  'token.create':'创建令牌','token.update':'修改令牌','token.delete':'删除令牌','token.rotate':'轮换令牌','token.secret.reveal':'查看令牌',
  'user.create':'创建用户','user.update':'修改用户','user.delete':'删除用户','user.role_change':'变更角色','user.batch':'批量管理用户',
- 'mcp.create':'创建服务','mcp.update':'修改服务','mcp.delete':'删除服务','mcp.start':'启动服务','mcp.stop':'停止服务','mcp.refresh':'刷新目录',
+ 'mcp.create':'创建服务','mcp.update':'修改服务','mcp.delete':'删除服务','mcp.start':'启动服务','mcp.stop':'停止服务','mcp.refresh':'刷新目录','lease.disconnect':'断开租期',
  'mcp.proposal.submit':'提交提议','mcp.proposal.configure':'配置提议','mcp.proposal.approve':'批准提议','mcp.proposal.reject':'拒绝提议','mcp.proposal.delete':'删除提议',
  'settings.update':'修改系统设置','audit.delete':'清理审计记录','audit.clear':'清空审计记录','audit.clear_auto':'自动保留清理','audit.export':'导出审计记录','audit.rebuild':'重建审计索引',
  'logs.delete':'清理调用日志','logs.export':'导出调用日志','logs.rebuild':'重建日志索引'
@@ -14,6 +14,7 @@ const results={success:'成功',failure:'失败',pending:'进行中',unknown:'�
 const actors={user:'用户',system:'系统',anonymous:'未登录用户'};
 const sources={web:'控制台',gateway:'网关',system:'系统',cli:'命令行',unknown:'历史记录'};
 const fieldNames={title:'站点名称',role:'角色',disabled:'启用状态',scope_mode:'授权范围',mcp_ids:'授权服务',log_retention_days:'调用日志保留天数',audit_log_retention_days:'审计日志保留天数',enable_resource_tools:'资源工具',enable_mcp_proposal:'提议权限',exposeNativeResources:'原生资源列表'};
+const stopReasons={idle_timeout:'空闲回收',lease_expired:'租期过期后无引用',lease_released:'租期释放后无引用',unreferenced:'无租期引用',lease_timeout:'租期超时释放',bridge_heartbeat_timeout:'Bridge 心跳超时',capacity_eviction:'实例容量回收',credential_changed:'凭据变更',configuration_changed:'配置变更',permission_revoked:'权限已撤销',shutdown:'网关关闭',connection_error:'下游连接异常',stop_requested:'停止实例'};
 const size=value=>value<1024?value+' B':value<1048576?(value/1024).toFixed(1)+' KiB':(value/1048576).toFixed(1)+' MiB';
 const cellText=(value,className='')=>el('span',{class:'audit-cell-text '+className,title:String(value??'—')},value??'—');
 const outcome=value=>el('span',{class:'badge '+(value==='success'?'good':value==='failure'?'bad':'blue')},results[value]||value);
@@ -22,6 +23,13 @@ function summary(row){
  let data;try{data=JSON.parse(row.summary)}catch{return row.summary||'—'}
  const fields=data.changed_fields||Object.keys(data.changes||{});
  if(fields.length)return'变更：'+fields.map(key=>fieldNames[key]||key).slice(0,5).join('、')+(fields.length>5?' 等':'');
+ if(row.action==='mcp.refresh'&&data.trigger==='scheduled'){
+  if(row.result==='failure')return'刷新失败：'+(data.reason_code||data.error_type||'未知原因')+(data.cache_stale?' · 保留上次目录':'');
+  if(row.result!=='success')return data.reason_code==='cancelled'?'刷新已取消':'刷新结果未知';
+  return'定时刷新 · 工具 '+(data.tool_count??0)+' · 资源 '+(data.resource_count??0)+' · 提示词 '+(data.prompt_count??0)+' · 模板 '+(data.template_count??0);
+ }
+ if(row.action==='mcp.stop'&&data.instance_id)return(stopReasons[data.reason_code]||data.reason_code||'停止实例')+' · 实例 '+data.instance_id.slice(0,8)+(data.lease_id?' · 租期 '+data.lease_id.slice(0,8):'');
+ if(row.action==='lease.disconnect'&&stopReasons[data.reason_code]){const count=data.instance_count??data.instance_ids?.length;return stopReasons[data.reason_code]+(count!==undefined?' · 关联 '+count+' 个实例':'')}
  if(data.phase)return({started:'已开始',completed:'已完成',recovered:'恢复完成'}[data.phase]||data.phase)+(data.count!==undefined?' · '+data.count+' 条':'');
  if(data.count!==undefined)return'影响 '+data.count+' 条记录';
  return data.reason_code||data.error_type||'—';

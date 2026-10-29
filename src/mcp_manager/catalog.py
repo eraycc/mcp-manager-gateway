@@ -532,7 +532,8 @@ class Catalog:
             scope = hashlib.sha256(json.dumps(binding, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16] if owner else ""
             if owner:
                 self.runtime.credential_versions[(row.id, owner)] = scope
-            return ServerSpec(row.id, row.transport, config, row.mode, row.isolation, row.revision, scope, owner, epoch)
+            return ServerSpec(row.id, row.transport, config, row.mode, row.isolation, row.revision, scope, owner, epoch,
+                              name=row.name)
 
         config = self.unseal(row.config) if self.credentials is None else await self.credentials.materialize(row, user_id)
         auth = config.get("auth", {})
@@ -1034,7 +1035,7 @@ class Catalog:
 
     async def stop_for_change(self, server_id):
         try:
-            await self.runtime.stop_server(server_id, require_idle=True)
+            await self.runtime.stop_server(server_id, require_idle=True, reason="configuration_changed")
         except GatewayError as exc:
             if exc.code == "busy":
                 raise HTTPException(409, "MCP has active calls; retry after completion") from exc

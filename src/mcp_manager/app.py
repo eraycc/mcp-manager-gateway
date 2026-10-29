@@ -114,7 +114,7 @@ async def _revoke_leases(app):
             continue
         allowed = states[lease.id]
         if allowed is None:
-            await state.runtime.release(lease.id)
+            await state.runtime.release(lease.id, reason="permission_revoked")
         else:
             await state.runtime.restrict_lease(lease.id, allowed)
 
@@ -161,7 +161,7 @@ async def _clean_instances(app):
         owner = ownership[instance.key]
         if not owner:
             if denied_session:
-                await state.runtime.stop_instance(instance, clear_refs=True)
+                await state.runtime.stop_instance(instance, clear_refs=True, reason="permission_revoked")
             continue
         user = users.get(owner)
         denied = (
@@ -172,7 +172,7 @@ async def _clean_instances(app):
             )
         )
         if denied or denied_session:
-            await state.runtime.stop_instance(instance, clear_refs=True)
+            await state.runtime.stop_instance(instance, clear_refs=True, reason="permission_revoked")
             if instance.spec.credential_owner:
                 state.runtime.credential_versions[(instance.spec.id, owner)] = None
 
@@ -199,6 +199,42 @@ async def _restrict_anonymous(app):
             await state.runtime.restrict_lease(lease.id, anonymous_allowed)
 
 
+async def _scheduled_refresh_target(state, target):
+    """Audit one scheduled attempt without changing refresh or failure accounting."""
+    details = {"mcp_id": target["server_id"], "owner_id": target["user_id"] or "service", "trigger": "scheduled"}
+    row, outcome = None, "unknown"
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        row = await state.catalog.get(target["server_id"])
+        result = await state.catalog.refresh_target(target)
+        if isinstance(result, dict):
+            details.update({key: result[key] for key in
+                            ("tool_count", "resource_count", "prompt_count", "template_count") if key in result})
+        details["cache_status"] = "ready"
+        outcome = "success"
+        return result
+    except asyncio.CancelledError:
+        details["reason_code"] = "cancelled"
+        raise
+    except Exception as exc:
+        outcome = "failure"
+        details.update(error_type=type(exc).__name__,
+                       reason_code=str(getattr(exc, "code", None) or getattr(exc, "status_code", "operation_failed")))
+        if row is not None:
+            # Cache inspection is best effort; an observer must not replace the refresh error.
+            with contextlib.suppress(Exception):
+                cache = state.catalog.cached(row, target["user_id"])
+                details.update(cache_status=cache["cache_status"], cache_stale=cache.get("cache_stale", False))
+        raise
+    finally:
+        details["duration_ms"] = round((loop.time() - started) * 1000, 2)
+        await state.logs.audit("mcp.refresh", None, details,
+                               source="system", actor_type="system", target_type="mcp",
+                               target_id=target["server_id"], target_name=row.name if row is not None else None,
+                               result=outcome)
+
+
 async def _scheduled_refresh(app):
     state = app.state
     if not await get_setting(state.db, "refresh_enabled", False):
@@ -214,7 +250,7 @@ async def _scheduled_refresh(app):
     elif current >= state.refresh_next:
         targets = await state.catalog.refresh_targets()
         await state.jobs.submit(
-            "mcp.scheduled_refresh", targets, state.catalog.refresh_target
+            "mcp.scheduled_refresh", targets, lambda target: _scheduled_refresh_target(state, target)
         )
         state.refresh_next = trigger.get_next_fire_time(state.refresh_next, current)
 
@@ -339,6 +375,7 @@ def create_app(config=None):
         state.runtime.on_connect = state.catalog.connection_ready
         state.runtime.on_start_failure = state.catalog.start_failed
         state.runtime.on_auth_failure = state.oauth.mark_reauth_spec
+        state.runtime.on_lifecycle = state.logs.audit
         state.refresh_next = None
         state.retention_next = 0
         state.cache_cleanup_done = False

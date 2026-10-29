@@ -488,7 +488,7 @@ async def start(server_id: str, request: Request, user=ADMIN):
 async def stop(server_id: str, request: Request, user=ADMIN):
     await request.app.state.catalog.get(server_id)
     await web_authorizer(request)()
-    await request.app.state.runtime.stop_server(server_id, force=True)
+    await request.app.state.runtime.stop_server(server_id, force=True, reason="manual_stop")
     return {"ok": True}
 
 
