@@ -10,7 +10,7 @@ import{DEFAULT_TRANSLATION_CONFIG,normalizeTranslationConfig,applyTranslation,di
 import{initializeTheme,toggleTheme as theme,topActions}from './shell-controls.js';
 import{cacheUpdateState,maybeNotifyUpdate,notificationDot,readCachedUpdateState,syncUpdateNotifications,updateAboutPanel,updateCheckSetting}from './update-ui.js';
 let me,bootstrap,abort,refreshTimer,updateState,selectionPage,translationConfig=normalizeTranslationConfig(DEFAULT_TRANSLATION_CONFIG);
-const nav=[['dashboard','仪表盘','grid'],['mcps','MCP 服务','server',true],['proposals','MCP 审批','approval',true],['tokens','访问令牌','key'],['leases','连接管理','link'],['logs','调用日志','logs'],['audit-logs','审计日志','approval',true],['users','用户管理','users',true],['profile','个人资料','user'],['settings','系统设置','settings',true]];
+const nav=[['dashboard','仪表盘','grid'],['mcps','MCP 服务','server',true],['proposals','MCP 审批','approval',true],['tokens','访问令牌','key'],['leases','连接管理','link'],['logs','调用日志','logs'],['audit-logs','审计日志','audit',true],['users','用户管理','users',true],['profile','个人资料','user'],['settings','系统设置','settings',true]];
 const admin=()=>me?.role==='admin';
 const refresh=()=>render();
 let updateRequest=0;
