@@ -115,3 +115,25 @@ async def test_credential_slot_change_during_embedding_discloses_no_resource(db_
     with pytest.raises(GatewayError) as caught:
         await asyncio.wait_for(task, 5)
     assert caught.value.code == "permission_revoked"
+
+
+async def test_star_browses_legacy_resources_without_semantic_retrieval(db_app, monkeypatch):
+    _row, _token, ctx = await resource_fixture(db_app)
+    gateway = db_app.app.state.gateway
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Wildcard browsing must not invoke semantic retrieval")
+    monkeypatch.setattr(db_app.app.state.embeddings, "scores", forbidden)
+    monkeypatch.setattr(db_app.app.state.embeddings, "score_candidates", forbidden)
+
+    async def page(keyword, **filters):
+        return await gateway._call_tool(ctx, SimpleNamespace(
+            name="gateway_search_resources", arguments={"keyword": keyword, "limit": 1, **filters},
+        ))
+
+    expected = json.loads((await page("")).content[0].text)
+    assert expected["total"] == 1
+    for match in ("fuzzy", "exact", "keyword_only"):
+        actual = json.loads((await page("*", match=match)).content[0].text)
+        assert actual["items"] == expected["items"] and actual["total"] == 1
+        assert actual["returned"] == 1 and not actual["next_cursor"]

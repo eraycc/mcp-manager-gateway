@@ -256,7 +256,7 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 | `gateway_search_mcps` | 搜索或列出当前 Token 有权访问的 MCP |
 | `gateway_search_tools` | 获取目标工具的完整 `inputSchema` 和精确 `gateway_name` |
 | `gateway_call` | 使用精确名称和符合 Schema 的参数执行工具 |
-| `gateway_search_resources` | 可选：按服务、类型与匹配方式渐进检索资源、提示词和模板元数据，支持语义检索与稳定分页；默认每页 20 条，最多 100 条 |
+| `gateway_search_resources` | 可选：按服务、类型与匹配方式渐进检索资源、提示词和模板元数据，支持语义检索与稳定分页；`keyword` 为空或 `*` 时浏览全部授权条目，默认每页 20 条，最多 100 条 |
 | `gateway_read_resource` | 可选：读取精确资源或提示词 URI；提示词支持字符串类型的 `arguments` |
 | `gateway_mcp_proposals` | 可选：管理员 Token 批量提交或查询 MCP 提议 |
 

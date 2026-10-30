@@ -210,7 +210,7 @@ Keep a backup, preserve unrelated settings, and never remove the MMG connection 
 | `gateway_search_mcps` | Find MCPs visible to the current token |
 | `gateway_search_tools` | Return the full `inputSchema` and exact `gateway_name` |
 | `gateway_call` | Invoke a tool with its exact name and schema-valid arguments |
-| `gateway_search_resources` | Optionally search resource, prompt, and template metadata with filters, matching modes, semantic retrieval and stable pagination (default 20 per page, maximum 100) |
+| `gateway_search_resources` | Optionally search resource, prompt, and template metadata with filters, matching modes, semantic retrieval and stable pagination (default 20 per page, maximum 100); empty keyword or `*` browses all authorized entries |
 | `gateway_read_resource` | Optionally read an exact resource or prompt URI; prompts accept string `arguments` |
 | `gateway_mcp_proposals` | Optionally submit or inspect proposals with an authorized administrator token |
 

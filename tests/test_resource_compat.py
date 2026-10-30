@@ -253,3 +253,47 @@ async def test_revoking_stateless_lease_clears_embedded_cache(db_app):
     await state.runtime.revoke(token_id=token_id)
     await state.gateway.revoke(token_id=token_id)
     assert not state.gateway.embedded.items
+
+
+async def test_star_resource_query_browses_all_kinds_with_bounded_pages(db_app, monkeypatch):
+    row, _tools = await resource_catalog(db_app)
+    ctx, _ = await enabled_context(db_app)
+    state = db_app.app.state
+    user, token, _ = await state.gateway.principal(ctx.request)
+    await state.gateway.capture_embedded(ctx.request, user, token, row, {
+        "content": [{"type": "resource", "resource": {"uri": "fixture://temporary", "text": "body"}}],
+    })
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Browse-all must not invoke semantic retrieval or start downstream")
+    monkeypatch.setattr(state.embeddings, "score_candidates", forbidden)
+    monkeypatch.setattr(state.embeddings, "scores", forbidden)
+    monkeypatch.setattr(state.embeddings, "_embed", forbidden)
+    monkeypatch.setattr(state.runtime, "connector", forbidden)
+    configured = await db_app.web.patch("/api/v1/settings/embedding", json={
+        "enabled": True, "base_url": "https://embedding.invalid/v1", "model": "test-model",
+    })
+    assert configured.status_code == 200
+
+    async def collect(keyword, total=5, **filters):
+        cursor, seen = None, []
+        while True:
+            result = await invoke(db_app, ctx, "gateway_search_resources", {
+                "keyword": keyword, "limit": 2, **filters, **({"cursor": cursor} if cursor else {}),
+            })
+            assert not result.is_error, result
+            page = result.structured_content
+            assert page["total"] == total
+            assert 0 < page["returned"] <= 2
+            seen.extend(page["items"])
+            cursor = page["next_cursor"]
+            if not cursor:
+                return seen
+            assert len(seen) < total
+
+    expected = await collect("")
+    for match in ("fuzzy", "exact", "keyword_only"):
+        assert await collect("*", match=match) == expected
+    filtered = await collect(" * ", total=1, kind="template", uri_prefix="fixture://sensor")
+    assert [item["name"] for item in filtered] == ["sensor"]
+    assert state.runtime.status() == []

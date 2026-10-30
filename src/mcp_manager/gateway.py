@@ -38,7 +38,7 @@ RESOURCE_TOOLS = [
                 "mcp": {"type": "string", "maxLength": 2000, "default": "",
                         "description": "service id/slug/name; empty=all"},
                 "keyword": {"type": "string", "maxLength": 2000, "default": "",
-                            "description": "search term; empty=browse"},
+                            "description": "search term; empty or '*'=browse"},
                 "kind": {"enum": ["resource", "prompt", "template", "all"], "default": "all",
                          "description": "resource/prompt/template/all (default all)"},
                 "match": {"enum": ["exact", "fuzzy", "keyword_only"], "default": "fuzzy",
