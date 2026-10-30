@@ -123,7 +123,7 @@ class Jobs:
         if context:
             context.cancelled = True
             for task in list(context.active.values()):
-                if not task.done():
+                if not task.done() and not task.cancelling():
                     task.cancel()
             self.wakeup.set()
 

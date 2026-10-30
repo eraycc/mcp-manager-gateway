@@ -15,7 +15,7 @@ export function storageSettings(signal){
   el('p',{class:'muted'},'两个阈值必须同时满足才自动执行 VACUUM；手动释放不受阈值限制。压缩期间数据库写入可能等待，建议在低峰期操作。WAL / SHM 由 SQLite 管理，请勿手动删除。'));
  const content=el('div',{class:'stack'},loading('正在读取数据库空间…'));root.append(content);
  const renderDatabase=(target,label,item)=>{
-  if(!item.supported)return el('p',{class:'notice'},item.backend==='mysql'?'主数据库使用 MySQL，不提供 SQLite 空间回收配置；本地日志索引仍可独立治理。':'主数据库不是文件型 SQLite，不提供空间回收配置。');
+  if(!item.supported)return el('p',{class:'notice'},item.backend==='mysql'?'主数据库使用 MySQL，不提供 SQLite 空间回收配置；本地派生索引仍可独立治理。':'主数据库不是文件型 SQLite，不提供空间回收配置。');
   const group=el('fieldset',{class:'stack storage-database','aria-label':label},el('legend',{},label));
   const enabled=check('启动时按阈值自动释放空间',item.policy.startup_enabled);
   const mib=field('最小空闲空间（MiB）',item.policy.min_free_mib,'number','默认 32 MiB；这是可回收的空闲页，不是数据库总体积。');
@@ -52,7 +52,7 @@ export function storageSettings(signal){
  };
  const load=async()=>{content.replaceChildren(loading('正在读取数据库空间…'));try{
   const saved=await api('/settings/storage',{signal});
-  content.replaceChildren(renderDatabase('main','主 SQLite',saved.databases.main),renderDatabase('logs','日志索引 SQLite',saved.databases.logs));
+  content.replaceChildren(renderDatabase('main','主 SQLite',saved.databases.main),renderDatabase('derived','派生索引 SQLite',saved.databases.derived));
  }catch(e){if(e.name!=='AbortError')content.replaceChildren(el('p',{class:'error',role:'alert'},e.message),button('重试',load))}};
  load();return root;
 }

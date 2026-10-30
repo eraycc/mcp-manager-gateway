@@ -4,14 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from .catalog import web_authorizer
 from .database import SystemSetting, invalidate_setting_cache
 from .identity import admin_user
-from .storage_maintenance import SETTING_KEY, normalize_policy
+from .storage_maintenance import SETTING_KEY, normalize_policy, normalize_target
 
 router = APIRouter(prefix="/api/v1/settings/storage")
 ADMIN = Depends(admin_user)
 
 
 def validate_target(state, target):
-    if target not in {"main", "logs"}:
+    if target not in {"main", "derived", "logs"}:
         raise HTTPException(404, "Database not found")
     if state.storage.path(target) is None:
         raise HTTPException(422, "Only file-backed SQLite databases support space reclamation")
@@ -25,8 +25,11 @@ async def storage_settings(request: Request, user=ADMIN):
 @router.patch("")
 async def update_storage_settings(data: dict, request: Request, user=ADMIN):
     state = request.app.state
-    if set(data) - {"main", "logs"}:
+    if set(data) - {"main", "derived", "logs"}:
         raise HTTPException(422, "Unknown database")
+    if "logs" in data and "derived" in data:
+        raise HTTPException(422, "Specify derived or its legacy logs alias, not both")
+    data = {normalize_target(target): value for target, value in data.items()}
     for target, value in data.items():
         validate_target(state, target)
         normalize_policy(value)
@@ -35,7 +38,9 @@ async def update_storage_settings(data: dict, request: Request, user=ADMIN):
         row = await session.get(SystemSetting, SETTING_KEY)
         values = dict(row.value) if row else {}
         for target, value in data.items():
-            values[target] = normalize_policy(values.get(target, {}) | value)
+            previous = values.get(target, values.get("logs", {}) if target == "derived" else {})
+            values[target] = normalize_policy(previous | value)
+        values.pop("logs", None)
         if row:
             row.value = values
         else:
@@ -48,6 +53,7 @@ async def update_storage_settings(data: dict, request: Request, user=ADMIN):
 @router.post("/{target}/vacuum")
 async def compact_database(target: str, request: Request, user=ADMIN):
     state = request.app.state
+    target = normalize_target(target)
     validate_target(state, target)
     user = await web_authorizer(request)()
     if state.storage.locks[target].locked():

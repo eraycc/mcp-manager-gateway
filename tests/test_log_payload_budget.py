@@ -23,9 +23,9 @@ async def test_log_list_never_loads_large_payload_and_preview_is_bounded(tmp_pat
     assert summary["payload"] is not None
 
     await store.append(event)
-    payloads = list((tmp_path / "logs" / "payloads").glob("*.json"))
+    payloads = list((tmp_path / "logs/calls/payloads").glob("*/*/*.json"))
     assert len(payloads) == 1
-    daily = next((tmp_path / "logs").glob("????-??-??.jsonl"))
+    daily = next((tmp_path / "logs/calls").glob("????-??-??.jsonl"))
     assert daily.stat().st_size <= 65536
 
     def forbidden_payload_read(*_args, **_kwargs):
