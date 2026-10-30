@@ -204,3 +204,35 @@ async def test_cancellation_waits_for_vacuum_worker(db_app, monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert not state.storage.locks["logs"].locked()
+
+
+@pytest.mark.parametrize("revoke", [False, True])
+async def test_queued_compaction_retries_busy_only_with_fresh_admin(db_app, monkeypatch, revoke):
+    from sqlalchemy import select
+
+    from mcp_manager.database import User
+
+    state = db_app.app.state
+    calls = []
+    async def run(target, **kwargs):
+        calls.append(target)
+        if len(calls) == 1:
+            if revoke:
+                async with state.db.locked() as session:
+                    admin = await session.scalar(select(User).where(User.role == "admin"))
+                    admin.role = "viewer"
+            return {"status": "busy"}
+        return {"status": "completed"}
+    monkeypatch.setattr(state.storage, "run", run)
+    response = await db_app.web.post("/api/v1/settings/storage/derived/vacuum")
+    assert response.status_code == 200
+    identity = response.json()["id"]
+    for _ in range(200):
+        status = await state.jobs.store.get_status(identity)
+        if status["status"] not in {"queued", "running"}:
+            break
+        await asyncio.sleep(.02)
+    assert status["status"] == ("completed_with_errors" if revoke else "completed")
+    result = await state.jobs.store.get_result(identity, 0)
+    assert result["ok"] is (not revoke), result
+    assert calls == (["derived"] if revoke else ["derived", "derived"])

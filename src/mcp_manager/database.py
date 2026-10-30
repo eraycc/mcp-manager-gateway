@@ -6,13 +6,11 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text, event, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from .config import PACKAGE_ROOT, Settings
+from .config import Settings
 from .db_types import UTCDateTime, engine_options, exact_string
 
 
@@ -141,18 +139,18 @@ class Database:
                 cursor.execute("PRAGMA synchronous=FULL")
                 cursor.close()
         self.session = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.derived = None
 
-    async def initialize(self):
-        # Alembic creates and records the schema through explicit versioned migrations.
-        def migrate(connection):
-            cfg = Config()
-            cfg.set_main_option("script_location", str(PACKAGE_ROOT / "migrations"))
-            cfg.attributes["connection"] = connection
-            command.upgrade(cfg, "head")
-        async with self.engine.begin() as conn:
-            await conn.run_sync(migrate)
+    async def initialize(self, *, allow_storage_migration=None, runtime_guard=None):
+        from .storage_migration import initialize_storage
+        from .storage_runtime import require_safe_sqlite
+
+        require_safe_sqlite()
+        await initialize_storage(self, allow_migration=allow_storage_migration, runtime_guard=runtime_guard)
 
     async def close(self):
+        if self.derived is not None:
+            await self.derived.close()
         await self.engine.dispose()
 
     @asynccontextmanager
@@ -215,4 +213,4 @@ async def set_setting(db: Database, key: str, value: Any) -> None:
 
 
 # Register auxiliary models after Base and the identity models exist (shared Alembic metadata).
-from . import catalog_models, embedding_models, job_models  # noqa: F401
+from . import catalog_control, catalog_models, embedding_models, job_models  # noqa: F401

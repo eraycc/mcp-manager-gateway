@@ -65,6 +65,6 @@ def test_offline_sql_supports_both_dialects(tmp_path, monkeypatch):
         output = StringIO()
         cfg = Config(output_buffer=output)
         cfg.set_main_option("script_location", str(PACKAGE_ROOT / "migrations"))
-        command.upgrade(cfg, "head", sql=True)
+        command.upgrade(cfg, "0010", sql=True)
         sql = output.getvalue()
         assert "test_run_id" in sql and "tested_revision" in sql

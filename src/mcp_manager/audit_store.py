@@ -5,11 +5,16 @@ import json
 import logging
 import math
 import os
+import sqlite3
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from filelock import FileLock
+
 from .audit_events import build_event, normalize, timestamp
 from .log_index_migrations import migrate_audit_index
+from .storage_async import run_blocking
 
 LOGGER = logging.getLogger(__name__)
 COLUMNS = ("event_id", "timestamp", "action", "category", "actor_type", "user_id", "username",
@@ -21,7 +26,11 @@ MAX_LINE = 1024 * 1024
 
 class AuditStore:
     def __init__(self, owner):
-        self.owner, self.conn, self.lock = owner, owner.conn, owner.lock
+        self.owner = owner
+        self.lock = threading.RLock()
+        self.conn = sqlite3.connect(owner.root.parent / "indexes/derived.sqlite", check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.source_lock = FileLock(str(owner.root.parent / "locks" / "audit-sources.lock"), timeout=10)
         self.root = owner.root / "audit"
         self.root.mkdir(exist_ok=True)
         self.journals = self.root / ".deletions"
@@ -29,10 +38,21 @@ class AuditStore:
         self.write_failures = self.index_failures = 0
         self.last_error = None
         self.skipped = {}
+        try:
+            self.conn.execute("PRAGMA busy_timeout=5000")
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+            with self.lock, self.owner.gate.operation(), self.source_lock:
+                migrate_audit_index(self.conn)
+                self._recover()
+                self._sync()
+        except BaseException:
+            self.conn.close()
+            raise
+
+    def close(self):
         with self.lock:
-            migrate_audit_index(self.conn)
-            self._recover()
-            self._sync()
+            self.conn.close()
 
     def _error(self, exc, *, projection=False):
         if projection:
@@ -46,7 +66,7 @@ class AuditStore:
         async with self.owner.capacity:
             try:
                 event = build_event(action, user_id, details, **context)
-                return await asyncio.to_thread(self._append, event)
+                return await run_blocking(self._append, event)
             except Exception as exc:
                 self._error(exc)
                 if require:
@@ -57,7 +77,7 @@ class AuditStore:
         stamp = datetime.fromisoformat(event["timestamp"])
         path = self.root / stamp.astimezone(self.owner.timezone).strftime("%Y-%m-%d.jsonl")
         raw = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
-        with path.open("a+b") as stream:
+        with self.owner.admission.reserve("audit", max(4096, len(raw))), path.open("a+b") as stream:
             if stream.tell():
                 stream.seek(-1, os.SEEK_END)
                 if stream.read(1) != b"\n":
@@ -70,7 +90,7 @@ class AuditStore:
         return event["event_id"]
 
     def _append(self, event):
-        with self.lock:
+        with self.lock, self.owner.gate.operation(), self.source_lock:
             identity = self._write(event)
             try:
                 self._sync()
@@ -125,6 +145,7 @@ class AuditStore:
             scan_id = uuid.uuid4().hex
             skipped = 0 if rescan else saved["skipped"]
             committed = start
+            indexed_batch = 0
             with path.open("rb") as stream:
                 stream.seek(start)
                 while True:
@@ -145,6 +166,10 @@ class AuditStore:
                     committed = stream.tell()
                     try:
                         self._index(self._event(raw, path, offset), path, offset, len(raw), scan_id)
+                        indexed_batch += 1
+                        if indexed_batch == 250:
+                            self.conn.commit()
+                            indexed_batch = 0
                     except (ValueError, KeyError, TypeError):
                         skipped += 1
             if rescan:
@@ -183,7 +208,7 @@ class AuditStore:
         return await asyncio.to_thread(self._query, page, page_size, filters)
 
     def _query(self, page, page_size, filters):
-        with self.lock:
+        with self.lock, self.owner.gate.operation(), self.source_lock:
             self._sync()
             where, args = self._where(filters)
             total = self.conn.execute("SELECT COUNT(*) FROM audit_events" + where, args).fetchone()[0]
@@ -209,21 +234,21 @@ class AuditStore:
 
     async def detail(self, identity):
         def read():
-            with self.lock:
+            with self.lock, self.owner.gate.operation(), self.source_lock:
                 self._sync()
                 return self._detail(self.conn.execute("SELECT * FROM audit_events WHERE event_id=?", [identity]).fetchone())
         return await asyncio.to_thread(read)
 
     async def watermark(self):
         def read():
-            with self.lock:
+            with self.lock, self.owner.gate.operation(), self.source_lock:
                 self._sync()
                 return self.conn.execute("SELECT COALESCE(MAX(seq),0) FROM audit_events").fetchone()[0]
         return await asyncio.to_thread(read)
 
     async def export_batch(self, *, max_seq, cursor=None, limit=200, **filters):
         def read():
-            with self.lock:
+            with self.lock, self.owner.gate.operation(), self.source_lock:
                 self._sync()
                 where, args = self._where(filters, max_seq=max_seq, cursor=cursor)
                 rows = self.conn.execute("SELECT * FROM audit_events" + where +
@@ -233,7 +258,7 @@ class AuditStore:
 
     async def status(self):
         def read():
-            with self.lock:
+            with self.lock, self.owner.gate.operation(), self.source_lock:
                 self._sync()
                 row = self.conn.execute("SELECT COUNT(*),MIN(timestamp),MAX(timestamp) FROM audit_events").fetchone()
                 files = list(self.root.glob("????-??-??.jsonl"))
@@ -246,62 +271,88 @@ class AuditStore:
 
     async def rebuild(self):
         def run():
-            with self.lock:
+            with self.lock, self.owner.gate.operation(), self.source_lock:
                 self._recover()
                 self._sync(full=True)
-        task = asyncio.create_task(asyncio.to_thread(run))
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
+        await run_blocking(run)
 
     def _rewrite_targets(self, operation_id):
+        from .storage_admission import StorageAdmission
         paths = self.conn.execute("SELECT DISTINCT path FROM audit_delete_targets WHERE operation_id=?", [operation_id]).fetchall()
-        for row in paths:
-            path = self.root / row[0]
-            if not path.exists():
-                continue
-            temporary = path.with_name("." + path.name + "." + operation_id + ".tmp")
-            try:
-                with path.open("rb") as source, temporary.open("wb") as target:
-                    while True:
-                        offset = source.tell()
-                        raw = source.readline()
-                        if not raw:
-                            break
-                        try:
-                            identity = self._event(raw, path, offset)["event_id"]
-                        except (ValueError, KeyError, TypeError):
-                            identity = None
-                        deleted = identity and self.conn.execute("SELECT 1 FROM audit_delete_targets WHERE "
-                            "operation_id=? AND event_id=?", [operation_id, identity]).fetchone()
-                        if not deleted:
-                            target.write(raw)
-                    target.flush()
-                    os.fsync(target.fileno())
-                if temporary.stat().st_size:
-                    os.replace(temporary, path)
-                else:
-                    path.unlink()
-                self.conn.execute("DELETE FROM audit_index_offsets WHERE path=?", [path.name])
-                self.conn.execute("DELETE FROM audit_events WHERE path=? AND event_id IN "
-                    "(SELECT event_id FROM audit_delete_targets WHERE operation_id=?)", [path.name, operation_id])
-            finally:
-                temporary.unlink(missing_ok=True)
+        self.conn.commit()
+        admission = StorageAdmission(self.owner.root.parent, gate=self.owner.gate)
+        try:
+            for row in paths:
+                path = self.root / row[0]
+                if not path.exists():
+                    continue
+                with admission.reserve("audit", 4096) as reservation:
+                    temporary = self.root / ("." + reservation + ".tmp")
+                    try:
+                        with path.open("rb") as source, temporary.open("xb") as target:
+                            pending = bytearray()
+                            def flush(pending=pending):
+                                if pending:
+                                    admission.grow(reservation, max(4096, target.tell() + len(pending)))
+                                    target.write(pending)
+                                    pending.clear()
+                            while True:
+                                offset = source.tell()
+                                raw = source.readline(MAX_LINE + 1)
+                                if not raw:
+                                    break
+                                if len(raw) > MAX_LINE:
+                                    # Preserve an unknown oversized record verbatim
+                                    # without materializing the whole record in RAM.
+                                    while True:
+                                        pending.extend(raw)
+                                        flush()
+                                        if raw.endswith(b"\n"):
+                                            break
+                                        raw = source.readline(MAX_LINE + 1)
+                                        if not raw:
+                                            break
+                                    continue
+                                try:
+                                    identity = self._event(raw, path, offset)["event_id"]
+                                except (ValueError, KeyError, TypeError):
+                                    identity = None
+                                deleted = identity and self.conn.execute("SELECT 1 FROM audit_delete_targets WHERE "
+                                    "operation_id=? AND event_id=?", [operation_id, identity]).fetchone()
+                                if not deleted:
+                                    pending.extend(raw)
+                                    if len(pending) >= 262144:
+                                        flush()
+                            flush()
+                            target.flush()
+                            os.fsync(target.fileno())
+                        if temporary.stat().st_size:
+                            os.replace(temporary, path)
+                        else:
+                            path.unlink()
+                        self.conn.execute("DELETE FROM audit_index_offsets WHERE path=?", [path.name])
+                        self.conn.execute("DELETE FROM audit_events WHERE path=? AND event_id IN "
+                            "(SELECT event_id FROM audit_delete_targets WHERE operation_id=?)", [path.name, operation_id])
+                        self.conn.commit()
+                    finally:
+                        temporary.unlink(missing_ok=True)
+        finally:
+            admission.close()
 
     def _recover(self):
         for journal in sorted(self.journals.glob("*.jsonl")):
             operation_id = journal.stem
             with journal.open(encoding="utf-8") as stream:
                 metadata = json.loads(next(stream))
-                for raw in stream:
+                for number, raw in enumerate(stream, 1):
                     target = json.loads(raw)
                     # Journal paths are generated locally and must remain direct day files.
                     if len(target["path"]) != 16 or "/" in target["path"] or "\\" in target["path"]:
                         raise ValueError("Invalid audit deletion journal")
                     self.conn.execute("INSERT OR IGNORE INTO audit_delete_targets VALUES(?,?,?)",
                                       [operation_id, target["event_id"], target["path"]])
+                    if number % 250 == 0:
+                        self.conn.commit()
             self._rewrite_targets(operation_id)
             self._sync(full=True)
             self._append(build_event(metadata["action"], metadata["actor"].get("user_id"), {
@@ -312,16 +363,10 @@ class AuditStore:
             journal.unlink()
 
     async def delete(self, ids=None, *, actor=None, max_seq=None, action="audit.delete", **filters):
-        task = asyncio.create_task(asyncio.to_thread(self._delete, ids, actor or {}, max_seq, action, filters))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            # Finish or durably journal the physical mutation before SQLite can close.
-            await task
-            raise
+        return await run_blocking(self._delete, ids, actor or {}, max_seq, action, filters)
 
     def _delete(self, ids, actor, max_seq, action, filters):
-        with self.lock:
+        with self.lock, self.owner.gate.operation(), self.source_lock:
             self._recover()
             self._sync()
             where, args = self._where(filters, max_seq=max_seq)
@@ -355,10 +400,12 @@ class AuditStore:
                 os.replace(staged, journal)
                 with journal.open(encoding="utf-8") as stream:
                     next(stream)
-                    for raw in stream:
+                    for number, raw in enumerate(stream, 1):
                         row = json.loads(raw)
                         self.conn.execute("INSERT INTO audit_delete_targets VALUES(?,?,?)",
                                           [operation_id, row["event_id"], row["path"]])
+                        if number % 250 == 0:
+                            self.conn.commit()
                 self.conn.commit()
                 self._rewrite_targets(operation_id)
                 self._sync(full=True)

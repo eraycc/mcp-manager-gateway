@@ -49,12 +49,13 @@ COOKIE_SECURE=false
 | `.env` | 运行配置 |
 | `mcp-manager.sqlite` | 默认系统数据库 |
 | `secret.key` | JWT 与配置加密根密钥 |
-| `cache/` | 能力缓存 |
-| `indexes/embeddings.jsonl` | 可重建的向量缓存 |
-| `jobs/` | 后台任务状态 |
-| `logs/YYYY-MM-DD.jsonl` | 调用日志 |
-| `logs/audit/` | 管理审计 |
-| `indexes/logs.sqlite` | 可重建的日志查询索引 |
+| `indexes/derived.sqlite` | 目录、词项、向量、日志查询及缓存元数据的单一派生库 |
+| `objects/cache/sha256/` | 可重建正文 CAS |
+| `objects/durable/sha256/` | 任务结果与审批测试证据 CAS |
+| `catalog/manifests/` | 当前及有界历史目录版本指针 |
+| `logs/calls/YYYY-MM-DD.jsonl` | 调用日志原文 |
+| `logs/audit/YYYY-MM-DD.jsonl` | 管理审计原文 |
+| `backups/` | 升级备份与归档；需纳入手动保留管理 |
 
 `secret.key` 必须与数据库一起备份。丢失后已有加密凭据无法恢复。
 

@@ -2,6 +2,7 @@
 import asyncio
 import json
 from collections import deque
+from contextlib import aclosing
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -439,7 +440,7 @@ async def job_result_download(job_id: str, ordinal: int, request: Request, user=
     if not ref:
         raise HTTPException(404, "Job result not found")
     async def stream():
-        async with store.artifacts.open_download(ref) as chunks:
+        async with aclosing(store.artifacts.open_download(ref)) as chunks:
             async for chunk in chunks:
                 await authorized_job(job_id, request)
                 yield chunk

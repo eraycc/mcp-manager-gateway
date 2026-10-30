@@ -40,3 +40,64 @@ def prepare_index_path(data_dir: Path, *, migrate: bool = True) -> Path:
             raise RuntimeError("Legacy index still has active connections")
         os.rename(old, target)
         return target
+
+
+class DerivedIndex:
+    """Separate pooled sessions, with explicit routing for authority lookups."""
+    def __init__(self, database):
+        from sqlalchemy import event
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from .database import Base
+        from .db_types import strict_json_dumps
+
+        self.path = prepare_index_path(database.settings.data_dir)
+        self.engine = create_async_engine(
+            "sqlite+aiosqlite:///" + self.path.as_posix(), json_serializer=strict_json_dumps,
+        )
+
+        @event.listens_for(self.engine.sync_engine, "connect")
+        def configure(connection, record):
+            cursor = connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.close()
+
+        main_bindings = {table: database.engine for table in Base.metadata.tables.values()}
+        self._sessions = async_sessionmaker(self.engine, binds=main_bindings, expire_on_commit=False)
+        from .storage_gate import StorageGate
+        self.gate = StorageGate(database.settings.data_dir)
+
+    @contextlib.asynccontextmanager
+    async def session(self):
+        # Read snapshots rely on SQLite WAL locks. They do not acquire a
+        # process-wide file admission lock for every metadata lookup.
+        async with self._sessions() as session:
+            yield session
+
+    async def initialize(self):
+        from .derived_schema import migrate_derived_schema
+        async with self.gate.async_operation(), self.engine.begin() as connection:
+            # sqlite3 legacy transaction mode does not BEGIN for DDL. A real
+            # write transaction must precede schema steps and version markers.
+            await connection.exec_driver_sql("BEGIN IMMEDIATE")
+            await connection.run_sync(migrate_derived_schema)
+
+    @contextlib.asynccontextmanager
+    async def locked(self):
+        from sqlalchemy import text
+
+        async with self.gate.async_operation(), self._sessions() as session:
+            await session.execute(text("BEGIN IMMEDIATE"))
+            try:
+                yield session
+                await session.commit()
+            except BaseException:
+                await session.rollback()
+                raise
+
+    async def close(self):
+        await self.engine.dispose()
+        self.gate.close()

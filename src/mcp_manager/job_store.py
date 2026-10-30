@@ -5,7 +5,6 @@ from datetime import timedelta
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import delete, func, select
 
-from .catalog_models import ArtifactObject
 from .catalog_types import ArtifactRef
 from .database import now
 from .db_types import strict_json_dumps
@@ -36,7 +35,7 @@ def result_summary(ordinal, result):
 
 class JobStore:
     def __init__(self, db, artifacts, *, signing_key="job-tests"):
-        self.db, self.artifacts, self.signing_key = db, artifacts, signing_key
+        self.db, self.artifacts, self.signing_key = db, artifacts.for_namespace("durable"), signing_key
 
     async def create_job(self, action, total, *, user_id=None, identity=None):
         if not isinstance(action, str) or not 1 <= len(action) <= 128 or type(total) is not int or not 0 <= total <= 1000:
@@ -94,15 +93,12 @@ class JobStore:
         safe = await asyncio.to_thread(jsonable_encoder, safe)
         summary = await asyncio.to_thread(result_summary, ordinal, safe)
         ref = await self.artifacts.put_json(safe, max_bytes=8 * 1024 * 1024)
-        async with self.db.locked() as session:
+        async with self.artifacts.hold([ref]), self.db.locked() as session:
             row = await session.get(JobRecord, job_id)
             if not row or ordinal >= row.total:
                 raise GatewayError("job_not_found", "Job or result slot no longer exists")
             if await session.get(JobResult, (job_id, ordinal)):
                 return False
-            if await session.get(ArtifactObject, ref.id) is None:
-                session.add(ArtifactObject(id=ref.id, size_bytes=ref.size_bytes, sha256=ref.sha256))
-                await session.flush()
             session.add(JobResult(job_id=job_id, ordinal=ordinal, summary=summary,
                                   artifact_id=ref.id, artifact_bytes=ref.size_bytes))
             row.completed += 1
@@ -129,7 +125,7 @@ class JobStore:
     async def get_result_ref(self, job_id, ordinal):
         async with self.db.session() as session:
             row = await session.get(JobResult, (job_id, ordinal))
-            return ArtifactRef(row.artifact_id, row.artifact_bytes, row.artifact_id) if row else None
+            return ArtifactRef(row.artifact_id, row.artifact_bytes, row.artifact_id, "durable") if row else None
 
     async def get_result(self, job_id, ordinal):
         ref = await self.get_result_ref(job_id, ordinal)

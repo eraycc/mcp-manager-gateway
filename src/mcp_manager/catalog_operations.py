@@ -1,8 +1,9 @@
 """Count completed MCP operations without counting their internal preparation twice."""
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
+from uuid import uuid4
 
 current_operation = ContextVar("catalog_operation", default=None)
 
@@ -11,6 +12,9 @@ current_operation = ContextVar("catalog_operation", default=None)
 class Operation:
     catalog: object
     kind: str
+    identity: str = field(default_factory=lambda: uuid4().hex)
+    success_version: int | None = None
+    ticket: dict | None = None
     row: object = None
     user_id: str | None = None
     scope: object = None
@@ -25,7 +29,8 @@ class Operation:
         ):
             return
         self.row, self.user_id = row, user_id
-        self.scope = await self.catalog.index_scope(row, user_id)
+        from .control_results import bind_operation
+        self.scope, self.ticket = await bind_operation(self.catalog, row, user_id)
 
 
 @asynccontextmanager
@@ -38,9 +43,7 @@ async def operation(catalog, row=None, user_id=None, *, kind):
         if row is not None:
             await parent.bind(row, user_id)
         yield parent
-        # A completed catalog publication is itself a successful refresh.
-        if kind == "refresh" and row is not None:
-            await catalog.record_operation_result(row, user_id, scope=parent.scope)
+        # Publication itself commits the authoritative success receipt.
         return
     outcome = Operation(catalog, kind)
     if row is not None:
@@ -65,6 +68,18 @@ async def operation(catalog, row=None, user_id=None, *, kind):
         current_operation.reset(token)
 
 
+@asynccontextmanager
+async def call_storage_activity(catalog, kind):
+    gate = getattr(getattr(catalog, "logs", None), "gate", None)
+    if kind == "call" and gate is not None:
+        # Ordinary writes remain concurrent. Only exclusive physical index
+        # maintenance is fenced until this call and its terminal log finish.
+        async with gate.async_operation():
+            yield
+    else:
+        yield
+
+
 def tracked(kind):
     def decorate(method):
         @wraps(method)
@@ -74,7 +89,7 @@ def tracked(kind):
             user_id = user.id if user else None
             if kind == "refresh":
                 user_id = args[0] if args else kwargs.get("user_id")
-            async with operation(self, row, user_id, kind=kind) as outcome:
+            async with call_storage_activity(self, kind), operation(self, row, user_id, kind=kind) as outcome:
                 result = await method(self, target, *args, **kwargs)
                 if result is None and kind == "refresh":
                     outcome.discard = True

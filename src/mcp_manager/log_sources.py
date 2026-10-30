@@ -16,7 +16,7 @@ class LogSources:
         self.root = Path(root).resolve()
         lock_root = Path(data_dir).resolve() / "locks"
         lock_root.mkdir(parents=True, exist_ok=True)
-        self.lock = FileLock(str(lock_root / "calls-sources.lock"), timeout=10)
+        self.lock = FileLock(str(lock_root / "calls-sources.lock"), timeout=10, preserve_lock_file=True)
         self.metadata = self.root / "calls" / ".sources"
         self.metadata.mkdir(parents=True, exist_ok=True)
         self.workers = lock_root / "call-workers"
@@ -43,14 +43,16 @@ class LogSources:
         return self.metadata / (identity + ".json")
 
     def generation(self, path):
-        target = self._metadata_path(path)
+        name = self.name(path)
+        target = self.metadata / (hashlib.sha256(name.encode()).hexdigest() + ".json")
         with self.lock:
-            if target.exists():
+            try:
                 value = json.loads(target.read_text(encoding="utf-8"))
-                if value.get("path") != self.name(path) or not re.fullmatch("[0-9a-f]{32}", value.get("generation", "")):
-                    raise RuntimeError("Invalid call source generation metadata")
-                return value["generation"]
-            return self.bump(path)
+            except FileNotFoundError:
+                return self.bump(path)
+            if value.get("path") != name or not re.fullmatch("[0-9a-f]{32}", value.get("generation", "")):
+                raise RuntimeError("Invalid call source generation metadata")
+            return value["generation"]
 
     def bump(self, path):
         target = self._metadata_path(path)

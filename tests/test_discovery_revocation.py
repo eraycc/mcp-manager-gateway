@@ -28,6 +28,20 @@ async def test_boolean_property_schema_remains_discoverable(discovery_env):  # n
 
 async def test_revocation_during_service_embedding_prevents_tool_embedding(discovery_env):  # noqa: F811
     app, rows, _calls, ctx, invoke, web = discovery_env
+    async def no_background_build(*args, **kwargs):
+        return {"built": 0}
+    # This test observes foreground revocation, independently of the periodic
+    # builder's legitimate service-wide vector requests.
+    from unittest.mock import patch
+    patcher = patch.object(app.state.embeddings, "build_pending", no_background_build)
+    patcher.start()
+    try:
+        return await _foreground_service_revocation(app, rows, ctx, invoke, web)
+    finally:
+        patcher.stop()
+
+
+async def _foreground_service_revocation(app, rows, ctx, invoke, web):
     _user, token, _ids = await app.state.gateway.principal(ctx.request)
     await web.patch("/api/v1/settings/embedding", json=config())
     sent = []

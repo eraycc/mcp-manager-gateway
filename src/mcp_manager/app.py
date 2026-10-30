@@ -281,12 +281,11 @@ async def _log_retention(app):
         audit_days = await get_setting(state.db, "audit_log_retention_days", 0)
         if audit_days:
             await state.logs.audits.retain(audit_days, at=now())
-        from .retention import run_startup_cache_cleanup, run_storage_retention
+        from .retention import run_startup_cache_cleanup
 
         if not state.cache_cleanup_done:
             await run_startup_cache_cleanup(state)
             state.cache_cleanup_done = True
-        await run_storage_retention(state, at=now(), batch_limit=250)
     except Exception:
         state.retention_next = 0
         raise
@@ -328,70 +327,98 @@ async def maintenance(app):
 def create_app(config=None):
     config = config or Settings()
 
+    async def stop_maintenance(task):
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
     @asynccontextmanager
     async def lifespan(app):
         state = app.state
-        lock = FileLock(str(Path(config.data_dir) / "runtime.lock"))
-        try:
-            lock.acquire(timeout=0)
-        except Timeout:
-            raise RuntimeError("Another MCP Manager runtime already owns this data directory")
-        state.db = Database(config)
-        state.logs = LogStore(config.data_dir)
-        state.password_pool = identity.PasswordWorkPool(
-            max_workers=config.password_workers,
-            max_waiters=config.password_waiters,
-        )
-        state.identity_rates = identity.IdentityRateLimiter(
-            max_entries=config.identity_rate_limit_entries,
-        )
-        load_transport_plugins()
-        state.runtime = Runtime(
-            connect,
-            capacity=RuntimeCapacity(
-                global_calls=config.runtime_global_calls,
-                user_calls=config.runtime_user_calls,
-                mcp_calls=config.runtime_mcp_calls,
-                queued_calls=config.runtime_queued_calls,
-                global_instances=config.runtime_global_instances,
-                user_instances=config.runtime_user_instances,
-                per_instance_waiters=config.runtime_instance_waiters,
-                queue_timeout=config.runtime_queue_timeout,
-            ),
-        )
-        state.catalog = Catalog(state.db, state.runtime, state.logs, config)
-        state.jobs = Jobs(store=JobStore(state.db, state.catalog.artifacts, signing_key=config.jwt_secret))
-        state.catalog.jobs = state.jobs
-        state.credentials = CredentialStore(state.catalog)
-        state.catalog.credentials = state.credentials
-        state.embeddings = EmbeddingIndex(
-            config.data_dir,
-            db=state.db,
-            artifacts=state.catalog.artifacts,
-        )
-        state.oauth = OAuth(state.catalog, state.credentials)
-        state.catalog.oauth = state.oauth
-        state.runtime.on_starting = state.catalog.connection_starting
-        state.runtime.on_connect = state.catalog.connection_ready
-        state.runtime.on_start_failure = state.catalog.start_failed
-        state.runtime.on_auth_failure = state.oauth.mark_reauth_spec
-        state.runtime.on_lifecycle = state.logs.audit
-        state.refresh_next = None
-        state.retention_next = 0
-        state.cache_cleanup_done = False
-        from .retention import cache_changed
+        async with contextlib.AsyncExitStack() as resources:
+            # Close background owners before their repositories, and repositories
+            # before runtime/log/database dependencies, including partial startup.
+            base = await resources.enter_async_context(contextlib.AsyncExitStack())
+            stores = await resources.enter_async_context(contextlib.AsyncExitStack())
+            workers = await resources.enter_async_context(contextlib.AsyncExitStack())
+            lock = FileLock(str(Path(config.data_dir) / "runtime.lock"))
+            try:
+                lock.acquire(timeout=0)
+            except Timeout:
+                raise RuntimeError("Another MCP Manager runtime already owns this data directory") from None
+            base.callback(lock.release)
+            state.db = Database(config)
+            base.push_async_callback(state.db.close)
+            await state.db.initialize(runtime_guard=lock)
+            from .storage_governance import initialize_policy
+            await initialize_policy(state.db)
+            state.logs = LogStore(config.data_dir)
+            base.push_async_callback(state.logs.close)
+            state.password_pool = identity.PasswordWorkPool(
+                max_workers=config.password_workers,
+                max_waiters=config.password_waiters,
+            )
+            base.callback(state.password_pool.close)
+            state.identity_rates = identity.IdentityRateLimiter(
+                max_entries=config.identity_rate_limit_entries,
+            )
+            load_transport_plugins()
+            state.runtime = Runtime(
+                connect,
+                capacity=RuntimeCapacity(
+                    global_calls=config.runtime_global_calls,
+                    user_calls=config.runtime_user_calls,
+                    mcp_calls=config.runtime_mcp_calls,
+                    queued_calls=config.runtime_queued_calls,
+                    global_instances=config.runtime_global_instances,
+                    user_instances=config.runtime_user_instances,
+                    per_instance_waiters=config.runtime_instance_waiters,
+                    queue_timeout=config.runtime_queue_timeout,
+                ),
+            )
+            base.push_async_callback(state.runtime.close)
+            state.catalog = Catalog(state.db, state.runtime, state.logs, config)
+            stores.push_async_callback(state.catalog.close)
+            state.jobs = Jobs(store=JobStore(state.db, state.catalog.artifacts, signing_key=config.jwt_secret))
+            workers.push_async_callback(state.jobs.close)
+            state.catalog.jobs = state.jobs
+            state.credentials = CredentialStore(state.catalog)
+            state.catalog.credentials = state.credentials
+            state.embeddings = EmbeddingIndex(
+                config.data_dir,
+                db=state.db,
+                artifacts=state.catalog.artifacts,
+            )
+            stores.callback(state.embeddings.store.close)
+            state.oauth = OAuth(state.catalog, state.credentials)
+            state.catalog.oauth = state.oauth
+            state.runtime.on_starting = state.catalog.connection_starting
+            state.runtime.on_connect = state.catalog.connection_ready
+            state.runtime.on_start_failure = state.catalog.start_failed
+            state.runtime.on_auth_failure = state.oauth.mark_reauth_spec
+            state.runtime.on_lifecycle = state.logs.audit
+            state.refresh_next = None
+            state.retention_next = 0
+            state.cache_cleanup_done = False
+            from .retention import cache_changed
 
-        state.catalog.on_cache_change = lambda server_id: cache_changed(state, server_id)
-        state.catalog.index.on_publish = state.catalog.on_cache_change
-        task = None
-        try:
-            await state.db.initialize()
+            state.catalog.on_cache_change = lambda server_id: cache_changed(state, server_id)
+            state.catalog.index.on_publish = state.catalog.on_cache_change
             state.storage = StorageMaintenance(state)
+            from .storage_governance import StorageGovernance
+            state.storage_governance = StorageGovernance(state)
+            workers.push_async_callback(state.storage_governance.close)
+            await state.storage_governance.refresh()
             await state.storage.startup()
+            from .storage_governor import StorageGovernor
+
+            state.storage_governor = StorageGovernor(state)
+            workers.push_async_callback(state.storage_governor.close)
+            state.storage_governor.start()
             await state.jobs.start()
             state.cors_origins = await get_setting(state.db, "cors_origins", ["*"])
             state.allowed_hosts = await get_setting(state.db, "allowed_hosts", ["*"])
             from zoneinfo import ZoneInfo
+
             state.logs.timezone = ZoneInfo(await get_setting(state.db, "timezone", "Asia/Shanghai"))
             state.runtime.idle_seconds = await get_setting(state.db, "idle_seconds", 86400)
             state.runtime.connection_ttl_seconds = await get_setting(state.db, "connection_ttl_seconds", 43200)
@@ -404,35 +431,24 @@ def create_app(config=None):
             state.catalog.startup_failure_threshold = await get_setting(
                 state.db, "startup_failure_threshold", 3
             )
-            async with contextlib.AsyncExitStack() as stack:
-                if hasattr(state, "protocol"):
-                    await stack.enter_async_context(state.protocol.session_manager.run())
-                eager = {
-                    row.id
-                    for row in await state.catalog.rows()
-                    if row.mode == "eager"
-                }
-                rows = {row.id: row for row in await state.catalog.rows()}
-                targets = [target for target in await state.catalog.refresh_targets()
-                           if target["server_id"] in eager or state.catalog.cached(
-                               rows[target["server_id"]], target["user_id"])["cache_status"] == "empty"]
-                if targets:
-                    await state.jobs.submit("mcp.startup", targets, state.catalog.warm_target)
-                task = asyncio.create_task(maintenance(app))
-                state.ready = True
+            if hasattr(state, "protocol"):
+                await resources.enter_async_context(state.protocol.session_manager.run())
+            eager = {
+                row.id
+                for row in await state.catalog.rows()
+                if row.mode == "eager"
+            }
+            targets = [target for target in await state.catalog.refresh_targets()
+                       if target["server_id"] in eager]
+            if targets:
+                await state.jobs.submit("mcp.startup", targets, state.catalog.warm_target)
+            task = asyncio.create_task(maintenance(app))
+            workers.push_async_callback(stop_maintenance, task)
+            state.ready = True
+            try:
                 yield
+            finally:
                 state.ready = False
-        finally:
-            if task:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-            await state.jobs.close()
-            await state.catalog.close()
-            await state.runtime.close()
-            await state.logs.close()
-            await state.db.close()
-            state.password_pool.close()
-            lock.release()
 
     app = FastAPI(title="MCP Manager", lifespan=lifespan)
     app.state.config = config
@@ -440,10 +456,12 @@ def create_app(config=None):
 
     @app.exception_handler(GatewayError)
     async def gateway_error(request: Request, exc):
-        busy = exc.code in {"busy", "queue_timeout"}
+        busy = exc.code in {"busy", "queue_timeout", "storage_busy", "staging_capacity",
+                            "inventory_rebuilding", "wal_pressure"}
         return JSONResponse(
             {"detail": str(exc), "code": exc.code, **exc.details},
-            status_code=429 if busy else 502,
+            status_code=429 if busy else 507 if exc.code in {
+                "storage_low_space", "cache_capacity", "durable_capacity", "index_capacity"} else 502,
             headers={"Retry-After": "1"} if busy else None,
         )
 

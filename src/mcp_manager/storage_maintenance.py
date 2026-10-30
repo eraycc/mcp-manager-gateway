@@ -153,7 +153,10 @@ class StorageMaintenance:
         try:
             if logs.conn.in_transaction:
                 return {"status": "busy", "reclaimed_bytes": 0}
-            return vacuum_sqlite(path, policy=policy)
+            with logs.gate.maintenance() as admitted:
+                if not admitted:
+                    return {"status": "busy", "reclaimed_bytes": 0}
+                return vacuum_sqlite(path, policy=policy)
         finally:
             logs.lock.release()
 

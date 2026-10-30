@@ -117,6 +117,7 @@ async def test_tokens_use_own_oauth_and_one_user_failure_preserves_other(tmp_pat
                     await app.state.credentials.save_oauth_token(
                         session, saved, alice["id"],
                         {"access_token": "expired", "expires_at": 0},
+                        renewal=True,  # Same grant renewal, not an unrelated replacement authorization.
                     )
             else:
                 broken.add(alice["id"])
@@ -129,7 +130,7 @@ async def test_tokens_use_own_oauth_and_one_user_failure_preserves_other(tmp_pat
             assert alice_cache["tools"] == []
         else:
             assert alice_cache["cache_status"] == "ready" and alice_cache["cache_stale"]
-            assert [tool["name"] for tool in alice_cache["tools"]] == ["whoami"]
+            assert (await catalog.tool_definition(current, "whoami", alice["id"]))["name"] == "whoami"
             assert alice_cache["cache_error_code"]
             assert alice_cache["cache_error"]
             assert alice_cache["last_refresh_error"]

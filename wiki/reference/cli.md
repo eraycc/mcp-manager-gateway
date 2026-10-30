@@ -75,7 +75,17 @@ mmg reconcile-data
 mmg reconcile-data --batch-size 100
 ~~~
 
-幂等回填旧审批的公开名称，并导入旧目录和任务索引。运行中的旧任务只标记为 `interrupted`，不会自动重放。
+幂等回填旧审批的公开名称，并校验导入可识别作用域的旧目录。旧任务 JSONL 不再读取或导入；数据库中的未完成任务在启动时标记为 `interrupted`，不会自动重放。
+
+## `storage`
+
+~~~console
+mmg storage status
+mmg storage migrate --dry-run
+mmg storage migrate
+~~~
+
+查询持久迁移阶段、预检或执行一次性存储布局升级。显式迁移须停止同目录运行实例；失败后重复执行同一命令从可恢复阶段继续。完成后的普通启动不重复搬迁。详见[存储治理](../operations/storage-governance.md)。
 
 ## `migrate-home`
 

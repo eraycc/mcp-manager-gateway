@@ -58,5 +58,36 @@ def migrate_call_index(conn):
             INSERT INTO call_schema_versions VALUES(1);
             COMMIT;
         """)
+    if version < 2:
+        conn.executescript("""
+            CREATE TABLE call_deletions(id TEXT PRIMARY KEY);
+            CREATE TABLE call_event_sources(id TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(id,path));
+            CREATE INDEX call_event_sources_path ON call_event_sources(path,id);
+            CREATE TABLE call_payload_roots(
+                path TEXT NOT NULL,offset INTEGER NOT NULL,artifact_id TEXT NOT NULL,
+                payload_path TEXT NOT NULL,size INTEGER NOT NULL,
+                PRIMARY KEY(path,offset));
+            CREATE INDEX call_payload_roots_object ON call_payload_roots(artifact_id);
+            INSERT INTO call_schema_versions VALUES(2);
+        """)
+    if version < 3:
+        conn.execute("ALTER TABLE call_payload_roots ADD COLUMN log_id TEXT")
+        conn.execute("CREATE INDEX call_payload_roots_log ON call_payload_roots(log_id)")
+        conn.execute("INSERT INTO call_schema_versions VALUES(3)")
+    if version < 4:
+        conn.execute("CREATE TABLE call_delete_requests(id TEXT PRIMARY KEY)")
+        conn.execute("""CREATE TABLE call_delete_payload_candidates(
+            artifact_id TEXT PRIMARY KEY,path TEXT NOT NULL)""")
+        conn.execute("INSERT INTO call_schema_versions VALUES(4)")
+    if version < 5:
+        conn.execute("""CREATE TABLE call_rewrite_offsets(
+            rewrite_id TEXT NOT NULL,old_offset INTEGER NOT NULL,new_offset INTEGER NOT NULL,
+            PRIMARY KEY(rewrite_id,old_offset))""")
+        conn.execute("INSERT INTO call_schema_versions VALUES(5)")
+    if version < 6:
+        conn.execute("CREATE TABLE call_deletion_sources(path TEXT PRIMARY KEY,inode TEXT NOT NULL,offset INTEGER NOT NULL)")
+        conn.execute("INSERT INTO call_schema_versions VALUES(6)")
+    from .storage_admission import migrate_admission_schema
+    migrate_admission_schema(conn)
     conn.commit()
-    return version < 1
+    return version < 3

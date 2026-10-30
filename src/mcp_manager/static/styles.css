@@ -252,3 +252,5 @@ dialog{max-width:calc(100vw - 28px);overflow:hidden}
 .audit-detail-facts dd{margin:3px 0 0;overflow-wrap:anywhere}
 .audit-page .page-title{align-items:flex-start}
 @media(max-width:720px){.audit-detail-facts{grid-template-columns:1fr}.audit-overview{align-items:flex-start}.audit-retention{width:100%;justify-content:space-between}.audit-page .toolbar>input,.audit-page .toolbar>select{min-width:0;flex:1 1 140px}}
+
+.storage-governance{min-width:0;max-width:100%;border:1px solid var(--line);border-radius:8px;padding:16px}.storage-governance .stack,.storage-governance .table-scroll,.storage-governance details{min-width:0;max-width:100%}.storage-governance summary{cursor:pointer;color:var(--accent);padding:8px 0}.storage-governance details[open] summary{margin-bottom:16px}.storage-governance p,.storage-governance small{overflow-wrap:anywhere}

@@ -190,7 +190,7 @@ def test_session_metadata_migration_emits_additive_sql(tmp_path, monkeypatch, ur
     output = StringIO()
     cfg = Config(output_buffer=output)
     cfg.set_main_option("script_location", str(PACKAGE_ROOT / "migrations"))
-    command.upgrade(cfg, "0001:head", sql=True)
+    command.upgrade(cfg, "0001:0010", sql=True)
     sql = output.getvalue()
     assert "ALTER TABLE auth_sessions ADD COLUMN ip_address VARCHAR(64)" in sql
     assert "ALTER TABLE auth_sessions ADD COLUMN user_agent VARCHAR(1024)" in sql

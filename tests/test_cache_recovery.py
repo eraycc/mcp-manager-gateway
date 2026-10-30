@@ -5,24 +5,24 @@ import pytest
 from test_bug1_catalog import console
 from test_discovery_failure_policy import Upstream
 
-from mcp_manager.jsonl_store import JsonlStore
+from mcp_manager.artifact_store import ArtifactStore
 from mcp_manager.runtime import GatewayError
 
 
 def deny_cache_replace(monkeypatch, *, transient=False):
-    original = JsonlStore._append
+    original = ArtifactStore._put_json
     attempts = []
 
-    def replace(store, raw):
-        if store.path.parent.name == "cache":
-            attempts.append(store.path)
+    def replace(store, value, max_bytes):
+        if store.namespace == "cache" and store.cache_bytes == 0:
+            attempts.append(store.root)
             if not transient or len(attempts) <= 2:
                 error = PermissionError(13, "cache file locked")
                 error.winerror = 5
                 raise error
-        return original(store, raw)
+        return original(store, value, max_bytes)
 
-    monkeypatch.setattr(JsonlStore, "_append", replace)
+    monkeypatch.setattr(ArtifactStore, "_put_json", replace)
     return attempts
 
 
@@ -93,7 +93,7 @@ async def test_explicit_admin_retry_recovers_failed_service(tmp_path, action):
             assert capabilities.status_code == 200
             assert capabilities.json()["total"] == 1
         else:
-            assert len(app.state.catalog.cached(current)["tools"]) == 1
+            assert (await app.state.catalog.tool_definition(current, "first"))["name"] == "first"
 
 
 @pytest.mark.parametrize("action", ["refresh", "start"])

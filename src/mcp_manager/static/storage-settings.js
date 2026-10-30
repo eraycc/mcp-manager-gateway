@@ -1,4 +1,5 @@
 import{el,api,button,field,check,loading,watchJob}from './core.js';
+import{storageGovernance}from './storage-governance.js';
 
 const bytes=value=>{const n=Math.max(0,Number(value)||0);return n>=1024**3?(n/1024**3).toFixed(2)+' GiB':n>=1024**2?(n/1024**2).toFixed(2)+' MiB':n>=1024?(n/1024).toFixed(1)+' KiB':n+' B'};
 const outcome=result=>({
@@ -11,7 +12,7 @@ const outcome=result=>({
 
 export function storageSettings(signal){
  const root=el('section',{class:'card stack'},el('h2',{},'存储治理'),
-  el('p',{class:'notice'},'只回收数据库空闲页和碎片，不删除有效记录、目录缓存或向量索引。自动检查仅在启动时执行一次，不会每小时压缩。'),
+  el('p',{class:'notice'},'按存储域管理容量、临时空间与内存；后台分批回收过期或无引用数据。数据库压缩独立配置，启动时按阈值检查。'),
   el('p',{class:'muted'},'两个阈值必须同时满足才自动执行 VACUUM；手动释放不受阈值限制。压缩期间数据库写入可能等待，建议在低峰期操作。WAL / SHM 由 SQLite 管理，请勿手动删除。'));
  const content=el('div',{class:'stack'},loading('正在读取数据库空间…'));root.append(content);
  const renderDatabase=(target,label,item)=>{
@@ -54,5 +55,5 @@ export function storageSettings(signal){
   const saved=await api('/settings/storage',{signal});
   content.replaceChildren(renderDatabase('main','主 SQLite',saved.databases.main),renderDatabase('derived','派生索引 SQLite',saved.databases.derived));
  }catch(e){if(e.name!=='AbortError')content.replaceChildren(el('p',{class:'error',role:'alert'},e.message),button('重试',load))}};
- load();return root;
+ root.append(storageGovernance(signal));load();return root;
 }

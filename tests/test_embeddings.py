@@ -203,11 +203,12 @@ async def test_incremental_cache_is_persistent_and_isolated_by_scope_model_endpo
 
     assert [len(batch[2]) for batch in batches] == [2, 2, 1, 2, 2]
     assert batches[-1][0] == "http://second.test/v1/embeddings"
-    persisted = (tmp_path / "indexes" / "embeddings.jsonl").read_text(encoding="utf-8")
-    assert "first content" not in persisted
-    assert "query" not in persisted
-    assert "fixture-secret" not in persisted
-    assert "[1.0, 2.0]" in persisted
+    persisted = b"".join(path.read_bytes() for path in (tmp_path / "objects/cache").rglob("*.json"))
+    assert b"first content" not in persisted
+    assert b"query" not in persisted
+    assert b"fixture-secret" not in persisted
+    assert any(value.get("vector") == [1.0, 2.0] for value in second.store.items.values())
+    assert not (tmp_path / "indexes/embeddings.jsonl").exists()
 
 
 async def test_disabled_and_empty_inputs_never_call_http(tmp_path):

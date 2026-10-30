@@ -20,6 +20,7 @@
 - [配置与数据目录](operations/configuration.md)
 - [控制台外观、翻译与版本提醒](guides/interface-translation-and-updates.md)
 - [SQLite 与 MySQL 部署、迁移和备份](database-deployment.md)
+- [存储架构、预算与回收](operations/storage-governance.md)
 - [部署与升级](operations/deployment-and-upgrades.md)
 - [备份与迁移](operations/backup-and-migration.md)
 - [安全模型](security/security-model.md)

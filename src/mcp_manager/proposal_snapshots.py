@@ -5,7 +5,7 @@ from datetime import timedelta
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
-from .catalog_models import ArtifactObject, ProposalTestEntry
+from .catalog_models import ProposalTestEntry
 from .catalog_store import (
     CatalogStore,
     bounded_summary_rows,
@@ -22,6 +22,8 @@ from .runtime import GatewayError
 class ProposalSnapshotStore(CatalogStore):
     def __init__(self, db, artifacts, scope, *, signing_key):
         super().__init__(db, artifacts, signing_key=signing_key)
+        self.db = db
+        self.artifacts = artifacts.for_namespace("durable")
         self.scope = scope
         self.metadata = {}
 
@@ -85,15 +87,8 @@ class ProposalSnapshotStore(CatalogStore):
                 artifact_id=ref.id, artifact_bytes=ref.size_bytes,
             )))
         try:
-            async with self.db.locked() as session:
+            async with self.artifacts.hold([ref for ref, _ in prepared]), self.db.locked() as session:
                 await self._check(session)
-                ids = {ref.id for ref, _ in prepared}
-                existing = set((await session.scalars(select(ArtifactObject.id).where(ArtifactObject.id.in_(ids)))).all())
-                for ref, _ in prepared:
-                    if ref.id not in existing:
-                        session.add(ArtifactObject(id=ref.id, size_bytes=ref.size_bytes, sha256=ref.sha256))
-                        existing.add(ref.id)
-                await session.flush()
                 session.add_all([entry for _, entry in prepared])
                 await session.flush()
         except IntegrityError:
@@ -181,7 +176,7 @@ class ProposalSnapshotStore(CatalogStore):
                 return None
             if row.name != name:
                 raise GatewayError("catalog_hash_collision", "Diagnostic name hash collision")
-            ref = ArtifactRef(row.artifact_id, row.artifact_bytes, row.artifact_id)
+            ref = ArtifactRef(row.artifact_id, row.artifact_bytes, row.artifact_id, "durable")
         result = await self.artifacts.read_json(ref, max_bytes=8 * 1024 * 1024)
         async with self.db.session() as session:
             await self._check(session, published=True)

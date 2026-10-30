@@ -11,17 +11,20 @@ async def test_final_log_failure_preserves_successful_downstream_result(tmp_path
         app.state.runtime.connector = fake.connect
         row = await app.state.catalog.create({"name": "fake", "transport": "stdio", "config": {"command": "fake"}})
         count = 0
+        persist_running = app.state.logs.append
         async def append(event):
             nonlocal count
             count += 1
             if count == 2:
                 raise OSError("disk full")
-            return event["id"]
+            return await persist_running(event)
         monkeypatch.setattr(app.state.logs, "append", append)
         lease = app.state.runtime.create_lease("u", "t")
         result = await app.state.catalog.call(row, lease, "echo", {"value": "success"})
         assert result["content"][0]["text"] == "success"
         assert fake.calls == 1
+        assert count == 2
+        assert (await app.state.logs.query())["total"] == 1
 
 
 async def test_recovered_job_is_not_replayed(db_app):

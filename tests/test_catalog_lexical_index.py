@@ -7,6 +7,7 @@ from mcp_manager.catalog_models import CatalogTerm
 from mcp_manager.catalog_store import CatalogStore
 from mcp_manager.catalog_types import CatalogScope
 from mcp_manager.database import McpServer
+from mcp_manager.derived_models import index_key
 
 
 async def make_store(dual_db, db_settings):
@@ -56,7 +57,7 @@ async def test_keyword_search_reuses_index_and_chinese_semantics(dual_db, db_set
     async with dual_db.session() as session:
         persisted_terms = await session.scalar(
             select(func.count()).select_from(CatalogTerm).where(
-                CatalogTerm.generation_id == generation.id
+                CatalogTerm.generation_id == index_key(generation.id)
             )
         )
     assert persisted_terms > 0

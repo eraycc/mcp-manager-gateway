@@ -22,8 +22,15 @@ from mcp_manager.database import McpServer, set_setting
 
 
 @asynccontextmanager
-async def oauth_http_service(h, monkeypatch, ownership, *, before_callback=None):
+async def oauth_http_service(h, monkeypatch, ownership, *, before_callback=None, isolate_schedule=False):
     """Use real token POSTs, client bindings, SDK startup and streaming discovery."""
+    if isolate_schedule:
+        # These cases advance a fake clock and fire the scheduled entrypoint
+        # explicitly. Do not introduce an additional wall-clock-triggered job.
+        monkeypatch.setattr(app_module, "MAINTENANCE_STEPS", tuple(
+            step for step in app_module.MAINTENANCE_STEPS if step is not app_module._scheduled_refresh))
+    # Match production discovery budgets while the parallel suite exercises
+    # real network startup, CAS persistence and credential rotation together.
     observed = {"refreshes": [], "lists": 0, "business": 0}
     token_number = [0]
     clock = [time.time()]
@@ -101,7 +108,7 @@ async def oauth_http_service(h, monkeypatch, ownership, *, before_callback=None)
         row = await h.app.state.catalog.create({
             "name": "HTTP OAuth", "transport": "streamable-http", "mode": "disabled",
             "isolation": "service" if ownership == "service" else "user",
-            "config": {"url": base + "/mcp", "startup_timeout": 5, "call_timeout": 5, "stop_timeout": 2,
+            "config": {"url": base + "/mcp", "startup_timeout": 30, "call_timeout": 30, "stop_timeout": 5,
                        "auth": {"type": "oauth", "auth_mode": "dcr_only", "client_name": "Fixture",
                                 "token_endpoint_auth_method": "client_secret_post",
                                 "config_isolation": "user" if ownership == "private" else "shared"}},
@@ -132,7 +139,7 @@ async def fire_schedule(h):
     state.refresh_next = app_module.now()
     await app_module._scheduled_refresh(h.app)
     identity, task = next(iter(state.jobs.tasks.items()))
-    await asyncio.wait_for(task, 20)
+    await asyncio.wait_for(task, 60)
     return await state.jobs.store.get_status(identity), await state.jobs.store.list_results(identity)
 
 
@@ -146,7 +153,7 @@ async def fire_schedule(h):
 async def test_oauth_refresh_publishes_after_late_credential_rotation(
     db_app, monkeypatch, ownership, entrypoint, rotation_at,
 ):
-    async with oauth_http_service(db_app, monkeypatch, ownership) as (row, user, clock, observed):
+    async with oauth_http_service(db_app, monkeypatch, ownership, isolate_schedule=True) as (row, user, clock, observed):
         catalog = db_app.app.state.catalog
         owner = credential_owner(row.isolation, user)
         rotations = 0

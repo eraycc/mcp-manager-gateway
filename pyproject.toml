@@ -33,7 +33,7 @@ dependencies = [
   "alembic>=1.15", "pydantic-settings>=2.8", "httpx>=0.28",
   "mcp>=2.2,<3", "PyJWT>=2.10", "argon2-cffi>=23.1",
   "cryptography>=44", "jsonschema>=4.23", "referencing>=0.28.4", "apscheduler>=3.11,<4",
-  "filelock>=3.17", "python-multipart>=0.0.20", "pyyaml>=6.0.3",
+  "filelock>=3.32.7", "python-multipart>=0.0.20", "pyyaml>=6.0.3",
   "pywin32>=308; sys_platform == 'win32'"
 ]
 

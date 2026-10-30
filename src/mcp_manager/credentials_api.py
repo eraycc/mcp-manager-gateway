@@ -198,7 +198,8 @@ async def save_credentials(server_id: str, data: dict, request: Request, user=US
         await state.oauth.audit("oauth.state_invalidated", actor.id, server_id,
                                 reason="config_changed", cleared_states=cleared_states)
     await state.runtime.invalidate_credential(server_id, actor.id)
-    state.catalog.delete_cache(row, actor.id)
+    from .storage_async import run_blocking
+    await run_blocking(state.catalog.delete_cache, row, actor.id)
     if row.mode != "disabled":
         try:
             await state.catalog.refresh(

@@ -13,7 +13,16 @@ from mcp_manager.config import Settings
 
 
 @pytest.fixture
-async def bug1_browser(tmp_path):
+async def bug1_browser(tmp_path, monkeypatch):
+    from mcp_manager import updates
+
+    async def local_release():
+        return {"version": updates.VERSION, "pypi_url": updates.PYPI_PROJECT_URL,
+                "releases_url": updates.RELEASES_URL}
+
+    # These are local functional tests; unrelated PyPI I/O must not outlive
+    # browser disposal or turn the server shutdown assertion into a live test.
+    monkeypatch.setattr(updates, "fetch_latest_release", local_release)
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     url = f"http://127.0.0.1:{sock.getsockname()[1]}"

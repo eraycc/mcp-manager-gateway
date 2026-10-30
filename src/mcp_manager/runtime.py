@@ -454,37 +454,56 @@ class Runtime:
         if self.versions.get(spec.id, spec.revision) != spec.revision:
             raise GatewayError("revision_changed", "MCP configuration changed; refresh the directory")
 
-    async def _make_instance_room(self, user_id: str):
-        """Evict one idle LRU connection when bounded instance slots are full."""
-        victim = None
+    async def _make_instance_room(self, user_id: str, *, wait_budget=None):
+        """Evict an idle LRU connection, or join an already finishing eviction."""
+        victim, closing = None, None
         async with self._instance_lock:
             active = [item for item in self.instances.values() if not item.closed.is_set()]
             owned = [item for item in active if item.admitted_user == user_id]
-            if (
-                len(active) < self.capacity.global_instances
-                and len(owned) < self.capacity.user_instances
-            ):
+            if (len(active) < self.capacity.global_instances
+                    and len(owned) < self.capacity.user_instances):
                 return
             pool = owned if len(owned) >= self.capacity.user_instances else active
             idle = [item for item in pool if item.phase == "ready" and item.in_flight == 0
                     and item.spec.mode == "lazy"]
             if idle:
                 victim = min(idle, key=lambda item: item.last_activity)
-        if victim is None:
-            raise GatewayError("busy", "Runtime instance capacity is full; retry later")
-        await self._stop_instance(victim, idle_seconds=0, reason="capacity_eviction",
-                                  expected_activity=victim.last_activity, clear_refs=True)
+            else:
+                closing = next((item for item in pool if item.in_flight == 0
+                                and item.stop_task is not None and not item.stop_task.done()), None)
+        if victim is not None:
+            stopping = self._stop_instance(victim, idle_seconds=0, reason="capacity_eviction",
+                                           expected_activity=victim.last_activity, clear_refs=True)
+            if wait_budget is None:
+                await stopping
+            else:
+                try:
+                    await asyncio.wait_for(stopping, max(.001, wait_budget))
+                except TimeoutError:
+                    raise GatewayError("busy", "Runtime instance capacity is full; retry later") from None
+            return
+        if closing is not None:
+            timeout = min(float(closing.spec.config.get("stop_timeout", 10)),
+                          self.capacity.queue_timeout if wait_budget is None else wait_budget)
+            try:
+                await asyncio.wait_for(closing.closed.wait(), max(.001, timeout))
+            except TimeoutError:
+                raise GatewayError("busy", "Runtime instance capacity is full; retry later") from None
+            return
+        raise GatewayError("busy", "Runtime instance capacity is full; retry later")
 
     async def _acquire(self, spec: ServerSpec, lease_id: str) -> Instance:
         self._available(spec)
         lease = self.check_lease(lease_id)
         key = self._key(spec, lease)
+        room_deadline = asyncio.get_running_loop().time() + min(
+            float(spec.config.get("queue_timeout", self.capacity.queue_timeout)), self.capacity.queue_timeout)
         current = self.instances.get(key)
         if current is None or current.closed.is_set():
-            await self._make_instance_room(lease.user_id)
+            await self._make_instance_room(lease.user_id, wait_budget=room_deadline - asyncio.get_running_loop().time())
         lock = self._locks.setdefault(key, asyncio.Lock())
         while True:
-            wait_closed = None
+            wait_closed, retry_room = None, False
             async with lock:
                 self._available(spec)
                 self.check_lease(lease_id)
@@ -515,26 +534,33 @@ class Runtime:
                                 len(active) >= self.capacity.global_instances
                                 or owned >= self.capacity.user_instances
                             ):
-                                raise GatewayError(
-                                    "busy",
-                                    "Runtime instance capacity is full; retry later",
+                                retry_room = True
+                            else:
+                                instance = Instance(
+                                    key,
+                                    spec,
+                                    admitted_user=lease.user_id,
+                                    admitted_token=lease.token_id,
+                                    last_activity=self.clock(),
                                 )
-                            instance = Instance(
-                                key,
-                                spec,
-                                admitted_user=lease.user_id,
-                                admitted_token=lease.token_id,
-                                last_activity=self.clock(),
-                            )
-                            instance.drained.set()
-                            concurrency = max(
-                                1,
-                                min(256, int(spec.config.get("concurrency", 1))),
-                            )
-                            instance.semaphore = asyncio.Semaphore(concurrency)
-                            self.instances[key] = instance
-                        instance.owner = asyncio.create_task(self._owner(instance))
-                    instance.refs.add(lease_id)
+                                instance.drained.set()
+                                concurrency = max(
+                                    1,
+                                    min(256, int(spec.config.get("concurrency", 1))),
+                                )
+                                instance.semaphore = asyncio.Semaphore(concurrency)
+                                self.instances[key] = instance
+                        if not retry_room:
+                            instance.owner = asyncio.create_task(self._owner(instance))
+                    if not retry_room:
+                        instance.refs.add(lease_id)
+            if retry_room:
+                remaining = room_deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise GatewayError("busy", "Runtime instance capacity is full; retry later")
+                await self._make_instance_room(lease.user_id, wait_budget=remaining)
+                await asyncio.sleep(0)
+                continue
             if wait_closed:
                 await wait_closed.wait()
                 self.check_lease(lease_id)

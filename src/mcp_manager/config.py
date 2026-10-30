@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 from pathlib import Path
+from typing import Literal
 
 from cryptography.fernet import Fernet
 from filelock import FileLock
@@ -39,6 +40,7 @@ class Settings(BaseSettings):
     home_dir: Path
     data_dir: Path = Path(".")
     database_url: str = ""
+    storage_migration_mode: Literal["auto", "manual"] = "auto"
     host: str = "127.0.0.1"
     port: int = 8765
     secret_key: str = ""

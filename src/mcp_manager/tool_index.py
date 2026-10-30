@@ -1,4 +1,5 @@
 """Deterministic field retrieval and fusion with real embedding rankings."""
+import asyncio
 import hashlib
 import json
 import math
@@ -80,7 +81,7 @@ def lexical(documents, query):
     return scores
 
 
-async def rank(documents, query, embeddings, config, scope, *, authorize=None):
+async def rank(documents, query, embeddings, config, scope, *, authorize=None, lexical_cache=None):
     status = {"mode": "keyword", "semantic_status": "not_needed"}
     query = query_text(query)
     if not query:
@@ -88,7 +89,8 @@ async def rank(documents, query, embeddings, config, scope, *, authorize=None):
     exact = [d for d in documents if normalize(query) in {normalize(n) for n in d["names"]}]
     if exact:
         return [(d, {"match_type": "exact"}) for d in exact], status
-    words = lexical(documents, query)
+    words = (await lexical_cache(documents, query) if lexical_cache is not None
+             else await asyncio.to_thread(lexical, documents, query))
     vectors, status = await embeddings.scores(scope, [{"id": d["id"], "text": d["text"]}
                                                     for d in documents], query, config, authorize=authorize)
     vectors = {key: value for key, value in vectors.items() if value >= config.get("min_similarity", .5)}

@@ -57,7 +57,7 @@ def migrate_home(source, destination, source_env=None):
             raise ValueError("Destination must be empty; existing user data will not be overwritten")
         staging = Path(tempfile.mkdtemp(prefix="." + destination.name + "-migration-", dir=destination.parent)).resolve()
         try:
-            for name in ("secret.key", "cache", "logs", "indexes", "jobs"):
+            for name in ("secret.key", "cache", "logs", "indexes", "jobs", "objects", "catalog", "backups"):
                 item = source / name
                 if not item.exists():
                     continue
@@ -104,33 +104,26 @@ async def reconcile_data(config, *, batch_size=250):
     """Idempotently backfill searchable metadata and import legacy local indexes."""
     if type(batch_size) is not int or not 1 <= batch_size <= 250:
         raise ValueError("Reconciliation batch_size must be between 1 and 250")
+    from uuid import uuid4
+
     from sqlalchemy import select
 
     from .database import Database, McpProposal
-    from .jsonl_store import JsonlStore
+    from .legacy_catalog_import import import_legacy_catalog
+    from .storage_async import run_blocking
 
-    # Keep local snapshot conversion outside database transactions. JsonlStore
-    # appends durably before removing each successfully converted source file.
-    cache_dir = Path(config.data_dir) / "cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_sources = set(cache_dir.glob("*.json"))
-    catalog_store = JsonlStore(cache_dir / "catalog.jsonl", fail_closed=True)
-
-    def catalog_value(path, value):
-        server_id, revision, owner = path.stem.rsplit("-", 2)
-        if not isinstance(value, dict):
-            raise TypeError("Invalid legacy cache")
-        return server_id + "-" + owner, {"revision": int(revision), "data": value}
-
-    catalog_store.migrate_json(catalog_value)
-    catalog_imported = len(cache_sources - set(cache_dir.glob("*.json")))
+    lock = FileLock(str(Path(config.data_dir) / "runtime.lock"), timeout=0, thread_local=False)
+    await run_blocking(lock.acquire)
+    catalog_imported = 0
 
     # Preserve legacy jobs files for explicit user cleanup; all new jobs and
     # their retention use database rows only. Do not read or convert old files.
     db = Database(config)
     proposal_count = 0
     try:
-        await db.initialize()
+        await db.initialize(runtime_guard=lock)
+        imported = await import_legacy_catalog(db, Path("backups") / "reconcile" / uuid4().hex / "legacy-cache")
+        catalog_imported = imported["imported"]
         while True:
             async with db.locked() as session:
                 rows = list((await session.scalars(
@@ -143,7 +136,10 @@ async def reconcile_data(config, *, batch_size=250):
                     row.public_name = str(name).strip()[:128] if name else "(unnamed proposal)"
                 proposal_count += len(rows)
     finally:
-        await db.close()
+        try:
+            await db.close()
+        finally:
+            await run_blocking(lock.release)
     return {
         "proposals": proposal_count,
         "catalog_snapshots": catalog_imported,

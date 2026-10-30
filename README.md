@@ -106,6 +106,8 @@ mmg
 
 Press Ctrl+C to stop the server. HTTP connections and request tasks have a 10-second grace period before cancellation, followed by application resource cleanup.
 
+The linked SQLite library must include the WAL-reset fix: 3.51.3+, or the fixed 3.50.7/3.44.6 branches. Check with `uv run python -c "import sqlite3; print(sqlite3.sqlite_version)"`; upgrading uv alone does not replace an existing Python environment. See [runtime requirements](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/storage-governance.md#运行环境)。
+
 On first start, MMG creates its configuration, SQLite database, and runtime data under:
 
 - Windows: `%USERPROFILE%\.mcp-manager`
@@ -251,7 +253,7 @@ Browser translation can send visible page text to the configured translation pro
 - optional PyPI update detection: the About page's automatic check interval sets the lifetime of cached PyPI latest-version information, defaulting to 86,400 seconds (24 hours). After that time has elapsed since the last successful check, the next login, About-page visit or refresh queries PyPI; otherwise it reads the cache. Check results update the mounted About panel and both notification dots without a page reload. Manual checks always query PyPI. The interval remains editable and can be saved when automatic checks are disabled;
 - keyword and fuzzy tool search, with optional OpenAI-compatible embeddings;
 - SQLite by default and optional MySQL;
-- independent threshold-based startup compaction and manual space reclamation for file-backed SQLite databases, without expiring valid data ([storage maintenance](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/database-deployment.md#数据库空间治理)).
+- a compact primary database, one `indexes/derived.sqlite` projection, separate durable/cache CAS objects, and daily `logs/calls/` JSONL sources; configurable storage budgets, background collection, and independent SQLite compaction ([storage governance](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/storage-governance.md)).
 
 See [Manage services](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/guides/manage-services.md), [Runtime and lifecycle](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/concepts/runtime-and-lifecycle.md), and [Security model](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/security/security-model.md).
 
@@ -303,7 +305,7 @@ pip install --upgrade mcp-manager-gateway
 
 Source and container installations should be updated through Git plus uv or by rebuilding/pulling the relevant image. `mmg upgrade` performs database schema migration; it does not update the installed Python package.
 
-A one-time startup background pass reclaims historical cache residue. During operation, cache reconciliation follows MCP deletion, successful capability changes, or embedding model changes; there is no hourly cache sweep, vector TTL, or entry-count eviction. Unchanged tools reuse existing same-scope vectors without requesting the model again; disabled services and failed discovery scopes are preserved. Legacy `jobs/jobs.jsonl` is no longer read or imported and is not automatically deleted. See [Backup and migration](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/backup-and-migration.md#缓存与历史残留).
+A bounded background collector reclaims expired query caches, retired index rows, and unreferenced objects. Query caches have configurable capacity and TTL; current catalog vectors remain tied to their authorized generation and model. Unchanged tools reuse existing same-scope vectors without requesting the model again; disabled services and failed discovery scopes are preserved. Legacy `jobs/jobs.jsonl` is no longer read or imported and is not automatically deleted. See [Backup and migration](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/backup-and-migration.md#缓存与历史残留).
 
 Update detection in **System Settings → About** only reports availability. It never modifies the installation. Automatic checks can be disabled while the manual **Check for Updates** action remains available.
 
