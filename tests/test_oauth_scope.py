@@ -51,7 +51,8 @@ async def test_provider_scope_preserves_isolation_cache_and_bearer(tmp_path, own
         assert spec.isolation == "user"
         result = await catalog.refresh(row.id, "alice")
         assert result["cache_status"] == "ready"
-        assert catalog.cached(row, "alice")["tools"][0]["name"] == "read"
+        assert (await catalog.tool_definition(row, "read", "alice"))["name"] == "read"
+        assert await catalog.tool_definition(row, "read", "bob") is None
         lease = app.state.runtime.create_lease("alice", "test")
         try:
             assert not (await app.state.runtime.call(spec, lease.id, "read", {}))["isError"]

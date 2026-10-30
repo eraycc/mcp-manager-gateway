@@ -3,7 +3,6 @@ import asyncio
 import hashlib
 import json
 import math
-from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from weakref import WeakValueDictionary
 
@@ -16,9 +15,11 @@ from .catalog_models import ArtifactObject, CatalogEntry, CatalogGeneration, Cat
 from .catalog_store import generation_scope, scope_key
 from .catalog_types import ArtifactRef, CatalogScope
 from .database import McpServer
+from .derived_cache import DerivedCache
+from .derived_models import CatalogServer
 from .embedding_models import EmbeddingVector
-from .jsonl_store import JsonlStore
 from .runtime import GatewayError
+from .storage_async import run_blocking
 
 MAX_TEXT_CHARS = 16_000
 MAX_DOCUMENTS = 1_000
@@ -134,8 +135,9 @@ class EmbeddingIndex:
     """Compute real model similarities while reusing document vectors per authorization scope."""
 
     def __init__(self, data_dir, *, db=None, artifacts=None):
-        self.store = JsonlStore(Path(data_dir) / "indexes" / "embeddings.jsonl", fail_closed=True)
-        self.db = db
+        self.store = DerivedCache(data_dir, "embedding", ttl_seconds=86400)
+        self.db = db.derived if db is not None else None
+        self.authority = db
         self.artifacts = artifacts
         self._locks = WeakValueDictionary()
         self._transport = None
@@ -301,7 +303,7 @@ class EmbeddingIndex:
                     for (document_id, _text, key), vector in zip(missing, embedded, strict=True):
                         vectors[document_id] = vector
                         try:
-                            await asyncio.to_thread(self.store.set, key, {
+                            await run_blocking(self.store.set, key, {
                                 "vector": vector, "cache_version": 2,
                                 "capability": cache_capabilities.get(document_id),
                                 "content_hash": hashes.get(document_id),
@@ -431,6 +433,9 @@ class EmbeddingIndex:
                             if isinstance(row.summary.get(key), str)
                         ))[:MAX_TEXT_CHARS] for row in batch
                     ]
+                    from .catalog_sql_budget import check_sql_budget
+                    async with self.db.session() as budget_session:
+                        await check_sql_budget(budget_session, len(batch) * (512 + len(scope.owner.encode())) + 192)
                     vectors = await self._embed(
                         endpoint,
                         model,
@@ -442,7 +447,7 @@ class EmbeddingIndex:
                         {"vectors": vectors},
                         max_bytes=MAX_RESPONSE_BYTES,
                     )
-                    async with self.db.locked() as session:
+                    async with self.artifacts.hold([ref]), self.db.locked() as session:
                         current = await session.get(
                             CatalogGeneration,
                             generation,
@@ -468,6 +473,7 @@ class EmbeddingIndex:
                                 pending.append((index, entry, vector))
                         if not pending:
                             continue
+                        await check_sql_budget(session, len(pending) * (512 + len(scope.owner.encode())) + 192)
                         if await session.get(ArtifactObject, ref.id) is None:
                             session.add(
                                 ArtifactObject(
@@ -680,7 +686,7 @@ class EmbeddingIndex:
             return {"status": "unavailable", "semantic_status": "unavailable", "reason": "internal_error"}
 
 
-async def prune_stale_vectors(state, *, batch_limit=250, server_id=None, startup=False):
+async def prune_stale_vectors(state, *, batch_limit=250, server_id=None, startup=False, cache_after=""):
     """Reclaim rebuildable vectors without changing catalog or disabled/failed scopes."""
     from .embedding_api import load_embedding_config
 
@@ -696,7 +702,7 @@ async def prune_stale_vectors(state, *, batch_limit=250, server_id=None, startup
             pass  # An invalid setting is not authority to remove a previous model.
     disabled = exists().where(
         CatalogGeneration.id == EmbeddingVector.generation_id,
-        McpServer.id == CatalogGeneration.server_id, McpServer.mode == "disabled",
+        CatalogServer.id == CatalogGeneration.server_id, CatalogServer.mode == "disabled",
     )
     failed = exists().where(
         CatalogHead.scope_key == EmbeddingVector.scope_key, CatalogHead.status != "ready",
@@ -707,8 +713,10 @@ async def prune_stale_vectors(state, *, batch_limit=250, server_id=None, startup
         or_(CatalogHead.generation_id == CatalogEntry.generation_id,
             CatalogHead.refresh_id == CatalogEntry.generation_id),
     )
-    stale = and_(~disabled, ~failed, or_(~referenced, EmbeddingVector.model_hash != model_hash)
-                 if model_hash else ~referenced)
+    retired = exists().where(CatalogHead.scope_key == EmbeddingVector.scope_key,
+                               CatalogHead.generation_id.is_(None), CatalogHead.refresh_id.is_(None))
+    stale = or_(retired, and_(~disabled, ~failed, or_(~referenced, EmbeddingVector.model_hash != model_hash)
+                 if model_hash else ~referenced))
     if server_id is not None:
         stale = and_(stale, exists().where(
             CatalogGeneration.id == EmbeddingVector.generation_id,
@@ -716,7 +724,7 @@ async def prune_stale_vectors(state, *, batch_limit=250, server_id=None, startup
         ))
     deleted = 0
     if batch_limit:
-        async with state.db.locked() as session:
+        async with state.db.derived.locked() as session:
             identities = list((await session.execute(select(
                 EmbeddingVector.generation_id, EmbeddingVector.entry_id, EmbeddingVector.model_hash,
             ).where(stale).limit(batch_limit))).all())
@@ -736,29 +744,26 @@ async def prune_stale_vectors(state, *, batch_limit=250, server_id=None, startup
             CatalogHead.status != "ready"
         ))).all())
 
-    def capability_providers():
-        with state.embeddings.store.lock:
-            return list({value["capability"][0] for value in state.embeddings.store.items.values()
-                         if isinstance(value, dict) and isinstance(value.get("capability"), list)
-                         and len(value["capability"]) == 4
-                         and (server_id is None or value["capability"][0] == server_id)})
-
-    provider_ids = await asyncio.to_thread(capability_providers)
+    cache_page = await run_blocking(state.embeddings.store.metadata_page, after=cache_after, limit=250)
+    capabilities = [tuple(value["capability"]) for _, value in cache_page
+                    if isinstance(value, dict) and isinstance(value.get("capability"), list)
+                    and len(value["capability"]) == 4 and all(isinstance(item, str) for item in value["capability"])
+                    and (server_id is None or value["capability"][0] == server_id)]
+    provider_ids = list({item[0] for item in capabilities})
     live_capabilities = {}
     indexed_owners = set()
-    for offset in range(0, len(provider_ids), 250):
-        async with state.db.session() as session:
+    if provider_ids:
+        async with state.db.derived.session() as session:
             indexed_owners.update((await session.execute(select(CatalogHead.server_id, CatalogHead.owner).where(
-                CatalogHead.server_id.in_(provider_ids[offset:offset + 250]),
-                CatalogHead.generation_id.is_not(None),
+                CatalogHead.server_id.in_(provider_ids), CatalogHead.generation_id.is_not(None),
             ))).all())
             records = (await session.execute(select(
                 CatalogGeneration.server_id, CatalogGeneration.owner,
                 CatalogEntry.kind, CatalogEntry.name_hash, CatalogEntry.summary,
             ).join(CatalogEntry, CatalogEntry.generation_id == CatalogGeneration.id).join(
                 CatalogHead, CatalogHead.generation_id == CatalogGeneration.id,
-            ).where(CatalogGeneration.server_id.in_(provider_ids[offset:offset + 250]),
-                    CatalogEntry.kind != "tools"))).all()
+            ).where(tuple_(CatalogGeneration.server_id, CatalogGeneration.owner,
+                           CatalogEntry.kind, CatalogEntry.name_hash).in_(capabilities)))).all()
             live_capabilities.update({(provider, owner, kind, name_hash): summary.get("semantic_hash")
                                       for provider, owner, kind, name_hash, summary in records})
 
@@ -766,7 +771,7 @@ async def prune_stale_vectors(state, *, batch_limit=250, server_id=None, startup
         store = state.embeddings.store
         with store.lock:
             doomed = set()
-            for key, value in store.items.items():
+            for key, value in cache_page:
                 if not isinstance(value, dict) or value.get("cache_version") != 2:
                     if startup:
                         doomed.add(key)  # One-time rebuild of untraceable legacy hashes.
@@ -815,8 +820,9 @@ async def prune_stale_vectors(state, *, batch_limit=250, server_id=None, startup
                 store.compact()
             return 0
 
-    cached = await asyncio.to_thread(clean_cache)
-    return {"vectors": deleted, "cache_entries": cached}
+    cached = await run_blocking(clean_cache)
+    return {"vectors": deleted, "cache_entries": cached,
+            "cache_next": cache_page[-1][0] if len(cache_page) == 250 else ""}
 
 
 async def reuse_generation_vectors(session, previous, generation):
@@ -855,6 +861,8 @@ async def reuse_generation_vectors(session, previous, generation):
 
         values = await asyncio.to_thread(prepare)
         if values:
+            from .catalog_sql_budget import check_sql_budget
+            await check_sql_budget(session, sum(512 + len(value['owner'].encode()) for value in values))
             await session.execute(insert(EmbeddingVector), values)
         offset += len(rows)
 

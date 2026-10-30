@@ -239,17 +239,21 @@ async def test_proposal_feature_cannot_be_bypassed_by_guessing_hidden_tool(db_ap
 
 
 async def test_exact_call_does_not_repeatedly_list_all_authorized_service_ids(db_app, monkeypatch):
+    from contextvars import ContextVar
+
     from sqlalchemy import event
 
     row, tools = await indexed_catalog(db_app, 1)
     context, _identity = await gateway_context(db_app)
     downstream(monkeypatch, db_app, tools)
     statements = []
+    foreground = ContextVar("exact_call_foreground", default=False)
     def trace(connection, cursor, statement, parameters, context, many):
-        if ("SELECT mcp_servers.id" in statement and "FROM mcp_servers" in statement
+        if (foreground.get() and "SELECT mcp_servers.id" in statement and "FROM mcp_servers" in statement
                 and "mcp_servers.id =" not in statement):
             statements.append(statement)
     event.listen(db_app.db.engine.sync_engine, "before_cursor_execute", trace)
+    binding = foreground.set(True)
     try:
         result = await invoke(db_app, context, "gateway_call", {
             "name": alias(row.slug, tools[0]["name"]), "arguments": {},
@@ -257,6 +261,7 @@ async def test_exact_call_does_not_repeatedly_list_all_authorized_service_ids(db
         assert not result.is_error, result
         assert len(statements) <= 2
     finally:
+        foreground.reset(binding)
         event.remove(db_app.db.engine.sync_engine, "before_cursor_execute", trace)
 
 

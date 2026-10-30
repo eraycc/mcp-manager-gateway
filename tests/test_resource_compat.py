@@ -106,6 +106,11 @@ async def test_resource_filters_and_keyword_only_never_embed(db_app, monkeypatch
 async def test_resource_vectors_include_descriptions_without_uris(db_app, monkeypatch):
     row, _tools = await resource_catalog(db_app)
     state = db_app.app.state
+    async def no_background_build(*args, **kwargs):
+        return {"built": 0}
+    # Keep the manual build's exact row-count assertions independent of the
+    # periodic builder, which otherwise may have already built these vectors.
+    monkeypatch.setattr(state.embeddings, "build_pending", no_background_build)
     configured = await db_app.web.patch("/api/v1/settings/embedding", json={
         "enabled": True, "base_url": "https://embedding.invalid/v1", "model": "test-model",
         "min_similarity": 0.5,

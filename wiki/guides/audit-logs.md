@@ -62,7 +62,7 @@ oauth.refresh 只记录 OAuth 凭据续期，能力目录刷新另有上述事�
 
 ## 存储、兼容与恢复
 
-原文位于数据目录的 logs/audit/YYYY-MM-DD.jsonl，每行一个事件。SQLite 查询投影位于现有 indexes/logs.sqlite，拥有独立的 audit_events、扫描进度、索引迁移版本和清理恢复表；调用日志重建不会清除审计索引。
+原文位于数据目录的 logs/audit/YYYY-MM-DD.jsonl，每行一个事件。SQLite 查询投影位于共享 indexes/derived.sqlite，拥有独立的 audit_events、扫描进度、索引迁移版本和清理恢复表；调用日志重建不会清除审计索引。
 
 已有五字段 JSONL 无需转换，也不会因升级而改写。扫描按文件字节偏移增量执行，完整行才提交扫描进度，未完成的尾行保留到后续扫描。无法解析的历史行保持原文并计入异常记录数，不伪造成成功事件，也不会静默删除。
 

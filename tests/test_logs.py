@@ -48,7 +48,7 @@ async def test_deleting_last_call_removes_empty_day_and_allows_new_writes(tmp_pa
         await logs.append({"id": "a", "timestamp": "2026-09-01T00:00:00Z", "status": "running"})
         await logs.append({"id": "a", "timestamp": "2026-09-01T00:01:00Z", "status": "success"})
         await logs.append({"id": "b", "timestamp": "2026-09-02T00:00:00Z", "status": "success"})
-        empty_day = logs.root / "2026-09-01.jsonl"
+        empty_day = logs.calls_root / "2026-09-01.jsonl"
         if filtered:
             assert await logs.delete(to_time="2026-09-01T23:59:59Z") == 1
         else:
@@ -60,10 +60,13 @@ async def test_deleting_last_call_removes_empty_day_and_allows_new_writes(tmp_pa
         await logs.append({"id": "c", "timestamp": "2026-09-01T02:00:00Z", "status": "success"})
         assert (await logs.detail("c"))["id"] == "c"
         assert await logs.delete() == 2
-        assert not list(logs.root.glob("????-??-??.jsonl"))
+        assert not logs.sources.paths()
         # Older versions may have left empty files even when the index is empty.
         empty_day.touch()
+        legacy_empty_day = logs.root / "2026-09-01.jsonl"
+        legacy_empty_day.touch()
         assert await logs.delete() == 0
         assert not empty_day.exists()
+        assert not legacy_empty_day.exists()
     finally:
         await logs.close()

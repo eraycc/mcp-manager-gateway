@@ -15,6 +15,7 @@ class ArtifactRef:
     id: str
     size_bytes: int
     sha256: str
+    namespace: str = "cache"
 
 
 @dataclass(frozen=True)

@@ -48,7 +48,13 @@ async def test_navigation_protocol_and_import_wizard(running_gateway, monkeypatc
         await page.evaluate("window.dashboardMain=document.querySelector('main')")
         async with httpx2.AsyncClient(timeout=35, headers={"Authorization":"Bearer "+token},trust_env=False) as http:  # noqa: SIM117 - client depends on HTTP context
             async with Client(streamable_http_client(url+"/mcp",http_client=http),cache=None) as client:
-                await client.call_tool("echo__echo",{"value":"dashboard-live"})
+                called = await client.call_tool("echo__echo",{"value":"dashboard-live"})
+                assert not called.is_error, called
+        dashboard_state = (await web.get("/api/v1/dashboard")).json()
+        assert dashboard_state["calls"] == 1, dashboard_state
+        refresh_state = await page.evaluate("({hidden:document.hidden,error:document.querySelector(\'main\').dataset.refreshError})")
+        assert not refresh_state.get("error"), refresh_state
+        assert not refresh_state["hidden"], refresh_state
         await expect(page.locator(".stat strong").first).to_have_text("1",timeout=15000)
         await expect(page.locator("[data-dashboard-recent] tbody")).to_contain_text("echo")
         assert await page.evaluate("dashboardMain===document.querySelector('main')")
@@ -146,7 +152,10 @@ async def test_navigation_protocol_and_import_wizard(running_gateway, monkeypatc
         batch = [{"name": f"rest-{i}", "slug": f"rest-{i}", "transport": "rest", "mode": "lazy", "config": {"tools": tools, "custom": i}} for i in range(5)]
         await page.get_by_label("待导入服务 JSON", exact=False).fill(json.dumps(batch))
         await page.get_by_role("button", name="应用 JSON 修改", exact=True).click()
-        await page.get_by_role("button", name="诊断全部服务", exact=True).click()
+        diagnose_all = page.get_by_role("button", name="诊断全部服务", exact=True)
+        await diagnose_all.click()
+        # Await the actual two-wave batch completion, then verify every result.
+        await expect(diagnose_all).to_be_enabled(timeout=15000)
         await expect(page.locator(".import-entry").filter(has_text="诊断成功")).to_have_count(5)
         assert 1 < peak <= 3
         await page.locator(".import-entry").first.get_by_role("button", name="查看能力摘要").click()

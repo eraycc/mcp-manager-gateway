@@ -82,7 +82,7 @@ async def test_retention_removes_only_older_events_from_jsonl_and_rebuilt_index(
     assert {row["id"] for row in (await state.logs.query())["items"]} == expected
     persisted = {
         json.loads(line)["id"]
-        for path in state.logs.root.glob("????-??-??.jsonl")
+        for path in state.logs.sources.paths()
         for line in path.read_text(encoding="utf-8").splitlines()
     }
     assert persisted == expected
@@ -177,4 +177,4 @@ async def test_call_and_audit_retention_are_independent(retention_app, monkeypat
     assert {row["id"] for row in (await state.logs.query())["items"]} == expected_calls
     for identity, event_id in audits.items():
         assert bool(await state.logs.audits.detail(event_id)) == (identity in expected_audits)
-    assert all(path.stat().st_size > 0 for path in state.logs.root.glob("????-??-??.jsonl"))
+    assert all(path.stat().st_size > 0 for path in state.logs.sources.paths())

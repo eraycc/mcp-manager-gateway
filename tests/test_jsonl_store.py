@@ -49,24 +49,28 @@ def test_compaction_lock_keeps_durable_append_and_cleans_staging(tmp_path, monke
     assert not list(tmp_path.glob("*.compact.jsonl"))
 
 
-async def test_legacy_caches_consolidate_latest_revision_and_remove_json(tmp_path):
+async def test_legacy_caches_consolidate_latest_revision_and_archive_json(tmp_path):
+    from mcp_manager.config import Settings
+    from mcp_manager.home_migration import reconcile_data
     async with console(tmp_path) as (app, _web, _actor):
-        app.state.runtime.connector = Upstream().connect
-        row = await app.state.catalog.create({"name": "service", "config": {"command": "fake"}})
+        row = await app.state.catalog.create(
+            {"name": "service", "config": {"command": "fake"}}, discover=False)
         server_id, revision = row.id, row.revision
         key = app.state.catalog.cache_key(row)
     cache = tmp_path / "cache"
-    (cache / "catalog.jsonl").unlink()
     owner = key.rsplit("-", 1)[1]
     for version, name in [(revision, "current"), (0, "obsolete")]:
         (cache / f"{server_id}-{version}-{owner}.json").write_text(json.dumps({
             "tools": [{"name": name}], "cache_status": "ready"}), encoding="utf-8")
+    report = await reconcile_data(Settings(data_dir=tmp_path, secret_key="bug1"))
+    assert report["catalog_snapshots"] == 1
     async with console(tmp_path) as (app, _web, _actor):
         current = await app.state.catalog.get(server_id)
-        assert app.state.catalog.cached(current)["tools"] == [{"name": "current"}]
+        assert (await app.state.catalog.tool_definition(current, "current"))["name"] == "current"
+        assert await app.state.catalog.tool_definition(current, "obsolete") is None
         assert list(cache.glob("*.json")) == []
-        assert [p.name for p in cache.iterdir()] == ["catalog.jsonl"]
-
+        assert not (cache / "catalog.jsonl").exists()
+    assert len(list((tmp_path / "backups/reconcile").rglob("*.json"))) == 2
 
 async def test_reconciliation_never_reads_or_removes_legacy_jobs(tmp_path, monkeypatch):
     from mcp_manager.config import Settings
@@ -110,7 +114,7 @@ def test_unreadable_legacy_snapshot_is_preserved(tmp_path):
     assert store.items == {}
 
 
-async def test_missing_lazy_cache_is_rebuilt_on_restart_without_keeping_process(tmp_path, monkeypatch):
+async def test_missing_compatibility_cache_keeps_index_without_starting_lazy_process(tmp_path, monkeypatch):
     import asyncio
 
     from mcp_manager.app import create_app
@@ -118,7 +122,7 @@ async def test_missing_lazy_cache_is_rebuilt_on_restart_without_keeping_process(
     async with console(tmp_path) as (app, _web, _actor):
         app.state.runtime.connector = Upstream().connect
         row = await app.state.catalog.create({"name": "service", "config": {"command": "fake"}})
-    (tmp_path / "cache/catalog.jsonl").unlink()
+        app.state.catalog.delete_cache(row)
     peer = Upstream()
     monkeypatch.setattr("mcp_manager.app.connect", peer.connect)
     restarted = create_app(Settings(data_dir=tmp_path, secret_key="bug1"))
@@ -127,11 +131,12 @@ async def test_missing_lazy_cache_is_rebuilt_on_restart_without_keeping_process(
             while restarted.state.jobs.tasks:
                 await asyncio.sleep(.01)
         current = await restarted.state.catalog.get(row.id)
+        scope = await restarted.state.catalog.index_scope(current)
         assert current.mode == "lazy"
-        assert restarted.state.catalog.cached(current)["cache_status"] == "ready"
-        assert peer.starts == 1
+        assert (await restarted.state.catalog.index.get_summary(scope))["status"] == "ready"
+        assert (await restarted.state.catalog.tool_definition(current, "first"))["name"] == "first"
+        assert peer.starts == 0
         assert not restarted.state.runtime.instances
-
 
 def test_delete_prefix_physically_removes_history_and_tombstones(tmp_path):
     store = JsonlStore(tmp_path / "state.jsonl", fail_closed=True)

@@ -4,17 +4,21 @@ import base64
 import hashlib
 import hmac
 import json
+import time
 from collections import OrderedDict
 
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import String, and_, cast, delete, func, or_, select, union
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import load_only
 
 from .artifact_store import ArtifactStore
-from .catalog_models import ArtifactObject, CatalogEntry, CatalogGeneration, CatalogHead, CatalogTerm
+from .catalog_control import CatalogControl
+from .catalog_models import ArtifactObject, CatalogEntry, CatalogGeneration, CatalogHead
 from .catalog_types import ArtifactRef, CatalogPage, CatalogScope, GenerationRef, ToolRef
 from .database import McpServer, now, uid
 from .db_types import strict_json_dumps
+from .derived_models import CatalogServer
+from .derived_queries import ALLOWED, query_generations
 from .runtime import GatewayError
 
 KINDS = {"tools", "resources", "prompts", "templates"}
@@ -163,7 +167,8 @@ async def bounded_summary_rows(rows, limit, *, max_bytes=131072):
 
 class CatalogStore:
     def __init__(self, db, artifacts: ArtifactStore, *, signing_key, scope_resolver=None):
-        self.db = db
+        self.authority = db
+        self.db = db.derived
         self.artifacts = artifacts
         self.signing_key = signing_key.encode() if isinstance(signing_key, str) else signing_key
         self.scope_resolver = scope_resolver
@@ -171,6 +176,9 @@ class CatalogStore:
         self._search_cache = OrderedDict()
         self._search_cache_lock = asyncio.Lock()
         self._search_cache_entries = 64
+        self._search_cache_bytes = 0
+        self._search_sizes = {}
+        self._search_cache_max_bytes = 8 * 1024 * 1024
 
     @staticmethod
     def _check_kind(kind):
@@ -191,11 +199,104 @@ class CatalogStore:
                 raise GatewayError("credential_changed", "Catalog credential scope changed")
         return row
 
+    async def _control(self, session, scope, *, create=False):
+        control = await session.get(CatalogControl, scope_key(scope), populate_existing=True)
+        if control and (control.server_id, control.owner) != (scope.server_id, scope.owner):
+            raise GatewayError("catalog_hash_collision", "Catalog scope hash collision")
+        if control and (control.revision, control.credential_generation) != (
+                scope.revision, scope.credential_generation):
+            if not create:
+                return None
+            control.epoch += 1
+            control.refresh_fence += 1
+            control.revision, control.credential_generation = scope.revision, scope.credential_generation
+            control.health, control.receipt = {}, {}
+        if control is None and create:
+            control = CatalogControl(scope_key=scope_key(scope), server_id=scope.server_id,
+                                     owner=scope.owner, revision=scope.revision,
+                                     credential_generation=scope.credential_generation)
+            session.add(control)
+            await session.flush()
+        return control
+
+    @staticmethod
+    def _matches_receipt(control, generation):
+        refresh = (control.receipt or {}).get("refresh", {}) if control else {}
+        return bool(control and generation.control_epoch == control.epoch
+                    and generation.refresh_fence == control.refresh_fence
+                    and refresh.get("ticket") == generation.refresh_ticket
+                    and refresh.get("state") in {"committed", "acknowledged"})
+
+    async def _materialize(self, identity, expected_scope):
+        # Retry only the committed projection, never the operation result.
+        async with self.authority.locked() as primary:
+            await self._validate_scope(primary, expected_scope)
+            control = await self._control(primary, expected_scope)
+            async with self.db.locked() as session:
+                generation = await session.get(CatalogGeneration, identity, populate_existing=True)
+                head = await session.get(CatalogHead, scope_key(expected_scope), populate_existing=True)
+                if (not generation or not head or not self._matches_receipt(control, generation)
+                        or head.refresh_id != identity):
+                    return False
+                if generation.status not in {"pending_control", "ready"}:
+                    return False
+                from datetime import timedelta
+
+                from .catalog_models import CatalogManifest
+                old = (await session.scalars(select(CatalogManifest).where(
+                    CatalogManifest.scope_key == generation.scope_key,
+                    CatalogManifest.current.is_(True), CatalogManifest.id != identity))).all()
+                for manifest in old:
+                    manifest.current = False
+                    manifest.retire_after = now() + timedelta(hours=24)
+                manifest = await session.get(CatalogManifest, identity)
+                if manifest:
+                    manifest.current = True
+                generation.status = "ready"
+                generation.published_at = generation.published_at or now()
+                head.generation_id, head.status, head.pending_id = identity, "ready", None
+                from .embedding_models import EmbeddingVector
+                await session.execute(delete(EmbeddingVector).where(
+                    EmbeddingVector.scope_key == generation.scope_key,
+                    EmbeddingVector.generation_id != identity))
+            receipt = dict(control.receipt or {})
+            receipt["refresh"] = dict(receipt["refresh"], state="acknowledged")
+            control.receipt, control.updated_at = receipt, now()
+        return True
+
+    async def _recover_scope(self, scope):
+        async with self.db.session() as session:
+            head = await session.get(CatalogHead, scope_key(scope))
+            pending = head.pending_id if head else None
+        if pending:
+            await self._materialize(pending, scope)
+
     async def begin_refresh(self, scope):
         if not isinstance(scope, CatalogScope) or not scope.owner or len(scope.credential_generation) > 128:
             raise ValueError("Invalid catalog scope")
+        await self._recover_scope(scope)
+        async with self.authority.locked() as primary:
+            await self._validate_scope(primary, scope)
+            control = await self._control(primary, scope, create=True)
+            control.refresh_fence += 1
+            ticket, epoch, fence = uid(), control.epoch, control.refresh_fence
+            receipt = dict(control.receipt or {})
+            receipt["refresh"] = {"ticket": ticket, "state": "issued", "epoch": epoch,
+                                  "fence": fence, "expires_at": time.time() + 3600}
+            control.receipt, control.updated_at = receipt, now()
+            from .catalog_operations import current_operation
+            operation = current_operation.get()
+            if operation and operation.scope == scope and operation.ticket:
+                operation.ticket.update(epoch=epoch, fence=fence)
         async with self.db.locked() as session:
-            await self._validate_scope(session, scope)
+            server = await self._validate_scope(session, scope)
+            projection = await session.get(CatalogServer, server.id)
+            if projection is None:
+                projection = CatalogServer(id=server.id)
+                session.add(projection)
+            for field in ("slug", "revision", "mode", "isolation"):
+                setattr(projection, field, getattr(server, field))
+            await session.flush()
             key = scope_key(scope)
             head = await session.get(CatalogHead, key)
             if head and (head.server_id != scope.server_id or head.owner != scope.owner):
@@ -203,6 +304,7 @@ class CatalogStore:
             generation = CatalogGeneration(
                 scope_key=key, server_id=scope.server_id, owner=scope.owner, revision=scope.revision,
                 credential_generation=scope.credential_generation, status="staging", digest="", counts={},
+                control_epoch=epoch, refresh_fence=fence, refresh_ticket=ticket,
             )
             session.add(generation)
             await session.flush()
@@ -212,6 +314,8 @@ class CatalogStore:
             head.refresh_id = generation.id
             await session.flush()
             result = generation_ref(generation)
+        if operation and operation.scope == scope:
+            operation.refresh_version = result.id
         return result
 
     async def _staging(self, session, identity):
@@ -224,6 +328,13 @@ class CatalogStore:
         if generation.status != "staging":
             raise GatewayError("generation_superseded", "Catalog generation no longer accepts entries")
         row = await self._validate_scope(session, generation_scope(generation))
+        control = await self._control(session, generation_scope(generation))
+        refresh = (control.receipt or {}).get("refresh", {}) if control else {}
+        if (not control or control.epoch != generation.control_epoch
+                or control.refresh_fence != generation.refresh_fence
+                or refresh.get("ticket") != generation.refresh_ticket
+                or refresh.get("expires_at", 0) <= time.time()):
+            raise GatewayError("generation_superseded", "Refresh ticket was superseded or expired")
         return generation, head, row
 
     async def stage_page(self, identity, kind, entries):
@@ -288,8 +399,13 @@ class CatalogStore:
                 )
             prepared.append((ref, values, term_rows))
         try:
-            async with self.db.locked() as session:
+            async with self.artifacts.hold([ref for ref, _, _ in prepared]), self.db.locked() as session:
                 await self._staging(session, identity)
+                from .catalog_sql_budget import check_sql_budget
+                estimated = sum(1024 + len(strict_json_dumps(values["summary"]).encode())
+                                + len(values["search_text"].encode()) + len(values["original_name"].encode())
+                                for _, values, _ in prepared)
+                await check_sql_budget(session, estimated, retiring=True)
                 pending_terms = []
                 for ref, values, term_rows in prepared:
                     if await session.get(ArtifactObject, ref.id) is None:
@@ -297,9 +413,19 @@ class CatalogStore:
                         await session.flush()
                     session.add(CatalogEntry(**values))
                     pending_terms.extend(term_rows)
+                generation, _, _ = await self._staging(session, identity)
+                generation.pending_pages += 1
                 await session.flush()
-                session.add_all(CatalogTerm(**values) for values in pending_terms)
-                await session.flush()
+            from .catalog_terms import insert_term_rows
+
+            for offset in range(0, len(pending_terms), 5000):
+                async with self.db.locked() as session:
+                    await self._staging(session, identity)
+                    await check_sql_budget(session, len(pending_terms[offset:offset + 5000]) * 1024)
+                    await insert_term_rows(session, pending_terms[offset:offset + 5000])
+            async with self.db.locked() as session:
+                generation, _, _ = await self._staging(session, identity)
+                generation.pending_pages -= 1
         except IntegrityError:
             raise GatewayError("catalog_duplicate_entry", "Catalog contains duplicate entries or conflicting hashes") from None
 
@@ -334,17 +460,28 @@ class CatalogStore:
                     raise GatewayError("discovery_failed", "Capability refresh failed for: " + ", ".join(lost))
             if generation_scope(generation) != expected_scope:
                 raise GatewayError("credential_changed", "Catalog refresh does not match the current scope")
+            if generation.pending_pages:
+                raise GatewayError("catalog_incomplete", "Catalog contains an incomplete staging page")
             generation.status = "publishing"
         counts = dict.fromkeys(sorted(KINDS), 0)
         accumulator = hashlib.sha256()
         preview, preview_bytes, descriptions = [], 0, []
-        async with self.db.session() as session:
-            stream = await session.stream(select(
+        previous = None
+        while True:
+            statement = select(
                 CatalogEntry.kind, CatalogEntry.name_hash, CatalogEntry.artifact_id, CatalogEntry.summary
-            ).where(CatalogEntry.generation_id == identity).order_by(
-                CatalogEntry.kind, CatalogEntry.name_hash
-            ).execution_options(yield_per=250))
-            async for kind, name_hash, artifact_id, summary in stream:
+            ).where(CatalogEntry.generation_id == identity)
+            if previous is not None:
+                statement = statement.where(or_(
+                    CatalogEntry.kind > previous[0],
+                    and_(CatalogEntry.kind == previous[0], CatalogEntry.name_hash > previous[1])))
+            async with self.db.session() as session:
+                rows = (await session.execute(statement.order_by(
+                    CatalogEntry.kind, CatalogEntry.name_hash).limit(250))).all()
+            if not rows:
+                break
+            previous = (rows[-1].kind, rows[-1].name_hash)
+            for kind, name_hash, artifact_id, summary in rows:
                 counts[kind] += 1
                 accumulator.update(strict_json_dumps([kind, name_hash, artifact_id]).encode())
                 if kind == "tools":
@@ -356,9 +493,12 @@ class CatalogStore:
                     description = summary.get("description", "").strip()
                     if description and len(descriptions) < 3 and description not in descriptions:
                         descriptions.append(description)
-            generated = ("Provides " + str(counts["tools"]) + " tools: " + (
-                "; ".join(descriptions) if descriptions else ", ".join(sorted(preview)[:6])
-            ))[:480] if preview or descriptions else ""
+            await asyncio.sleep(0)
+        generated = ("Provides " + str(counts["tools"]) + " tools: " + (
+            "; ".join(descriptions) if descriptions else ", ".join(sorted(preview)[:6])
+        ))[:480] if preview or descriptions else ""
+        from .catalog_manifests import build_manifest
+        await build_manifest(self, generation, counts, accumulator.hexdigest())
         async with self.db.locked() as session:
             generation = await session.get(CatalogGeneration, identity, populate_existing=True)
             head = await session.get(CatalogHead, scope_key(expected_scope), populate_existing=True)
@@ -371,34 +511,70 @@ class CatalogStore:
             generation.counts, generation.digest = counts, accumulator.hexdigest()
             generation.details = dict(generation.details or {}, tools_preview=sorted(preview),
                                       generated_description=generated)
-            from .embedding_models import EmbeddingVector
             from .embeddings import reuse_generation_vectors
 
             await reuse_generation_vectors(session, head.generation_id, generation)
-            generation.status, generation.published_at = "ready", now()
-            head.generation_id, head.status = identity, "ready"
-            # The new head owns all current vectors; removed/changed tools leave no stale index rows.
-            await session.execute(delete(EmbeddingVector).where(
-                EmbeddingVector.scope_key == generation.scope_key,
-                EmbeddingVector.generation_id != identity,
-            ))
+            generation.status = "pending_control"
+            head.pending_id = identity
             await session.flush()
-            result = generation_ref(generation)
+        async with self.authority.locked() as primary:
+            await self._validate_scope(primary, expected_scope)
+            control = await self._control(primary, expected_scope)
+            refresh = (control.receipt or {}).get("refresh", {}) if control else {}
+            if (not control or control.epoch != generation.control_epoch
+                    or control.refresh_fence != generation.refresh_fence
+                    or refresh.get("ticket") != generation.refresh_ticket
+                    or refresh.get("expires_at", 0) <= time.time()):
+                raise GatewayError("generation_superseded", "Refresh ticket was superseded before receipt commit")
+            receipt = dict(control.receipt or {})
+            if refresh.get("state") == "issued":
+                from .catalog_operations import current_operation
+                operation = current_operation.get()
+                receipt["refresh"] = dict(refresh, state="committed",
+                                          operation_id=operation.identity if operation else None)
+                control.health = {}
+                control.directory_sequence += 1
+                control.success_sequence += 1
+                control.receipt, control.updated_at = receipt, now()
+                if operation:
+                    operation.success_version = control.success_sequence
+                    if operation.ticket:
+                        operation.ticket.update(success=control.success_sequence, fence=control.refresh_fence,
+                                                epoch=control.epoch)
+        await self._materialize(identity, expected_scope)
+        async with self.db.session() as session:
+            result = generation_ref(await session.get(CatalogGeneration, identity))
         if self.on_publish:
             await self.on_publish(generation.server_id)
         return result
 
     async def _current(self, session, scope):
-        row = await session.get(McpServer, scope.server_id, populate_existing=True, options=[load_only(
+        # The authoritative pair shares one primary snapshot; the head and
+        # generation share one derived snapshot. Never join across databases.
+        pair = (await session.execute(select(McpServer, CatalogControl).outerjoin(
+            CatalogControl, CatalogControl.scope_key == scope_key(scope)
+        ).options(load_only(
             McpServer.id, McpServer.slug, McpServer.revision, McpServer.isolation, McpServer.mode
-        )])
-        if not row or row.revision != scope.revision or row.mode == "disabled":
+        )).where(McpServer.id == scope.server_id).execution_options(populate_existing=True))).first()
+        if pair is None:
             return None
-        head = await session.get(CatalogHead, scope_key(scope), populate_existing=True)
-        if not head or head.owner != scope.owner or head.server_id != scope.server_id or head.status != "ready":
+        row, control = pair
+        if row.revision != scope.revision or row.mode == "disabled":
             return None
-        generation = await session.get(CatalogGeneration, head.generation_id, populate_existing=True) if head.generation_id else None
-        if not generation or generation.status != "ready" or generation_scope(generation) != scope:
+        if control and (control.server_id, control.owner) != (scope.server_id, scope.owner):
+            raise GatewayError("catalog_hash_collision", "Catalog scope hash collision")
+        if not control or (control.revision, control.credential_generation) != (
+                scope.revision, scope.credential_generation):
+            return None
+        pair = (await session.execute(select(CatalogHead, CatalogGeneration).join(
+            CatalogGeneration, CatalogGeneration.id == CatalogHead.generation_id
+        ).where(CatalogHead.scope_key == scope_key(scope)).execution_options(populate_existing=True))).first()
+        if pair is None:
+            return None
+        head, generation = pair
+        if (head.owner != scope.owner or head.server_id != scope.server_id or head.status != "ready"
+                or generation.control_epoch != control.epoch or generation.status != "ready"
+                or generation_scope(generation) != scope):
             return None
         if self.scope_resolver and await self.scope_resolver(session, row, scope.owner) != scope:
             return None
@@ -420,28 +596,57 @@ class CatalogStore:
                 candidates = tuple(await search_candidates(
                     self.db, list(generations), query, limit=MAX_CANDIDATES
                 ))
-                async with self._search_cache_lock:
-                    self._search_cache[cache_key] = candidates
-                    self._search_cache.move_to_end(cache_key)
-                    while len(self._search_cache) > self._search_cache_entries:
-                        self._search_cache.popitem(last=False)
+                cost = sum(len(row.search_text.encode()) + len(strict_json_dumps(row.summary).encode()) + 512
+                           for row in candidates) + sum(len(identity) for identity in generations) + len(query.encode())
+                if cost <= self._search_cache_max_bytes:
+                    async with self._search_cache_lock:
+                        self._search_cache_bytes -= self._search_sizes.pop(cache_key, 0)
+                        self._search_cache[cache_key] = candidates
+                        self._search_sizes[cache_key] = cost
+                        self._search_cache_bytes += cost
+                        self._search_cache.move_to_end(cache_key)
+                        while (len(self._search_cache) > self._search_cache_entries
+                               or self._search_cache_bytes > self._search_cache_max_bytes):
+                            removed, _ = self._search_cache.popitem(last=False)
+                            self._search_cache_bytes -= self._search_sizes.pop(removed)
             total = len(candidates)
             return total, list(candidates[offset:offset + limit]) if limit else []
-        filters = [CatalogEntry.generation_id.in_(generations), CatalogEntry.kind == kind]
+        # Exact name hits are selective. Keep authorization as a residual
+        # membership check so SQLite cannot enumerate every allowed generation
+        # and scan all its tools before applying the exact-name hit set.
+        generation_column = cast(CatalogEntry.generation_id, String) if exact_names is not None else CatalogEntry.generation_id
+        filters = [generation_column.in_(select(ALLOWED.c.id)), CatalogEntry.kind == kind]
         if uri_prefix:
             filters.append(func.hex(CatalogEntry.original_name).startswith(uri_prefix.encode("utf-8").hex().upper()))
         if display_name is not None:
             filters.append(func.hex(CatalogEntry.summary["name"].as_string()) == display_name.encode("utf-8").hex().upper())
         if exact_names is not None:
             hashes = [digest(name) for name in exact_names]
-            filters.append(or_(
-                CatalogEntry.name_hash.in_(hashes), CatalogEntry.gateway_hash.in_(hashes),
-                CatalogEntry.legacy_gateway_hash.in_(hashes),
-            ))
+            matches = union(
+                select(CatalogEntry.id).where(CatalogEntry.name_hash.in_(hashes)),
+                select(CatalogEntry.id).where(CatalogEntry.gateway_hash.in_(hashes)),
+                select(CatalogEntry.id).where(CatalogEntry.legacy_gateway_hash.in_(hashes)),
+            ).subquery()
+            # A global miss contains no authorized result. Avoid constructing
+            # thousands of allowed-scope rows just to prove that zero remains zero.
+            async with self.db.session() as probe:
+                hit_generations = list((await probe.scalars(select(CatalogEntry.generation_id).where(
+                    CatalogEntry.kind == kind, CatalogEntry.id.in_(select(matches.c.id))).limit(251))).all())
+            if not hit_generations:
+                return 0, []
+            if len(hit_generations) <= 250:
+                # This bounded probe contains every hit. Unique names need
+                # only their authorized generation, rather than staging the
+                # entire directory. Larger hit sets keep the general SQL path.
+                hits = set(hit_generations)
+                generations = [identity for identity in generations if identity in hits]
+                if not generations:
+                    return 0, []
+            filters.append(CatalogEntry.id.in_(select(matches.c.id)))
         elif query:
             pattern = "%" + query.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             filters.append(CatalogEntry.search_text.like(pattern, escape="\\"))
-        async with self.db.session() as session:
+        async with query_generations(self.db, generations) as session:
             total = await session.scalar(select(func.count()).select_from(CatalogEntry).where(*filters))
             rows = (await session.execute(select(
                 CatalogEntry.id, CatalogEntry.generation_id, CatalogGeneration.server_id,
@@ -449,9 +654,9 @@ class CatalogStore:
                 CatalogEntry.gateway_name, CatalogEntry.schema_hash, CatalogEntry.artifact_id,
                 CatalogEntry.artifact_bytes, CatalogEntry.summary, CatalogEntry.search_text,
             ).join(CatalogGeneration, CatalogGeneration.id == CatalogEntry.generation_id).join(
-                McpServer, McpServer.id == CatalogGeneration.server_id
+                CatalogServer, CatalogServer.id == CatalogGeneration.server_id
             ).where(*filters).order_by(
-                McpServer.slug, CatalogEntry.sort_key, CatalogEntry.name_hash
+                CatalogServer.slug, CatalogEntry.sort_key, CatalogEntry.name_hash
             ).offset(offset).limit(limit))).all()
             return total, rows
 
@@ -460,6 +665,7 @@ class CatalogStore:
             return await session.get(CatalogHead, scope_key(scope)) is not None
 
     async def get_summary(self, scope):
+        await self._recover_scope(scope)
         async with self.db.session() as session:
             generation = await self._current(session, scope)
             counts = generation.counts if generation else {}
@@ -473,45 +679,80 @@ class CatalogStore:
             }
 
     async def get_summaries(self, scopes, *, preview=False):
-        """One projected metadata query; failed/stale heads never fall back to old caches."""
-        if not scopes:
-            return {}
+        """Bounded authority/control reads followed by derived-only metadata queries."""
         expected = {scope_key(scope): scope for scope in scopes}
-        columns = [
-            CatalogHead.scope_key, CatalogHead.server_id, CatalogHead.owner, CatalogHead.status,
-            CatalogGeneration.id.label("generation_id"), CatalogGeneration.status.label("generation_status"),
-            CatalogGeneration.revision, CatalogGeneration.credential_generation,
-            CatalogGeneration.counts, CatalogGeneration.published_at, CatalogGeneration.details,
-        ]
-        async with self.db.session() as session:
-            rows = (await session.execute(select(*columns).select_from(CatalogHead).outerjoin(
-                CatalogGeneration, CatalogHead.generation_id == CatalogGeneration.id
-            ).where(CatalogHead.scope_key.in_(expected)))).all()
+        if not expected:
+            return {}
+        controls, servers, rows = {}, {}, []
+        keys = list(expected)
+        for offset in range(0, len(keys), 250):
+            batch = keys[offset:offset + 250]
+            async with self.db.session() as session:
+                pending = (await session.execute(select(CatalogHead.scope_key, CatalogHead.pending_id).where(
+                    CatalogHead.scope_key.in_(batch), CatalogHead.pending_id.is_not(None)))).all()
+            for key, identity in pending:
+                await self._materialize(identity, expected[key])
+            async with self.authority.session() as primary:
+                controls.update({row.scope_key: row for row in (await primary.execute(select(
+                    CatalogControl.scope_key, CatalogControl.revision, CatalogControl.credential_generation,
+                    CatalogControl.epoch, CatalogControl.health
+                ).where(CatalogControl.scope_key.in_(batch)))).all()})
+                ids = list({expected[key].server_id for key in batch})
+                servers.update({row.id: row for row in (await primary.execute(select(
+                    McpServer.id, McpServer.revision, McpServer.mode).where(
+                        McpServer.id == ids[0] if len(ids) == 1 else McpServer.id.in_(ids)))).all()})
+            async with self.db.session() as session:
+                rows.extend((await session.execute(select(
+                    CatalogHead.scope_key, CatalogHead.server_id, CatalogHead.owner, CatalogHead.status,
+                    CatalogGeneration.id.label("generation_id"), CatalogGeneration.status.label("generation_status"),
+                    CatalogGeneration.revision, CatalogGeneration.credential_generation,
+                    CatalogGeneration.control_epoch, CatalogGeneration.counts,
+                    CatalogGeneration.published_at, CatalogGeneration.details,
+                ).select_from(CatalogHead).outerjoin(CatalogGeneration,
+                    CatalogHead.generation_id == CatalogGeneration.id
+                ).where(CatalogHead.scope_key.in_(batch)))).all())
         result = {}
         for row in rows:
             scope = expected[row.scope_key]
-            ready = (row.status == "ready" and row.generation_status == "ready"
-                     and CatalogScope(row.server_id, row.owner, row.revision, row.credential_generation) == scope)
+            control, server = controls.get(row.scope_key), servers.get(row.server_id)
+            valid = bool(control and server and server.mode != "disabled" and server.revision == scope.revision
+                         and (control.revision, control.credential_generation) == (
+                             scope.revision, scope.credential_generation))
+            ready = bool(valid and row.status == "ready" and row.generation_status == "ready"
+                         and row.control_epoch == control.epoch
+                         and CatalogScope(row.server_id, row.owner, row.revision,
+                                          row.credential_generation) == scope)
+            health = control.health if valid else {}
             counts = (row.counts or {}) if ready else {}
             item = {
                 "generation": row.generation_id if ready else None,
-                "cache_status": "ready" if ready else "error" if row.status == "error" else "empty",
+                "control_epoch": control.epoch if valid else None,
+                "cache_status": "ready" if ready else "error" if health.get("invalidated") or row.status == "error" else "empty",
                 "cache_at": row.published_at if ready else None,
-                "tool_count": counts.get("tools", 0), "resource_count": counts.get("resources", 0),
-                "prompt_count": counts.get("prompts", 0), "template_count": counts.get("templates", 0),
+                **{key[:-1] + "_count": counts.get(key, 0) for key in KINDS},
+                **{key: value for key, value in health.items() if key != "invalidated"},
             }
-            failure = (row.status == "error" and row.revision == scope.revision
-                       and row.credential_generation == scope.credential_generation)
-            if ready or failure:
-                item.update({key: value for key, value in (row.details or {}).items() if key in {
-                    "cache_error", "cache_error_code", "last_refresh_error", "last_refresh_error_code",
-                    "last_refresh_failure_at", "cache_attempt_at", "cache_stale",
-                }})
             if preview:
                 details = (row.details or {}) if ready else {}
                 item.update(tools_preview=details.get("tools_preview", []),
                             generated_description=details.get("generated_description", ""))
             result[row.server_id] = item
+        for key, scope in expected.items():
+            if scope.server_id in result:
+                continue
+            control = controls.get(key)
+            server = servers.get(scope.server_id)
+            if (control and server and server.revision == scope.revision
+                    and (control.revision, control.credential_generation) == (
+                        scope.revision, scope.credential_generation)):
+                health = dict(control.health or {})
+                result[scope.server_id] = {
+                    "generation": None, "control_epoch": control.epoch,
+                    "cache_status": "error" if health else "empty",
+                    "cache_at": None, **{kind[:-1] + "_count": 0 for kind in KINDS},
+                    **({"tools_preview": [], "generated_description": ""} if preview else {}),
+                    **{name: value for name, value in health.items() if name not in {"invalidated", "failure_sequence"}},
+                }
         return result
 
     def _cursor(self, payload):
@@ -535,6 +776,7 @@ class CatalogStore:
             raise GatewayError("invalid_cursor", "Cursor is invalid or its query/scope changed") from None
 
     async def list_capabilities(self, scope, *, kind, query="", cursor=None, limit=50):
+        await self._recover_scope(scope)
         self._check_kind(kind)
         if not isinstance(limit, int) or not 1 <= limit <= 200 or not isinstance(query, str):
             raise ValueError("Invalid capability query or page size")
@@ -578,17 +820,20 @@ class CatalogStore:
         return entry
 
     async def has_capability(self, scope, *, kind, name):
+        await self._recover_scope(scope)
         """Exact metadata-only membership check; never read a definition artifact."""
         self._check_kind(kind)
         async with self.db.session() as session:
             return await self._entry(session, scope, kind, name) is not None
 
     async def get_tool(self, scope, original_name):
+        await self._recover_scope(scope)
         async with self.db.session() as session:
             entry = await self._entry(session, scope, "tools", original_name)
             return tool_ref(entry) if entry else None
 
     async def get_definition(self, scope, *, kind, name):
+        await self._recover_scope(scope)
         self._check_kind(kind)
         async with self.db.session() as session:
             entry = await self._entry(session, scope, kind, name)
@@ -609,21 +854,26 @@ class CatalogStore:
             return None
         name_hash = digest(gateway_name)
         async with self.db.session() as session:
-            statement = select(CatalogEntry, CatalogGeneration, McpServer).options(load_only(
-                McpServer.id, McpServer.slug, McpServer.revision, McpServer.mode, McpServer.isolation
-            )).join(
+            statement = select(CatalogEntry, CatalogGeneration, CatalogServer).join(
                 CatalogGeneration, CatalogGeneration.id == CatalogEntry.generation_id
             ).join(CatalogHead, CatalogHead.generation_id == CatalogGeneration.id).join(
-                McpServer, McpServer.id == CatalogGeneration.server_id
+                CatalogServer, CatalogServer.id == CatalogGeneration.server_id
             ).where(
-                McpServer.id.in_(allowed_ids), McpServer.mode != "disabled",
-                McpServer.revision == CatalogGeneration.revision,
+                CatalogServer.id.in_(allowed_ids), CatalogServer.mode != "disabled",
+                CatalogServer.revision == CatalogGeneration.revision,
                 CatalogGeneration.status == "ready", CatalogHead.status == "ready",
                 CatalogEntry.kind == kind,
                 or_(CatalogEntry.gateway_hash == name_hash, CatalogEntry.legacy_gateway_hash == name_hash),
             )
             matches = []
-            for entry, generation, server in (await session.execute(statement)).all():
+            for entry, generation, projection in (await session.execute(statement)).all():
+                try:
+                    server = await self._validate_scope(session, generation_scope(generation))
+                except GatewayError:
+                    continue
+                control = await self._control(session, generation_scope(generation))
+                if not control or generation.control_epoch != control.epoch:
+                    continue
                 expected_owner = owner if server.isolation == "user" else "service"
                 if generation.owner != expected_owner:
                     continue
@@ -646,62 +896,89 @@ class CatalogStore:
             head = await session.get(CatalogHead, scope_key(scope))
             return head.refresh_id if head else None
 
-    async def record_failure(self, scope, details, *, expected_refresh, session=None):
-        """Invalidate only this scope; a late failure cannot replace newer success."""
-        if session is None:
-            async with self.db.locked() as current:
-                return await self.record_failure(scope, details, expected_refresh=expected_refresh, session=current)
-        await self._validate_scope(session, scope)
-        key = scope_key(scope)
-        head = await session.get(CatalogHead, key)
-        failed = await session.get(CatalogGeneration, head.refresh_id) if head and head.refresh_id else None
-        if (head and head.refresh_id != expected_refresh
-                and (not failed or failed.status != "failed" or generation_scope(failed) != scope)):
-            return False
-        if failed is None or failed.status != "failed" or generation_scope(failed) != scope:
-            failed = CatalogGeneration(
-                scope_key=key, server_id=scope.server_id, owner=scope.owner, revision=scope.revision,
-                credential_generation=scope.credential_generation, status="failed", digest="", counts={},
-            )
-            session.add(failed)
-            await session.flush()
-        failed.details = dict(details)
-        if head is None:
-            head = CatalogHead(scope_key=key, server_id=scope.server_id, owner=scope.owner)
-            session.add(head)
-        head.status, head.generation_id, head.refresh_id = "error", failed.id, failed.id
-        return True
+    async def invalidate_authorization(self, scope, details):
+        """Fence prior definitions and in-flight results after an explicit grant change."""
+        async with self.authority.locked() as primary:
+            await self._validate_scope(primary, scope)
+            control = await self._control(primary, scope, create=True)
+            control.epoch += 1
+            control.refresh_fence += 1
+            control.receipt = {}
+            health = dict(control.health or {})
+            health.update(details, invalidated=True, cache_stale=False)
+            control.health, control.updated_at = health, now()
+        return health
+
+    async def project_failure(self, scope, identity, details):
+        """Project one accepted diagnostic; never turn a published generation into a failure."""
+        async with self.db.locked() as session:
+            generation = await session.get(CatalogGeneration, identity) if identity else None
+            if (not generation or generation_scope(generation) != scope
+                    or generation.status not in {"staging", "publishing", "failed"}):
+                # Connection failures precede generation creation. Reuse one
+                # disposable diagnostic row without mutating the last good head.
+                generation = await session.scalar(select(CatalogGeneration).where(
+                    CatalogGeneration.scope_key == scope_key(scope),
+                    CatalogGeneration.status == "failed").order_by(
+                    CatalogGeneration.created_at.desc()).limit(1))
+                if generation is None:
+                    if await session.get(CatalogServer, scope.server_id) is None:
+                        return  # Authoritative health remains available without a projection.
+                    generation = CatalogGeneration(
+                        scope_key=scope_key(scope), server_id=scope.server_id, owner=scope.owner,
+                        revision=scope.revision, credential_generation=scope.credential_generation,
+                        status="failed", details={})
+                    session.add(generation)
+            generation.status = "failed"
+            generation.details = dict(generation.details or {}) | details
 
     async def fail_refresh(self, identity):
         async with self.db.locked() as session:
             generation = await session.get(CatalogGeneration, identity)
             if not generation:
                 return
+            control = await self._control(session, generation_scope(generation))
+            if self._matches_receipt(control, generation):
+                return  # Committed success is recovered, never converted into a failed operation.
             generation.status = "failed"
             head = await session.get(CatalogHead, generation.scope_key)
             if head and head.refresh_id == identity:
                 previous = await session.get(CatalogGeneration, head.generation_id) if head.generation_id else None
                 head.status = "ready" if previous and previous.status == "ready" else "error"
 
-    async def set_health(self, scope, details, *, session, clear=False):
-        generation = await self._current(session, scope)
-        if generation is None:
-            return False
-        values = dict(generation.details or {})
-        if clear:
-            for key in details:
-                values.pop(key, None)
-        else:
-            values.update(details)
-        generation.details = values
-        return True
-
     async def rebind_renewed_credential(self, session, before, after):
         """Carry only this grant's last good contracts across renewal, never across accounts."""
         if (before.server_id, before.owner, before.revision) != (after.server_id, after.owner, after.revision):
             raise GatewayError("credential_changed", "Cannot transfer a catalog between credential owners")
-        head = await session.get(CatalogHead, scope_key(before))
-        generation = await session.get(CatalogGeneration, head.generation_id) if head and head.generation_id else None
-        if (head and head.status == "ready" and generation and generation.status == "ready"
-                and generation_scope(generation) == before):
-            generation.credential_generation = after.credential_generation
+        control = await self._control(session, before)
+        if not control:
+            return
+        control.credential_generation = after.credential_generation
+        control.refresh_fence += 1
+        receipt = dict(control.receipt or {})
+        receipt.pop("refresh", None)
+        control.receipt = receipt
+        async with self.db.locked() as derived:
+            head = await derived.get(CatalogHead, scope_key(before))
+            generation = await derived.get(CatalogGeneration, head.generation_id) if head and head.generation_id else None
+            if (head and head.status == "ready" and generation and generation.status == "ready"
+                    and generation_scope(generation) == before and generation.control_epoch == control.epoch):
+                generation.credential_generation = after.credential_generation
+        from .catalog_operations import current_operation
+        operation = current_operation.get()
+        if operation and operation.scope == before and operation.ticket:
+            operation.ticket.update(epoch=control.epoch, fence=control.refresh_fence,
+                                    success=control.success_sequence)
+
+
+    async def detach_server(self, server_id):
+        """Retire cache roots after authoritative deletion; never cascade a large index."""
+        from .catalog_models import CatalogManifest
+        async with self.db.locked() as session:
+            heads = (await session.scalars(select(CatalogHead).where(CatalogHead.server_id == server_id))).all()
+            for head in heads:
+                head.generation_id, head.refresh_id, head.pending_id, head.status = None, None, None, "error"
+            for manifest in (await session.scalars(select(CatalogManifest).where(
+                    CatalogManifest.scope_key.in_([head.scope_key for head in heads]),
+                    CatalogManifest.current.is_(True)))).all():
+                manifest.current, manifest.retire_after = False, now()

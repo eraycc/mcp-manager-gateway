@@ -93,8 +93,8 @@ async def test_runtime_delete_removes_only_target_catalog_and_embedding_cache(db
     assert state.catalog.cache_store.get(other_key) is not None
     assert state.embeddings.store.get("target") is None
     assert state.embeddings.store.get("other") is not None
-    assert row.id not in state.catalog.cache_store.path.read_text()
-    assert "target" not in state.embeddings.store.path.read_text()
+    assert not any(key.startswith(row.id + "-") for key in state.catalog.cache_store.items)
+    assert "target" not in state.embeddings.store.items
     async with state.db.session() as session:
         assert list((await session.scalars(select(EmbeddingVector))).all()) == []
 
@@ -197,8 +197,10 @@ async def test_deleted_cache_rewrite_failure_retries_without_hourly_cleanup(db_a
     with monkeypatch.context() as patch:
         store = state.embeddings.store if cache == "embedding" else state.catalog.cache_store
         patch.setattr(store, "delete_keys", blocked)
+        if cache == "catalog":
+            patch.setattr(store, "delete_prefix", blocked)
         await state.catalog.delete(row.id)
     assert state.cache_cleanup_done is False and state.retention_next == 0
     await run_startup_cache_cleanup(state)
     assert state.embeddings.store.get("target") is None
-    assert row.id not in state.catalog.cache_store.path.read_text()
+    assert not any(key.startswith(row.id + "-") for key in state.catalog.cache_store.items)

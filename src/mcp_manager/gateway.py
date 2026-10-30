@@ -342,22 +342,37 @@ class Gateway:
     async def principal(self, request, *, target_id=None):
         return await authenticate_token(request, target_id=target_id)
 
-    async def search_scope(self, request, user, token, rows):
+    async def search_scope(self, request, user, token, rows, *, scopes=None, indexed=None):
         catalog = self.app.state.catalog
         user_id = user.id if user else None
-        scopes = []
-        indexed_scopes = await catalog.index_scopes(rows, user_id)
-        indexed = await catalog.index.get_summaries(indexed_scopes.values())
+        indexed_scopes = scopes if scopes is not None else await catalog.index_scopes(rows, user_id)
+        indexed = indexed if indexed is not None else await catalog.index.get_summaries(indexed_scopes.values())
+        signatures = []
         for row in rows:
-            cache = catalog.cached_view(row, user_id)
-            scopes.append((row.id, row.revision, row.mode, cache.get("cache_status"), cache.get("cache_at"),
-                           cache.get("cache_generation"), indexed_scopes[row.id].credential_generation,
-                           indexed.get(row.id, {}).get("generation")))
+            cache = indexed.get(row.id)
+            if cache is None:
+                cache = catalog.cached_view(row, user_id)
+            stamp = cache.get("cache_at")
+            if hasattr(stamp, "isoformat"):
+                stamp = stamp.isoformat()
+            signatures.append((row.id, row.revision, row.mode, cache.get("cache_status"), stamp,
+                cache.get("cache_generation"), indexed_scopes[row.id].credential_generation,
+                cache.get("generation"), cache.get("control_epoch")))
         return (
             owner(user, token, request), getattr(user, "auth_version", None), getattr(user, "role", None),
             getattr(token, "enable_resource_tools", None), getattr(token, "enable_mcp_proposal", None),
-            getattr(token, "discovery_mode", None),
-            tuple(sorted(scopes)),
+            getattr(token, "discovery_mode", None), tuple(sorted(signatures)),
+        )
+
+    @staticmethod
+    def fast_search_scope(request, user, token, allowed, version):
+        allowed_hash = hashlib.sha256(json.dumps(
+            sorted(allowed) if allowed is not None else "*", separators=(",", ":")).encode()).hexdigest()
+        return (
+            "directory-v1", owner(user, token, request), getattr(user, "auth_version", None),
+            getattr(user, "role", None), getattr(token, "enable_resource_tools", None),
+            getattr(token, "enable_mcp_proposal", None), getattr(token, "discovery_mode", None),
+            allowed_hash, version,
         )
 
     async def revalidate_search_scope(self, request, expected_scope):
@@ -365,6 +380,11 @@ class Gateway:
             user, token, allowed = await self.principal(request)
         except HTTPException:
             raise GatewayError("permission_revoked", "Gateway authorization changed during search") from None
+        if expected_scope[0] == "directory-v1":
+            version = await self.app.state.catalog.directory_version()
+            if self.fast_search_scope(request, user, token, allowed, version) != expected_scope:
+                raise GatewayError("permission_revoked", "MCP permission or catalog changed during search")
+            return
         rows = [row for row in await self.app.state.catalog.rows(ids=allowed, metadata_only=True)
                 if row.mode != "disabled"]
         if await self.search_scope(request, user, token, rows) != expected_scope:

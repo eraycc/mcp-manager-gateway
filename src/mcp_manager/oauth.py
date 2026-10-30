@@ -194,10 +194,10 @@ class OAuth:
 
     async def record_reauth_index(self, scope):
         try:
-            await self.catalog.index.record_failure(
+            health = await self.catalog.index.invalidate_authorization(
                 scope, {"cache_error": "OAuth authorization changed; authorize again",
-                        "cache_error_code": "auth_required"},
-                expected_refresh=await self.catalog.index.refresh_version(scope))
+                        "cache_error_code": "auth_required"})
+            self.catalog._remember_health(scope, health)
         except GatewayError as exc:
             if exc.code not in {"disabled", "revision_changed", "credential_changed"}:
                 raise
@@ -450,7 +450,8 @@ class OAuth:
                         item["oauth_state"] = {"status": "needs_reauth", "reason": reason, "at": time.time()}
                         await self.credential_store.write(session, row.id, owner, item)
                         self.catalog.runtime.credential_versions[(row.id, owner)] = "oauth-registration-changed"
-                        self.catalog.invalidate_authorization_cache(row, GatewayError("auth_required", "OAuth 客户端注册已变更，请重新授权"),
+                        from .storage_async import run_blocking
+                        await run_blocking(self.catalog.invalidate_authorization_cache, row, GatewayError("auth_required", "OAuth 客户端注册已变更，请重新授权"),
                                                    owner if row.isolation == "user" else None)
                         invalidated.add(owner)
                     current_payload = await self.credential_store.load(row.id, config_owner, session=session)
@@ -885,7 +886,8 @@ async def disconnect(server_id: str, request: Request, user=USER):
         if legacy:
             await session.delete(legacy)
     await app.runtime.invalidate_credential(server_id, owner)
-    app.catalog.invalidate_authorization_cache(
+    from .storage_async import run_blocking
+    await run_blocking(app.catalog.invalidate_authorization_cache,
         row,
         GatewayError(
             "auth_required",

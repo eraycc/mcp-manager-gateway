@@ -106,6 +106,8 @@ mmg
 
 按 Ctrl+C 关闭服务。HTTP 连接和请求任务最多等待 10 秒后取消，随后执行应用资源清理。
 
+Python 链接的 SQLite 必须包含 WAL-reset 修复：3.51.3+，或已修复的 3.50.7/3.44.6 分支。使用 `uv run python -c "import sqlite3; print(sqlite3.sqlite_version)"` 检查；仅升级 uv 不会替换已有 Python 环境。详见[运行环境要求](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/storage-governance.md#运行环境)。
+
 首次启动会自动创建用户目录、`.env`、SQLite 数据库和密钥：
 
 - Windows：`%USERPROFILE%\.mcp-manager`
@@ -286,7 +288,7 @@ Agent 使用 `gateway_mcp_proposals` 提交单条或批量配置。典型批量�
 - **工具检索**：关键词、拼写模糊匹配，以及可选的 OpenAI 兼容 embedding；
 - **安全审批**：Agent 提议、配置编辑、真实测试、批准或拒绝；
 - **数据后端**：默认 SQLite，也支持 MySQL；
-- **存储治理**：主 SQLite 与日志索引分别配置启动回收阈值，提供手动释放数据库空间，不自动过期有效缓存或索引（[说明](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/database-deployment.md#数据库空间治理)）。
+- **存储治理**：主库保存权威控制数据，`indexes/derived.sqlite` 保存派生索引，缓存和持久正文分域 CAS，调用日志按天保存于 `logs/calls/`；容量预算、后台回收和 SQLite 压缩独立治理（[说明](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/storage-governance.md)）。
 
 ## 控制台多语言
 
@@ -355,7 +357,7 @@ pip install --upgrade mcp-manager-gateway
 
 完整升级矩阵见 [部署与升级](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/deployment-and-upgrades.md)。
 
-仅启动后的首次后台维护清理历史缓存残留；运行期间随 MCP 删除、能力成功更新或 embedding 模型变化执行针对性同步，不做每小时缓存扫描，也没有向量 TTL 或条目数量淘汰。未变化工具复用同作用域的既有向量，不重复请求模型；禁用服务和发现失败作用域保持不动。旧 `jobs/jobs.jsonl` 不再读取或导入，也不会自动删除。详情见 [缓存与历史残留](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/backup-and-migration.md#缓存与历史残留)。
+后台清理器按工作预算分批回收过期查询缓存、旧索引和无引用对象。查询缓存支持容量与 TTL；当前目录向量仍按授权作用域、目录版本和模型管理。未变化工具复用同作用域的既有向量，不重复请求模型；禁用服务和发现失败作用域保持不动。旧 `jobs/jobs.jsonl` 不再读取或导入，也不会自动删除。详情见 [缓存与历史残留](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/backup-and-migration.md#缓存与历史残留)。
 
 常用维护命令：
 

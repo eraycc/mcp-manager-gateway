@@ -81,7 +81,7 @@ async def test_runtime_exposes_public_lifecycle_boundary(monkeypatch):
     monkeypatch.setattr(runtime, "_available", available.append)
     await runtime.stop_instance(instance, force=True)
     runtime.mark_available(spec)
-    assert stopped == [(instance, {"force": True, "only_unreferenced": False, "clear_refs": False})]
+    assert stopped == [(instance, {"force": True, "only_unreferenced": False, "clear_refs": False, "reason": None})]
     assert available == [spec]
 
 
@@ -172,16 +172,16 @@ async def test_log_startup_only_indexes_incremental_bytes(tmp_path, monkeypatch)
     indexed = []
     original = LogStore._index
 
-    def tracked(self, event, path, offset, size):
+    def tracked(self, event, path, offset, size, **kwargs):
         indexed.append(event["id"])
-        return original(self, event, path, offset, size)
+        return original(self, event, path, offset, size, **kwargs)
 
     monkeypatch.setattr(LogStore, "_index", tracked)
     unchanged = LogStore(tmp_path)
     assert indexed == []
     await unchanged.close()
 
-    path = tmp_path / "logs" / "2026-09-22.jsonl"
+    path = tmp_path / "logs/calls" / "2026-09-22.jsonl"
     event = {
         "id": "new", "timestamp": "2026-09-22T00:00:01+00:00",
         "status": "success", "source": "gateway", "duration_ms": 0,

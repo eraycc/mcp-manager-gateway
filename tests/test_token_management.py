@@ -223,9 +223,9 @@ async def test_migration_adds_nullable_secret_without_inventing_legacy_value(tmp
         )
         connection.commit()
 
-    await asyncio.to_thread(command.upgrade, cfg, "head")
     settings = Settings(data_dir=tmp_path, database_url=database_url)
     db = Database(settings)
+    await db.initialize()
     async with db.session() as session:
         token = await session.get(ApiToken, "token-id")
         assert token.token_secret is None

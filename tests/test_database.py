@@ -31,7 +31,7 @@ def test_migration_offline_sql_for_sqlite_and_mysql(tmp_path, monkeypatch):
         output=StringIO()
         cfg=Config(output_buffer=output)
         cfg.set_main_option("script_location",str(PACKAGE_ROOT/"migrations"))
-        command.upgrade(cfg,"head",sql=True)
+        command.upgrade(cfg,"0010",sql=True)
         sql=output.getvalue()
         assert "CREATE TABLE users" in sql
         assert "_identity_lock" in sql

@@ -11,7 +11,7 @@ from mcp_manager.catalog_models import CatalogEntry, CatalogHead
 from mcp_manager.database import McpServer
 from mcp_manager.embedding_models import EmbeddingVector
 from mcp_manager.embeddings import _settings, prune_stale_vectors
-from mcp_manager.retention import run_startup_cache_cleanup
+from mcp_manager.retention import collect_objects, run_startup_cache_cleanup
 
 
 @pytest.fixture
@@ -105,17 +105,28 @@ async def test_retention_rebuilds_opaque_legacy_cache_and_compacts_catalog(db_ap
     state = db_app.app.state
     store = state.embeddings.store
     store.set("opaque-legacy", {"vector": [1.0, 1.0]})
+    opaque_id, opaque_size = store.connection.execute(
+        "SELECT artifact_id,size_bytes FROM cache_items WHERE domain=? AND key=?",
+        ("embedding", "opaque-legacy")).fetchone()
     catalog = state.catalog.cache_store
     row = vector_catalog[0]
     key = state.catalog.cache_key(row)
     catalog.set(key, {"revision": row.revision, "data": {}})
     catalog.set("gone", {"payload": "x" * 4096})
+    gone_id, gone_size = catalog.connection.execute(
+        "SELECT artifact_id,size_bytes FROM cache_items WHERE domain=? AND key=?",
+        ("catalog", "gone")).fetchone()
     catalog.set("gone", None)
     await run_startup_cache_cleanup(state)
     assert store.get("opaque-legacy") is None
-    assert "opaque-legacy" not in store.path.read_text()
-    assert "gone" not in catalog.path.read_text()
+    assert catalog.get("gone") is None
+    state.catalog.artifacts.gc_grace_seconds = 0
+    await collect_objects(state)
+    assert not state.catalog.artifacts._path(opaque_id).exists()
+    assert not state.catalog.artifacts._path(gone_id).exists()
+    assert opaque_size > 0 and gone_size > 0
     assert catalog.get(key) is not None
+    assert await vector_rows(state), "Shared index cleanup must preserve live vectors"
 
 
 @pytest.mark.parametrize("protected", ["disabled", "failed"])
@@ -145,14 +156,18 @@ async def test_deleted_service_legacy_vectors_are_physically_reclaimed(db_app, v
         await session.delete(await session.get(McpServer, row.id))
     await run_startup_cache_cleanup(state)
     assert state.embeddings.store.items == {}
-    assert state.embeddings.store.path.stat().st_size == 0
+    state.catalog.artifacts.gc_grace_seconds = 0
+    await collect_objects(state)
+    assert state.embeddings.store.connection.execute(
+        "SELECT count(*) FROM cache_items WHERE domain='embedding'").fetchone()[0] == 0
+    assert state.embeddings.store.path.is_file(), "The shared derived database remains usable"
 
 
 async def test_retention_file_failure_preserves_snapshots_and_can_retry(db_app, vector_catalog, monkeypatch):
     state = db_app.app.state
     store = state.embeddings.store
     store.set("opaque", {"vector": [1.0, 1.0]})
-    before = store.path.read_bytes()
+    before = dict(store.items)
 
     def blocked(keys):
         raise OSError("locked")
@@ -161,29 +176,29 @@ async def test_retention_file_failure_preserves_snapshots_and_can_retry(db_app, 
         patch.setattr(store, "delete_keys", blocked)
         with pytest.raises(OSError):
             await run_startup_cache_cleanup(state)
-    assert store.path.read_bytes() == before
+    assert dict(store.items) == before
     await run_startup_cache_cleanup(state)
     assert store.items == {}
 
 
-async def test_cache_rewrite_runs_off_the_event_loop(db_app, vector_catalog, monkeypatch):
+async def test_cache_metadata_cleanup_runs_off_the_event_loop(db_app, vector_catalog, monkeypatch):
     state = db_app.app.state
     loop = asyncio.get_running_loop()
     calls = []
-    original = state.catalog.cache_store.compact
+    original = state.catalog.cache_store.metadata_page
 
-    def threaded():
+    def threaded(**kwargs):
         with pytest.raises(RuntimeError):
             asyncio.get_running_loop()
         calls.append(True)
-        return original()
+        return original(**kwargs)
 
-    monkeypatch.setattr(state.catalog.cache_store, "compact", threaded)
+    monkeypatch.setattr(state.catalog.cache_store, "metadata_page", threaded)
     await run_startup_cache_cleanup(state)
     assert calls and loop is asyncio.get_running_loop()
 
 
-async def test_valid_cache_has_no_expiration_or_size_eviction(db_app, vector_catalog):
+async def test_valid_vector_cache_ignores_untrusted_payload_timestamps(db_app, vector_catalog):
     import time
 
     row, _, _ = vector_catalog
@@ -198,4 +213,5 @@ async def test_valid_cache_has_no_expiration_or_size_eviction(db_app, vector_cat
         store.set(f"live-{index}", dict(metadata, cached_at=stamp + index))
     await run_startup_cache_cleanup(state)
     assert set(store.items) == {"expired", "live-0", "live-1", "live-2", "live-3"}
-    assert store.records == 5
+    assert len(store.items) == 5
+    assert await vector_rows(state), "Current catalog vectors survive compatibility cache cleanup"

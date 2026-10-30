@@ -123,7 +123,7 @@ class Jobs:
         if context:
             context.cancelled = True
             for task in list(context.active.values()):
-                if not task.done():
+                if not task.done() and not task.cancelling():
                     task.cancel()
             self.wakeup.set()
 
@@ -142,6 +142,7 @@ class Jobs:
                 continue
             context, ordinal, item = selected
             admitted = False
+            shutdown_requested = False
             try:
                 await self.limit.acquire()
                 admitted = True
@@ -157,6 +158,7 @@ class Jobs:
                             value = await child
                             result = {"item": item, "ok": True, "result": value}
                         except asyncio.CancelledError:
+                            shutdown_requested = bool(asyncio.current_task().cancelling())
                             self._cancel_now(context.identity)
                             result["outcome_unknown"] = True
                             if context.cancel_operation:
@@ -172,6 +174,11 @@ class Jobs:
                         finally:
                             context.active.pop(ordinal, None)
                 await self._record(context, ordinal, result)
+                if shutdown_requested:
+                    # A child-only cancellation is a cancelled item. A worker
+                    # cancellation must also terminate this consumer after its
+                    # uncertainty is persisted, rather than waiting forever.
+                    raise asyncio.CancelledError
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

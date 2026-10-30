@@ -24,12 +24,13 @@ from .catalog_types import CatalogScope
 from .credentials import PERSONAL_AUTH_TYPES, catalog_owner, credential_owner
 from .database import ApiToken, McpServer, SystemSetting, User, invalidate_setting_cache, now
 from .db_types import strict_json_dumps
+from .derived_cache import DerivedCache
 from .diagnostics import SECRET_KEYS, safe_gateway_error
 from .identity import public as public_model
 from .identity import revalidate_user
-from .jsonl_store import JsonlStore
 from .runtime import GatewayError, ServerSpec
 from .schema_validation import LOCAL_SCHEMA_REGISTRY, validate_local
+from .storage_async import run_blocking
 from .transports import validate_service_config
 
 CAPABILITY_KEYS = ("tools", "resources", "prompts", "templates")
@@ -111,19 +112,21 @@ class Catalog:
         self.credentials = None
         self.tasks = set()
         self.on_cache_change = None
-        self.cache_store = JsonlStore(self.cache_dir / "catalog.jsonl", fail_closed=True)
+        self.cache_store = DerivedCache(config.data_dir, "catalog")
         self._cache_failures = {}
+        self._health_views = OrderedDict()
         self._validators = OrderedDict()
         self._validator_bytes = 0
-        self.artifacts = ArtifactStore(config.data_dir)
-        self.index = CatalogStore(db, self.artifacts, signing_key=config.jwt_secret, scope_resolver=self._index_scope)
+        try:
+            self.artifacts = ArtifactStore(config.data_dir)
+            self.index = CatalogStore(db, self.artifacts, signing_key=config.jwt_secret, scope_resolver=self._index_scope)
+        except BaseException:
+            if hasattr(self, "artifacts"):
+                self.artifacts.close()
+            self.cache_store.close()
+            raise
         self.startup_failure_threshold = 3
-        def legacy_cache(path, value):
-            server_id, revision, owner = path.stem.rsplit("-", 2)
-            if not isinstance(value, dict):
-                raise TypeError("Invalid legacy cache")
-            return server_id + "-" + owner, {"revision": int(revision), "data": value}
-        self.cache_store.migrate_json(legacy_cache)
+
 
     def schedule_warm(self, row, authorize=None, user_id=None):
         task = asyncio.create_task(self.warm(row.id, user_id, authorize=authorize, expected_revision=row.revision))
@@ -138,6 +141,8 @@ class Catalog:
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
+        self.cache_store.close()
+        self.artifacts.close()
 
     def seal(self, value):
         return {"sealed": self.fernet.encrypt(json.dumps(value, ensure_ascii=False).encode()).decode()}
@@ -262,6 +267,18 @@ class Catalog:
         if self.runtime.versions.get(row.id, row.revision) != row.revision:
             return empty | {"cache_status": "disabled"}
         value = empty | (saved or {})
+        owner_scope = CatalogScope(row.id, catalog_owner(row.isolation, user_id), row.revision, "")
+        control = self._health_views.get(scope_key(owner_scope))
+        if control and control[0].revision == row.revision:
+            health = control[1]
+            refresh_warning = {key: value.get(key) for key in (
+                "last_refresh_error", "last_refresh_error_code", "last_refresh_failure_at")}
+            value.update(FAILURE_DEFAULTS, cache_error=None, cache_error_code=None, cache_stale=False)
+            value.update(refresh_warning)
+            value.update({key: item for key, item in health.items() if key not in {"invalidated", "failure_sequence"}})
+            if health.get("invalidated"):
+                value.update(cache_status="error", cache_at=None,
+                             **{key[:-1] + "_count": 0 for key in CAPABILITY_KEYS})
         value["failure_scope"] = self.failure_scope(row)
         if value["cache_status"] == "empty" and value["cache_at"]:
             value["cache_status"] = "error" if value["cache_error"] else "ready"
@@ -278,11 +295,21 @@ class Catalog:
         self._cache_failures.pop(key, None)
 
     def save_cache(self, row, value, user_id=None, *, content_changed=True):
+        value = dict(value)
+        with self.cache_store.gate.operation(), self.cache_store.lock:
+            has_index = self.cache_store.connection.execute(
+                "SELECT 1 FROM catalog_heads WHERE server_id=? AND owner=? LIMIT 1",
+                [row.id, catalog_owner(row.isolation, user_id)]).fetchone() is not None
+        for kind in CAPABILITY_KEYS:
+            value.setdefault(kind[:-1] + "_count", len(value.get(kind, [])))
+            if has_index:
+                value[kind] = []
         generation = uuid4().hex if content_changed else value.get("cache_generation") or uuid4().hex
         value = value | {"cache_generation": generation}
         key = self.cache_key(row, user_id)
         try:
-            self.cache_store.set(key, {"revision": row.revision, "data": value})
+            self.cache_store.set(key, {"revision": row.revision, "data": value},
+                                 ttl_seconds=86400 if not has_index else None)
         except OSError as exc:
             error = GatewayError("cache_write_failed", "Local MCP cache write failed: " + str(exc))
             # Fail closed even when the disk cannot record the failure. Disabled
@@ -296,100 +323,20 @@ class Catalog:
             raise error from exc
         self._cache_failures.pop(key, None)
 
-    async def record_operation_result(self, row, user_id=None, *, error=None, kind="call",
-                                      scope=None, expected_refresh=None):
-        """Persist one final result under the owner lock; retain contracts below the threshold."""
-        from jsonschema import ValidationError
-        from sqlalchemy.orm import load_only
+    async def begin_operation(self, scope):
+        from .control_results import begin_operation
+        return await begin_operation(self, scope)
 
-        from .catalog_models import CatalogGeneration, CatalogHead
+    def _remember_health(self, scope, health):
+        key = scope_key(scope)
+        self._health_views[key] = (scope, dict(health))
+        self._health_views.move_to_end(key)
+        while len(self._health_views) > 2048:
+            self._health_views.popitem(last=False)
 
-        if isinstance(error, (asyncio.CancelledError, ValidationError)):
-            return
-        if isinstance(error, HTTPException) and error.status_code in {401, 403, 404, 409, 422}:
-            return
-        if error is not None:
-            config = await self.credentials.materialize(row, user_id, require=False)
-            error = safe_gateway_error(error, config=config)
-            if error.code == "auth_required" and config.get("auth", {}).get("type") == "oauth":
-                error.args = ("OAuth 授权已失效，请重新授权",)
-            if error.code in {"revision_changed", "permission_revoked", "forbidden", "access_denied",
-                              "lease_expired", "disabled", "shutting_down", "generation_superseded",
-                              "tool_not_found", "invalid_arguments"}:
-                return
-        else:
-            cached = self.cached_view(row, user_id)
-            if (cached["cache_status"] == "ready" and cached["cache_at"]
-                    and cached["startup_failure_count"] == 0 and cached["runtime_status"] == "stopped"
-                    and not cached["cache_error"] and not cached.get("cache_stale")
-                    and not cached["last_startup_error"] and not cached["failed_gateway_names"]
-                    and (kind != "refresh" or not cached["last_refresh_error"])):
-                return
-        async with self.db.locked() as session:
-            current = await session.get(McpServer, row.id, options=[load_only(
-                McpServer.id, McpServer.revision, McpServer.isolation, McpServer.mode)])
-            if not current or current.revision != row.revision or current.mode == "disabled":
-                return
-            actual_scope = await self._index_scope(session, current, catalog_owner(current.isolation, user_id))
-            if scope is not None and actual_scope != scope:
-                return
-            head = await session.get(CatalogHead, scope_key(actual_scope))
-            latest = await session.get(CatalogGeneration, head.refresh_id) if head and head.refresh_id else None
-            if (error is not None and expected_refresh is not None and head
-                    and head.refresh_id != expected_refresh and (not latest or latest.status != "failed")):
-                return
-            value = self.cached(current, user_id)
-            generation = await self.index._current(session, actual_scope)
-            if generation is not None and value["cache_status"] != "ready":
-                value.update(cache_status="ready", cache_at=generation.published_at.isoformat(),
-                             **{key[:-1] + "_count": (generation.counts or {}).get(key, 0)
-                                for key in ("tools", "resources", "prompts", "templates")})
-            warning_keys = {"cache_error": None, "cache_error_code": None, "cache_stale": False}
-            if kind == "refresh":
-                warning_keys.update(last_refresh_error=None, last_refresh_error_code=None,
-                                    last_refresh_failure_at=None)
-            invalidated = False
-            if error is None:
-                value.update(startup_failure_count=0, runtime_status="stopped", failed_gateway_names=[],
-                             last_startup_error=None, last_startup_error_code=None, last_startup_failure_at=None,
-                             **warning_keys)
-                await self.index.set_health(actual_scope, warning_keys, session=session, clear=True)
-            else:
-                count = value["startup_failure_count"] + 1
-                at = now().isoformat()
-                details = {"cache_error": str(error)[:500], "cache_error_code": error.code,
-                           "cache_stale": value["cache_status"] == "ready",
-                           "cache_attempt_at": at}
-                if kind == "refresh":
-                    details.update(last_refresh_error=str(error)[:500], last_refresh_error_code=error.code,
-                                   last_refresh_failure_at=at)
-                value.update(startup_failure_count=count,
-                             runtime_status="failed" if count >= self.startup_failure_threshold else "stopped",
-                             last_startup_error_code=error.code, last_startup_error=str(error)[:500],
-                             last_startup_failure_at=at, **details)
-                if count >= self.startup_failure_threshold or error.code == "cache_write_failed":
-                    details["cache_stale"] = False
-                    head = await session.get(CatalogHead, scope_key(actual_scope))
-                    expected = expected_refresh if expected_refresh is not None else head.refresh_id if head else None
-                    if not await self.index.record_failure(
-                            actual_scope, details, expected_refresh=expected, session=session):
-                        return
-                    invalidated = True
-                    value.update(**{key: [] for key in CAPABILITY_KEYS},
-                                 **{key: 0 for key in ("tool_count", "resource_count", "prompt_count", "template_count")},
-                                 cache_status="error", cache_at=None, cache_stale=False)
-                else:
-                    if generation is not None:
-                        await self.index.set_health(actual_scope, details, session=session)
-                    else:
-                        await self.index.record_failure(actual_scope, details,
-                                                        expected_refresh=head.refresh_id if head else None,
-                                                        session=session)
-                    if value["cache_status"] != "ready":
-                        value.update(cache_status="auth_required" if error.code == "auth_required" else "error")
-            self.save_cache(current, value, user_id, content_changed=invalidated)
-        if error is not None:
-            error.details.update(self.failure_details(row, user_id))
+    async def record_operation_result(self, row, user_id=None, **kwargs):
+        from .control_results import record_result
+        return await record_result(self, row, user_id, **kwargs)
 
     def invalidate_authorization_cache(self, row, error, user_id=None):
         """Explicit revocation or account/client changes invalidate the old authorization immediately."""
@@ -496,7 +443,8 @@ class Catalog:
             await asyncio.shield(self.index.fail_refresh(generation.id))
             raise
         try:
-            self.save_cache(current, result, user_id)
+            self._remember_health(scope, {})
+            await run_blocking(self.save_cache, current, result, user_id)
         except GatewayError as exc:
             exc.catalog_refresh_id = generation.id
             raise
@@ -511,7 +459,7 @@ class Catalog:
 
     async def refresh_after_change(self, row, user_id=None, authorize=None):
         if row.mode == "disabled":
-            self.save_cache(row, {"tools": [], "resources": [], "prompts": [], "templates": [],
+            await run_blocking(self.save_cache, row, {"tools": [], "resources": [], "prompts": [], "templates": [],
                                   "cache_status": "disabled"}, user_id)
             return
         try:
@@ -782,6 +730,7 @@ class Catalog:
                 for key in list(self._cache_failures):
                     if key.startswith(server_id + "-"):
                         self._cache_failures.pop(key, None)
+                await self.index.detach_server(server_id)
                 if self.on_cache_change:
                     await self.on_cache_change(server_id)
 
@@ -891,37 +840,76 @@ class Catalog:
         generation = hashlib.sha256(strict_json_dumps([row.revision, values]).encode()).hexdigest()
         return CatalogScope(row.id, owner, row.revision, generation)
 
+    async def directory_version(self):
+        from sqlalchemy import text
+
+        from .catalog_control import CatalogDirectoryClock
+
+        async def primary():
+            async with self.db.session() as session:
+                return await session.scalar(select(CatalogDirectoryClock.version).where(CatalogDirectoryClock.id == 1))
+
+        async def derived():
+            async with self.db.derived.session() as session:
+                return await session.scalar(text("SELECT value FROM derived_identity WHERE key='repository'"))
+
+        version, identity = await asyncio.gather(primary(), derived())
+        if version is None or identity is None:
+            raise GatewayError("catalog_unavailable", "Directory version fence is unavailable")
+        return version, identity
+
     async def index_scopes(self, rows, user_id=None):
-        """Batch current metadata and credential generations without opening configurations."""
+        """Batch primary authority and credentials; no oversized SQLite IN lists."""
         from sqlalchemy.orm import load_only
 
-        if not rows:
-            return {}
-        async with self.db.session() as session:
-            current = list((await session.scalars(select(McpServer).options(load_only(
-                McpServer.id, McpServer.revision, McpServer.isolation
-            )).where(McpServer.id.in_([row.id for row in rows])))).all())
-            expected = {row.id: (row.revision, row.isolation) for row in rows}
-            if {row.id: (row.revision, row.isolation) for row in current} != expected:
-                raise GatewayError("revision_changed", "MCP configuration changed")
-            owners = {row.id: catalog_owner(row.isolation, user_id) for row in current}
-            keys = {key for row in current for key in self._index_credential_keys(row, owners[row.id])}
-            stored = dict((await session.execute(select(
-                SystemSetting.key, SystemSetting.value
-            ).where(SystemSetting.key.in_(keys)))).all())
-            return {row.id: self._scope_from_settings(row, owners[row.id], stored) for row in current}
+        from .catalog_control import CatalogControl
 
+        result = {}
+        for offset in range(0, len(rows), 250):
+            batch = rows[offset:offset + 250]
+            async with self.db.session() as session:
+                current = list((await session.scalars(select(McpServer).options(load_only(
+                    McpServer.id, McpServer.revision, McpServer.isolation
+                )).where(McpServer.id.in_([row.id for row in batch])))).all())
+                expected = {row.id: (row.revision, row.isolation) for row in batch}
+                if {row.id: (row.revision, row.isolation) for row in current} != expected:
+                    raise GatewayError("revision_changed", "MCP configuration changed")
+                owners = {row.id: catalog_owner(row.isolation, user_id) for row in current}
+                keys = sorted({key for row in current for key in self._index_credential_keys(row, owners[row.id])})
+                stored = {}
+                for part in range(0, len(keys), 250):
+                    stored.update((await session.execute(select(SystemSetting.key, SystemSetting.value).where(
+                        SystemSetting.key.in_(keys[part:part + 250])))).all())
+                scopes = {row.id: self._scope_from_settings(row, owners[row.id], stored) for row in current}
+                controls = {item.scope_key: item for item in (await session.scalars(select(CatalogControl).options(load_only(
+                    CatalogControl.scope_key, CatalogControl.revision, CatalogControl.credential_generation,
+                    CatalogControl.health)).where(
+                    CatalogControl.scope_key.in_([scope_key(scope) for scope in scopes.values()])))).all()}
+                for scope in scopes.values():
+                    control = controls.get(scope_key(scope))
+                    health = control.health if control and (control.revision, control.credential_generation) == (
+                        scope.revision, scope.credential_generation) else {}
+                    self._remember_health(scope, health)
+                result.update(scopes)
+        return result
 
     async def index_scope(self, row, user_id=None):
         from sqlalchemy.orm import load_only
 
+        from .catalog_control import CatalogControl
         async with self.db.session() as session:
             current = await session.get(McpServer, row.id, populate_existing=True, options=[load_only(
-                McpServer.id, McpServer.revision, McpServer.isolation
-            )])
+                McpServer.id, McpServer.revision, McpServer.isolation)])
             if not current or current.revision != row.revision:
                 raise GatewayError("revision_changed", "MCP configuration changed")
-            return await self._index_scope(session, current, catalog_owner(current.isolation, user_id))
+            scope = await self._index_scope(session, current, catalog_owner(current.isolation, user_id))
+            control = await session.get(CatalogControl, scope_key(scope), options=[load_only(
+                CatalogControl.scope_key, CatalogControl.revision, CatalogControl.credential_generation,
+                CatalogControl.health)])
+            health = control.health if control and (control.revision, control.credential_generation) == (
+                scope.revision, scope.credential_generation) else {}
+            self._remember_health(scope, health)
+            return scope
 
     @tracked("refresh")
     async def refresh_index(self, server_id, user_id=None, *, authorize=None):
@@ -955,7 +943,8 @@ class Catalog:
                     last_refresh_error=None, last_refresh_failure_at=None,
                 )
                 expected_refresh = await self.index.refresh_version(scope)
-                self.save_cache(current, cached, user_id)
+                self._remember_health(scope, {})
+                await run_blocking(self.save_cache, current, cached, user_id)
                 return result
             except Exception as exc:  # noqa: BLE001 - normalize third-party transport errors
                 config = spec.config if spec else self.unseal(row.config)
@@ -1043,8 +1032,9 @@ class Catalog:
 
     async def tool_definition(self, row, name, user_id=None):
         scope = await self.index_scope(row, user_id)
-        if await self.index.has_scope(scope):
-            return await self.index.get_definition(scope, kind="tools", name=name)
+        definition = await self.index.get_definition(scope, kind="tools", name=name)
+        if definition is not None or await self.index.has_scope(scope):
+            return definition
         # Temporary compatibility for pre-cutover caches; only this service is inspected.
         tool = next((value for value in self.cached_view(row, user_id)["tools"] if value["name"] == name), None)
         return await asyncio.to_thread(copy.deepcopy, tool) if tool is not None else None
@@ -1093,16 +1083,22 @@ class Catalog:
                    response_processor=None):
         if authorize:
             await authorize()
-        await self.prepare_scope(row, user.id if user else None, authorize=authorize)
-        await self.ensure_ready(row, user.id if user else None, authorize=authorize)
-        tool = await self.tool_definition(row, name, user.id if user else None)
-        event = {"id": str(uuid4()), "user_id": user.id if user else None,
+        _prepared, prepared_scope = await self.prepare_scope(row, user.id if user else None, authorize=authorize)
+        # A definition read already validates the current ready generation,
+        # primary revision, credential fingerprint and control epoch. Avoid a
+        # second summary read on the healthy path; missing contracts still use
+        # the normal single-flight discovery/recovery path.
+        tool = await self.index.get_definition(prepared_scope, kind="tools", name=name)
+        if tool is None:
+            await self.ensure_ready(row, user.id if user else None, authorize=authorize)
+            tool = await self.tool_definition(row, name, user.id if user else None)
+        event = {"user_id": user.id if user else None,
                  "username": user.username if user else "anonymous", "token_id": token.id if token else None,
                  "token_name": token.name if token else "", "mcp_id": row.id, "mcp_name": row.name,
                  "tool_name": name, "arguments": arguments, "source": source, "status": "running",
                  "lease_id": lease.id, "transport": "stdio-bridge" if lease.kind == "bridge" else "http"}
         started = time.monotonic()
-        await self.logs.append(event)
+        event["id"] = await self.logs.append(event)
         try:
             if tool is None:
                 raise GatewayError("tool_not_found", "Tool is absent from the current MCP directory")

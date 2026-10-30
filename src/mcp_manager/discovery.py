@@ -276,22 +276,60 @@ def compact_tool(tool):
 class Discovery:
     def __init__(self, gateway):
         self.gateway = gateway
+        from .directory_snapshot import DirectorySnapshots
+        self.snapshots = DirectorySnapshots()
 
 
     async def summary_snapshot(self, request):
+        from collections import defaultdict
+
+        from .catalog import FAILURE_DEFAULTS
+
         user, token, allowed = await self.gateway.principal(request)
         catalog = self.gateway.app.state.catalog
-        rows = [row for row in await catalog.rows(ids=allowed, metadata_only=True) if row.mode != "disabled"]
-        expected = await self.gateway.search_scope(request, user, token, rows)
-        scopes = await catalog.index_scopes(rows, user.id if user else None)
-        indexed = await catalog.index.get_summaries(scopes.values(), preview=True)
+        user_id = user.id if user else None
+        version = await catalog.directory_version()
+        expected = self.gateway.fast_search_scope(request, user, token, allowed, version)
+        allowed_hash = expected[-2]
+        cached = self.snapshots.get(allowed_hash, user_id or "anonymous", version)
+        if cached is None:
+            async with self.snapshots.build(allowed_hash, version):
+                cached = self.snapshots.get(allowed_hash, user_id or "anonymous", version)
+                if cached is None:
+                    rows = [row for row in await catalog.rows(ids=allowed, metadata_only=True) if row.mode != "disabled"]
+                    scopes = await catalog.index_scopes(rows, user_id)
+                    indexed = await catalog.index.get_summaries(scopes.values(), preview=True)
+                    if len(indexed) == len(rows):
+                        from .storage_async import run_blocking
+                        prepared = await run_blocking(self.snapshots.prepare, rows, scopes, indexed)
+                        if await catalog.directory_version() != version:
+                            raise GatewayError("permission_revoked", "MCP permission or catalog changed during search")
+                        self.snapshots.put(allowed_hash, user_id or "anonymous", version, prepared)
+                else:
+                    rows, scopes, indexed = cached
+        else:
+            rows, scopes, indexed = cached
+        if len(indexed) != len(rows):
+            expected = await self.gateway.search_scope(request, user, token, rows, scopes=scopes, indexed=indexed)
+        # One projection per scope. Current indexed providers never touch the
+        # compatibility CAS store or repeat runtime scans in the provider loop.
+        all_runtime, personal_runtime = defaultdict(list), defaultdict(list)
+        for item in catalog.runtime.status():
+            all_runtime[item["server_id"]].append(item)
+        for item in catalog.runtime.status(user_id=user_id or "anonymous"):
+            personal_runtime[item["server_id"]].append(item)
+        legacy_rows = [row for row in rows if row.id not in indexed]
+        legacy = await asyncio.to_thread(
+            lambda: {row.id: catalog.cached_view(row, user_id) for row in legacy_rows})
         services = []
         for row in rows:
-            cache = catalog.cached_view(row, user.id if user else None)
-            if row.id in indexed:
-                metadata = indexed[row.id]
-                names = metadata["tools_preview"]
-                description = row.description or metadata["generated_description"]
+            metadata = indexed.get(row.id)
+            cache = ({**FAILURE_DEFAULTS, "cache_error": None, "cache_error_code": None,
+                      "cache_status": "empty", "cache_stale": False, **metadata}
+                     if metadata is not None else legacy[row.id])
+            if metadata is not None:
+                names = list(metadata.get("tools_preview", []))
+                description = row.description or metadata.get("generated_description", "")
                 description_source = "configured" if row.description.strip() else "generated" if description else "missing"
                 count, status = metadata["tool_count"], metadata["cache_status"]
             else:
@@ -299,27 +337,24 @@ class Discovery:
                 names = sorted(tool["name"] for tool in preview)
                 description, description_source = service_description(row.description, preview)
                 count, status = len(cache["tools"]), cache["cache_status"]
-            failure = catalog.failure_details(row, user.id if user else None)
-            diagnostic = indexed.get(row.id, {})
-            reason = diagnostic.get("cache_error") or failure["failure_reason"]
+            active = (personal_runtime if row.isolation == "user" else all_runtime).get(row.id, [])
+            runtime_status = ("failed" if cache["runtime_status"] == "failed" else
+                              "running" if any(item["in_flight"] > 0 for item in active) else
+                              "ready" if any(item["phase"] == "ready" for item in active) else "stopped")
+            reason = cache.get("cache_error") or cache.get("last_refresh_error") or cache.get("last_startup_error")
             item = {
                 "id": row.id, "mcp": row.id, "name": row.name, "slug": row.slug,
                 "description": description, "description_source": description_source,
-                "tags": row.tags, "tool_count": count, "tools_list": names,
-                "catalog_status": status, "status": failure["status"],
-                "startup_failure_count": failure["startup_failure_count"],
-                "failure_reason": reason,
-                "cache_error": diagnostic.get("cache_error") or cache["cache_error"],
-                "cache_error_code": diagnostic.get("cache_error_code") or cache["cache_error_code"],
-                "cache_stale": diagnostic.get("cache_stale", cache["cache_stale"]),
-                "last_refresh_error": diagnostic.get("last_refresh_error") or cache["last_refresh_error"],
-                "last_refresh_error_code": diagnostic.get("last_refresh_error_code") or cache["last_refresh_error_code"],
-                "last_refresh_failure_at": diagnostic.get("last_refresh_failure_at") or cache["last_refresh_failure_at"],
-                "recovery": failure["recovery"] if reason else None,
-                "last_startup_error": cache["last_startup_error"],
-                "last_startup_error_code": cache["last_startup_error_code"],
-                "last_startup_failure_at": cache["last_startup_failure_at"],
-                "failure_scope": failure["failure_scope"], "revision": row.revision,
+                "tags": list(row.tags), "tool_count": count, "tools_list": names,
+                "catalog_status": status, "status": runtime_status,
+                "startup_failure_count": cache["startup_failure_count"], "failure_reason": reason,
+                **{key: cache.get(key) for key in (
+                    "cache_error", "cache_error_code", "cache_stale", "last_refresh_error",
+                    "last_refresh_error_code", "last_refresh_failure_at", "last_startup_error",
+                    "last_startup_error_code", "last_startup_failure_at")},
+                "failure_scope": "user" if row.isolation == "user" else "global",
+                "recovery": "Ask an administrator to repair or refresh this MCP service." if reason else None,
+                "revision": row.revision,
             }
             if len(names) < count:
                 item["tools_list_truncated"] = True
@@ -345,8 +380,24 @@ class Discovery:
             (" ".join(item["tools_list"]), 2), (item["description"], 1),
         ]) for item in services]
         mcp_query = query_text(arguments.get("query" if name == "gateway_search_mcps" else "mcp", ""))
+        async def lexical_scores(documents, query):
+            from .directory_snapshot import retained_bytes
+            from .storage_async import run_blocking
+            from .tool_index import lexical
+            key = fingerprint([expected, embedding_scope, normalize(query)])
+            version = expected[-1]
+            scores = self.snapshots.get_scores(key, version)
+            if scores is None:
+                async with self.snapshots.build(("scores", key), version):
+                    scores = self.snapshots.get_scores(key, version)
+                    if scores is None:
+                        scores = await run_blocking(lexical, documents, query)
+                        size = await run_blocking(retained_bytes, scores)
+                        self.snapshots.put_scores(key, version, (scores, size + len(key) + 128))
+            return scores
         matched, service_search = await rank(
-            docs, mcp_query, state.embeddings, config, embedding_scope + ":mcps", authorize=authorize
+            docs, mcp_query, state.embeddings, config, embedding_scope + ":mcps",
+            authorize=authorize, lexical_cache=lexical_scores
         )
         by_id = {item["id"]: item for item in services}
         selected = [by_id[doc["id"]] | {"match": match} for doc, match in matched]
@@ -426,7 +477,7 @@ class Discovery:
         authorize,
     ):
         catalog, state = self.gateway.app.state.catalog, self.gateway.app.state
-        generations = [summaries[row.id]["generation"] for row in selected if summaries[row.id].get("generation")]
+        generations = [summaries[row.id]["generation"] for row in selected if summaries.get(row.id, {}).get("generation")]
         offset = decode_cursor(arguments.get("cursor"), version, state.config.jwt_secret)
         requested = arguments.get("tools")
         query = query_text(arguments.get("tool", ""))

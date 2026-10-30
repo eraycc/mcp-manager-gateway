@@ -10,6 +10,11 @@ from pathlib import Path
 
 from .database import get_setting
 
+
+def normalize_target(target):
+    return "derived" if target == "logs" else target
+
+
 SETTING_KEY = "sqlite_maintenance"
 DEFAULT_POLICY = {"startup_enabled": True, "min_free_mib": 32, "min_free_percent": 20}
 
@@ -96,13 +101,16 @@ def vacuum_sqlite(path, *, policy=None):
 class StorageMaintenance:
     def __init__(self, state):
         self.state = state
-        self.locks = {name: asyncio.Lock() for name in ("main", "logs")}
+        self.targets = ("main", "derived")
+        self.locks = {name: asyncio.Lock() for name in self.targets}
+        self.locks["logs"] = self.locks["derived"]
         self.started = False
         self.last_results = {}
 
     def path(self, target):
-        if target == "logs":
-            return Path(self.state.config.data_dir) / "indexes" / "logs.sqlite"
+        target = normalize_target(target)
+        if target == "derived":
+            return Path(self.state.config.data_dir) / "indexes" / "derived.sqlite"
         if target != "main":
             raise KeyError(target)
         engine = self.state.db.engine
@@ -113,12 +121,13 @@ class StorageMaintenance:
 
     async def policies(self):
         saved = await get_setting(self.state.db, SETTING_KEY, {})
-        return {name: normalize_policy(saved.get(name, {})) for name in self.locks}
+        return {name: normalize_policy(saved.get(name, saved.get("logs", {}) if name == "derived" else {}))
+                for name in self.targets}
 
     async def describe(self):
         policies = await self.policies()
         databases = {}
-        for target in self.locks:
+        for target in self.targets:
             path = self.path(target)
             item = {"supported": path is not None,
                     "backend": "sqlite" if path else self.state.db.engine.dialect.name,
@@ -131,10 +140,11 @@ class StorageMaintenance:
                 except (sqlite3.Error, OSError):
                     item["stats_error"] = "暂时无法读取空间信息，请稍后重试"
             databases[target] = item
+        databases["logs"] = databases["derived"]  # Read-only response alias for older clients.
         return {"databases": databases}
 
     def _compact(self, target, path, policy):
-        if target != "logs":
+        if normalize_target(target) != "derived":
             return vacuum_sqlite(path, policy=policy)
         # Do not race the shared log connection or silently commit its transaction.
         logs = self.state.logs
@@ -143,11 +153,15 @@ class StorageMaintenance:
         try:
             if logs.conn.in_transaction:
                 return {"status": "busy", "reclaimed_bytes": 0}
-            return vacuum_sqlite(path, policy=policy)
+            with logs.gate.maintenance() as admitted:
+                if not admitted:
+                    return {"status": "busy", "reclaimed_bytes": 0}
+                return vacuum_sqlite(path, policy=policy)
         finally:
             logs.lock.release()
 
     async def run(self, target, *, automatic=False):
+        target = normalize_target(target)
         path = self.path(target)
         if path is None:
             raise ValueError("This database does not support SQLite space reclamation")
@@ -177,7 +191,7 @@ class StorageMaintenance:
         if self.started:
             return
         self.started = True
-        for target in self.locks:
+        for target in self.targets:
             if self.path(target) is None:
                 continue
             try:

@@ -748,7 +748,7 @@ requires-dist = [
     { name = "asyncmy", specifier = ">=0.2" },
     { name = "cryptography", specifier = ">=44" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "filelock", specifier = ">=3.17" },
+    { name = "filelock", specifier = ">=3.32.7" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "jsonschema", specifier = ">=4.23" },
     { name = "mcp", specifier = ">=2.2,<3" },

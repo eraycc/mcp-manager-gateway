@@ -202,7 +202,16 @@ async def test_disable_preserves_credentials_and_delete_removes_every_users_cata
         await app.state.catalog.delete(row.id)
         assert await app.state.credentials.owners(row.id) == set()
         async with app.state.db.session() as session:
-            for model in (CatalogHead, CatalogGeneration, CatalogEntry):
+            heads = (await session.scalars(select(CatalogHead))).all()
+            assert all(head.generation_id is None and head.status != "ready" for head in heads)
+        # Physical index retirement is bounded; it cannot cascade through every
+        # posting while the administrator's delete request holds the writer lock.
+        from mcp_manager.database import now
+        from mcp_manager.retention import run_storage_retention
+        for _ in range(60):
+            await run_storage_retention(app.state, at=now())
+        async with app.state.db.session() as session:
+            for model in (CatalogGeneration, CatalogEntry):
                 assert await session.scalar(select(func.count()).select_from(model)) == 0
 
 

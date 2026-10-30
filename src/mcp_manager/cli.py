@@ -63,7 +63,7 @@ def _table_query(table):
 def _without_runtime_lock(table, rows):
     if table.name != SystemSetting.__tablename__:
         return rows
-    return [row for row in rows if row.get("key") != "_identity_lock"]
+    return [row for row in rows if row.get("key") not in {"_identity_lock", "_storage_layout"}]
 
 
 async def _read_table_batches(connection, table, batch_size):
@@ -90,20 +90,20 @@ async def migrate_database(config, target_url, *, batch_size=250):
     counts = {}
     hashes = {}
     max_batch_rows = 0
-    with FileLock(str(config.data_dir / "runtime.lock"), timeout=0):
+    with FileLock(str(config.data_dir / "runtime.lock"), timeout=0) as runtime_guard:
         source, target = Database(config), Database(target_config)
         try:
-            await source.initialize()
-            await target.initialize()
+            await source.initialize(runtime_guard=runtime_guard)
+            await target.initialize(runtime_guard=runtime_guard)
             async with source.engine.connect() as src, target.engine.begin() as dst:
-                for table in Base.metadata.sorted_tables:
+                for table in (table for table in Base.metadata.sorted_tables if table.name != "_catalog_clock"):
                     query = select(func.count()).select_from(table)
                     if table.name == SystemSetting.__tablename__:
-                        query = query.where(table.c.key != "_identity_lock")
+                        query = query.where(table.c.key.not_in(("_identity_lock", "_storage_layout")))
                     if await dst.scalar(query):
                         raise ValueError("Target database is not empty; migration refused")
                 source_hashes = {}
-                for table in Base.metadata.sorted_tables:
+                for table in (table for table in Base.metadata.sorted_tables if table.name != "_catalog_clock"):
                     digest = hashlib.sha256()
                     count = 0
                     async for rows in _read_table_batches(src, table, batch_size):
@@ -115,7 +115,7 @@ async def migrate_database(config, target_url, *, batch_size=250):
                         await dst.execute(table.insert(), rows)
                     counts[table.name] = count
                     source_hashes[table.name] = digest.hexdigest()
-                for table in Base.metadata.sorted_tables:
+                for table in (table for table in Base.metadata.sorted_tables if table.name != "_catalog_clock"):
                     digest = hashlib.sha256()
                     count = 0
                     async for rows in _read_table_batches(dst, table, batch_size):
@@ -160,6 +160,11 @@ def main():
     bridge.add_argument("--url", default=os.environ.get("MCP_MANAGER_URL", "http://127.0.0.1:8765"))
     bridge.add_argument("--token", default=os.environ.get("MCP_MANAGER_TOKEN", ""))
     commands.add_parser("upgrade", help="Apply database schema migrations")
+    storage = commands.add_parser("storage", help="Inspect or migrate the local storage layout")
+    storage_commands = storage.add_subparsers(dest="storage_command", required=True)
+    storage_commands.add_parser("status", help="Show persisted storage layout and legacy table counts")
+    storage_migrate = storage_commands.add_parser("migrate", help="Migrate once while all runtimes are stopped")
+    storage_migrate.add_argument("--dry-run", action="store_true", help="Inspect only; do not migrate")
     commands.add_parser("rebuild-logs", help="Rebuild the separate JSONL query index")
     reconcile = commands.add_parser("reconcile-data", help="Backfill metadata and import legacy cache/job indexes")
     reconcile.add_argument("--batch-size", type=int, default=250)
@@ -192,6 +197,9 @@ def main():
             print(json.dumps(asdict(asyncio.run(migrate_database(config, args.target_database_url))), ensure_ascii=False))
         elif args.command == "reconcile-data":
             print(json.dumps(asyncio.run(reconcile_data(config, batch_size=args.batch_size)), ensure_ascii=False))
+        elif args.command == "storage":
+            print(json.dumps(asyncio.run(storage_command(config, args.storage_command,
+                dry_run=getattr(args, "dry_run", False))), ensure_ascii=False))
         elif args.command == "upgrade":
             asyncio.run(upgrade(config))
         elif args.command == "rebuild-logs":
@@ -206,11 +214,23 @@ async def run_stdio(args):
     await run_bridge(args.url, args.token)
 
 
-async def upgrade(config):
-    with FileLock(str(config.data_dir / "runtime.lock"), timeout=0):
+async def storage_command(config, action, *, dry_run=False):
+    from .storage_migration import storage_status
+    with FileLock(str(config.data_dir / "runtime.lock"), timeout=0) as runtime_guard:
         db = Database(config)
         try:
-            await db.initialize()
+            if action == "migrate" and not dry_run:
+                await db.initialize(allow_storage_migration=True, runtime_guard=runtime_guard)
+            return await storage_status(db)
+        finally:
+            await db.close()
+
+
+async def upgrade(config):
+    with FileLock(str(config.data_dir / "runtime.lock"), timeout=0) as runtime_guard:
+        db = Database(config)
+        try:
+            await db.initialize(runtime_guard=runtime_guard)
         finally:
             await db.close()
 

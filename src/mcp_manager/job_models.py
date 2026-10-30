@@ -32,6 +32,6 @@ class JobResult(Base):
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True)
     ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
     summary: Mapped[dict] = mapped_column(JSON)
-    artifact_id: Mapped[str] = mapped_column(ForeignKey("artifact_objects.id"))
+    artifact_id: Mapped[str] = mapped_column(String(64), index=True)
     artifact_bytes: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=now)
