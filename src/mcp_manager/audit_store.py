@@ -10,7 +10,7 @@ import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 from .audit_events import build_event, normalize, timestamp
 from .log_index_migrations import migrate_audit_index
@@ -37,6 +37,8 @@ class AuditStore:
         self.journals.mkdir(exist_ok=True)
         self.write_failures = self.index_failures = 0
         self.last_error = None
+        self.consecutive_write_failures = 0
+        self.last_write_success_at = None
         self.skipped = {}
         try:
             self.conn.execute("PRAGMA busy_timeout=5000")
@@ -55,12 +57,34 @@ class AuditStore:
             self.conn.close()
 
     def _error(self, exc, *, projection=False):
+        import errno
+
+        code = getattr(exc, "code", None)
+        number = getattr(exc, "errno", None)
+        if isinstance(exc, Timeout):
+            reason, hint = "lock_timeout", "A storage lock was busy; retry after active work completes."
+        elif number == errno.ENOSPC:
+            reason, hint = "disk_full", "Free disk space or adjust retention."
+        elif number in {errno.EACCES, errno.EPERM}:
+            reason, hint = "permission_denied", "Check data-directory ownership and write permissions."
+        elif isinstance(exc, sqlite3.Error):
+            reason = "index_busy" if "locked" in str(exc).lower() else "index_error"
+            hint = "Inspect derived-index diagnostics."
+        elif code in {"storage_busy", "staging_capacity", "storage_low_space", "wal_pressure"}:
+            reason, hint = code, "Inspect storage governance and active maintenance."
+        else:
+            reason, hint = type(exc).__name__, "Inspect the server error type and filesystem health."
         if projection:
             self.index_failures += 1
         else:
             self.write_failures += 1
-        self.last_error = {"type": type(exc).__name__, "timestamp": timestamp(), "projection": projection}
-        LOGGER.error("Audit %s failed (%s)", "projection" if projection else "persistence", type(exc).__name__)
+            self.consecutive_write_failures += 1
+        # Never persist arbitrary exception text: it can contain credentials.
+        self.last_error = {"type": type(exc).__name__, "timestamp": timestamp(), "projection": projection,
+                           "reason": reason, "phase": getattr(exc, "audit_phase", "event_preparation"),
+                           "errno": number, "hint": hint}
+        LOGGER.error("Audit %s failed: reason=%s phase=%s errno=%s",
+                     "projection" if projection else "persistence", reason, self.last_error["phase"], number)
 
     async def append(self, action, user_id, details, *, require=False, **context):
         async with self.owner.capacity:
@@ -90,14 +114,27 @@ class AuditStore:
         return event["event_id"]
 
     def _append(self, event):
-        with self.lock, self.owner.gate.operation(), self.source_lock:
-            identity = self._write(event)
-            try:
-                self._sync()
-            except Exception as exc:  # noqa: BLE001 -- durable JSONL is recovered on the next index pass.
-                self.conn.rollback()
-                self._error(exc, projection=True)
-            return identity
+        phase = "local_writer"
+        try:
+            with self.lock:
+                phase = "maintenance_admission"
+                with self.owner.gate.operation():
+                    phase = "source_lock"
+                    with self.source_lock:
+                        phase = "jsonl_write"
+                        identity = self._write(event)
+                        self.consecutive_write_failures = 0
+                        self.last_write_success_at = timestamp()
+                        try:
+                            self._sync()
+                        except Exception as exc:  # noqa: BLE001 -- durable JSONL recovers on the next index pass.
+                            self.conn.rollback()
+                            exc.audit_phase = "index_projection"
+                            self._error(exc, projection=True)
+                        return identity
+        except Exception as exc:
+            exc.audit_phase = phase
+            raise
 
     def _event(self, raw, path, offset):
         value = json.loads(raw)
@@ -265,6 +302,8 @@ class AuditStore:
                 return {"events": row[0], "oldest": row[1], "newest": row[2], "files": len(files),
                         "bytes": sum(path.stat().st_size for path in files), "write_failures": self.write_failures,
                         "index_failures": self.index_failures, "last_error": self.last_error,
+                        "consecutive_write_failures": self.consecutive_write_failures,
+                        "last_write_success_at": self.last_write_success_at,
                         "skipped_records": self.conn.execute("SELECT COALESCE(SUM(skipped),0) FROM audit_index_offsets").fetchone()[0],
                         "pending_deletions": len(list(self.journals.glob("*.jsonl")))}
         return await asyncio.to_thread(read)

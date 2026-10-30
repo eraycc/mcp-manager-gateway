@@ -1,4 +1,4 @@
-"""Deployment definitions use one frozen Python 3.12 runtime and durable readiness."""
+"""Deployment definitions use frozen Python runtimes and durable readiness."""
 from pathlib import Path
 
 import yaml
@@ -6,9 +6,13 @@ import yaml
 ROOT = Path(__file__).parents[1]
 
 
-def test_docker_build_uses_python312_and_never_rewrites_lock():
+def test_docker_build_uses_packaged_sqlite_and_never_rewrites_lock():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert "python:3.12" in dockerfile
+    assert "ARG PYTHON_IMAGE=python:3.13-alpine3.23" in dockerfile
+    assert "sqlite-build" not in dockerfile
+    assert "sqlite3.c" not in dockerfile
+    assert "patchelf" not in dockerfile
+    assert "--set-rpath" not in dockerfile
     assert "python:3.11" not in dockerfile
     assert "sed -i" not in dockerfile
     assert "uv lock " not in dockerfile

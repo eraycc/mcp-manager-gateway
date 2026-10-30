@@ -1,7 +1,7 @@
 """Same-host admission: ordinary operations overlap; exclusive maintenance fails fast."""
 import asyncio
 import threading
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -28,20 +28,18 @@ class StorageGate:
             self.lease.acquire()
 
     def _enter(self):
-        # An active local operation already holds this worker's activity lock.
-        # A maintainer therefore cannot enter; nested/concurrent local work can
-        # join it without reopening the global admission file on every call.
+        # FileLock(thread_local=False) is reentrant, not a thread mutex. Serialize
+        # its physical acquire/release and the worker count as one transition.
         with self.local:
             if self.closed:
                 raise RuntimeError("Derived repository is closed")
-            if self.count:
-                self.count += 1
-                return
-        with self.admission.acquire(poll_interval=0.001), self.local:
-            if self.closed:
-                raise RuntimeError("Derived repository is closed")
             if not self.count:
-                self.activity.acquire()
+                try:
+                    with self.admission.acquire(poll_interval=0.001):
+                        self.activity.acquire()
+                except Timeout as exc:
+                    from .runtime import GatewayError
+                    raise GatewayError("storage_busy", "Storage maintenance is active; retry later") from exc
             self.count += 1
 
     def _exit(self):
@@ -78,36 +76,35 @@ class StorageGate:
 
     @contextmanager
     def maintenance(self):
-        # Never wait on active requests while holding the admission fence.
-        admitted, held, abandoned = False, [], []
-        try:
-            self.admission.acquire(timeout=0)
-            held.append(self.admission)
-            for path in self.workers.glob("*.lease"):
-                guard = FileLock(str(path.with_suffix(".activity")), timeout=0, thread_local=False, preserve_lock_file=True)
-                guard.acquire()
-                held.append(guard)
-                lease = FileLock(str(path), timeout=0, thread_local=False, preserve_lock_file=True)
-                try:
-                    lease.acquire()
-                except Timeout:
-                    pass
-                else:
-                    lease.release()
-                    abandoned.extend([path, path.with_suffix(".activity")])
-            admitted = True
-        except Timeout:
-            pass
-        try:
-            yield admitted
-        finally:
-            for guard in reversed(held):
-                guard.release()
-            for path in abandoned:
-                path.unlink(missing_ok=True)
+        # A separate instance prevents same-process reentrancy from bypassing
+        # admission. ExitStack covers acquisition AND the body, including OS
+        # failures while scanning workers. A busy probe releases before yielding.
+        with ExitStack() as held:
+            abandoned = []
+            try:
+                held.enter_context(FileLock(self.admission.lock_file, timeout=0, preserve_lock_file=True))
+                for path in self.workers.glob("*.lease"):
+                    held.enter_context(FileLock(str(path.with_suffix(".activity")),
+                                                timeout=0, preserve_lock_file=True))
+                    lease = FileLock(str(path), timeout=0, preserve_lock_file=True)
+                    try:
+                        with lease:
+                            abandoned.extend([path, path.with_suffix(".activity")])
+                    except Timeout:
+                        pass
+            except Timeout:
+                held.close()
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                held.close()
+                for path in abandoned:
+                    path.unlink(missing_ok=True)
 
     def close(self):
-        with self.admission.acquire(poll_interval=0.001), self.local:
+        with self.local, self.admission.acquire(poll_interval=0.001):
             if self.closed:
                 return
             if self.count:

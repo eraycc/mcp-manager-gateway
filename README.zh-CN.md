@@ -106,7 +106,7 @@ mmg
 
 按 Ctrl+C 关闭服务。HTTP 连接和请求任务最多等待 10 秒后取消，随后执行应用资源清理。
 
-Python 链接的 SQLite 必须包含 WAL-reset 修复：3.51.3+，或已修复的 3.50.7/3.44.6 分支。使用 `uv run python -c "import sqlite3; print(sqlite3.sqlite_version)"` 检查；仅升级 uv 不会替换已有 Python 环境。详见[运行环境要求](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/storage-governance.md#运行环境)。
+建议使用链接了 SQLite WAL-reset 修复版本的 Python：3.51.3+，或已修复的 3.50.7/3.44.6 分支。旧引擎仍可正常启动，仅提示建议升级。使用 `uv run python -c "import sqlite3; print(sqlite3.sqlite_version)"` 检查；仅升级 uv 不会替换已有 Python 环境。详见[运行环境要求](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/storage-governance.md#运行环境)。
 
 首次启动会自动创建用户目录、`.env`、SQLite 数据库和密钥：
 

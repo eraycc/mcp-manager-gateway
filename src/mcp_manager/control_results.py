@@ -58,6 +58,15 @@ async def record_result(catalog, row, user_id=None, *, error=None, kind="call",
     if isinstance(error, HTTPException) and error.status_code in {401, 403, 404, 409, 422}:
         return
     if error is not None:
+        # A returned tool error, rejected request, timeout or malformed result
+        # does not prove the MCP is unavailable. Count only connection/startup
+        # failures, or discovery failures while actually refreshing a directory.
+        code = getattr(error, "code", None)
+        unavailable = code in {"connection_error", "startup_failed", "startup_timeout"}
+        unavailable |= code == "outcome_unknown" and getattr(error, "details", {}).get("connection_failed") is True
+        unavailable |= kind in {"refresh", "startup"} and code in {"discovery_failed", "discovery_timeout", "stopped"}
+        if not unavailable and code not in {"auth_required", "oauth_failed", "cache_write_failed"}:
+            return
         config = await catalog.credentials.materialize(row, user_id, require=False)
         error = safe_gateway_error(error, config=config)
         if error.code == "auth_required" and config.get("auth", {}).get("type") == "oauth":
@@ -122,10 +131,18 @@ async def record_result(catalog, row, user_id=None, *, error=None, kind="call",
                     "last_refresh_error", "last_refresh_error_code", "last_refresh_failure_at")
                     if kind != "refresh" and health.get(key, value.get(key)) is not None}
                 control.success_sequence += 1
+        elif error.code in {"auth_required", "oauth_failed", "cache_write_failed"}:
+            # Owner authorization and local cache persistence need diagnostics,
+            # but do not prove the MCP died or consume its availability budget.
+            health.update(cache_error=str(error)[:500], cache_error_code=error.code,
+                          cache_stale=generation is not None)
+            if kind == "refresh":
+                health.update(last_refresh_error=str(error)[:500], last_refresh_error_code=error.code,
+                              last_refresh_failure_at=now().isoformat())
         else:
             count = health.get("startup_failure_count", 0) + 1
             stamp = now().isoformat()
-            invalidated = count >= catalog.startup_failure_threshold or error.code == "cache_write_failed"
+            invalidated = count >= catalog.startup_failure_threshold
             details = {"startup_failure_count": count,
                        "runtime_status": "failed" if invalidated else "stopped",
                        "last_startup_error_code": error.code, "last_startup_error": str(error)[:500],

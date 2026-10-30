@@ -38,8 +38,8 @@ def migrate_object_schema(connection):
 
 class ObjectInventory:
     def __init__(self, data_dir):
-        from .storage_runtime import require_safe_sqlite
-        require_safe_sqlite()
+        from .storage_runtime import warn_sqlite_runtime
+        warn_sqlite_runtime()
         self.data_dir = Path(data_dir)
         self.path = prepare_index_path(data_dir)
         self._lock = threading.RLock()

@@ -106,3 +106,7 @@ oauth.refresh 只记录 OAuth 凭据续期，能力目录刷新另有上述事�
 | POST /rebuild | 提交审计索引重建任务 |
 
 列表和导出支持 q、action、category、user_id、username、actor_type、target_type、target_id、result、source、ip、from_time、to_time。结果为 success、failure、pending、unknown。时间参数建议使用含时区的 ISO 8601；未指定时区时按系统配置时区解析。批量明确 ID 每次最多 500 条，查询每页最多 200 条；后台任务沿用现有 jobs 查询和取消接口。
+
+日志状态中的写入/索引失败是当前进程累计次数；连续写入失败数、最后成功时间和最近错误阶段用于判断是否已恢复。原文写入失败与索引失败分别统计，后者可以从已保存原文恢复。诊断不包含异常原文或敏感参数，详见[存储治理](../operations/storage-governance.md#锁与审计写入诊断)。
+
+“更多操作”使用独立操作弹窗，提供顶部关闭按钮、Esc 和点击弹窗外关闭；选择操作后先关闭菜单，再打开诊断或确认窗口。手机端使用同一关闭入口，无需再次点击被覆盖的原按钮。

@@ -101,12 +101,18 @@ mmg storage migrate
 
 ## 运行环境
 
-Python 需要 3.12 或更高，链接的 SQLite 必须包含 WAL-reset 并发修复：**3.51.3+**，或修复分支 **3.50.7 / 3.44.6**。即使主库使用 MySQL，本地派生库也需要这一条件。未修复引擎会在打开或迁移存储前拒绝启动。依据见 [SQLite 官方 WAL-reset 说明](https://www.sqlite.org/wal.html#walresetbug)。
+Python 需要 3.12 或更高；建议链接包含 WAL-reset 并发修复的 SQLite：**3.51.3+**，或修复分支 **3.50.7 / 3.44.6**。未修复引擎仍可启动、迁移和使用，仅记录建议升级的警告。该问题是在特定并发时序下极低概率发生的损坏风险，不作为启动门槛。即使主库使用 MySQL，本地派生库仍使用 Python 链接的 SQLite。依据见 [SQLite 官方 WAL-reset 说明](https://www.sqlite.org/wal.html#walresetbug)。
 
 ~~~console
 uv run python -c "import sys, sqlite3; print(sys.version); print(sqlite3.sqlite_version)"
 ~~~
 
-升级 uv 自身不会替换已有虚拟环境中的 Python 或 SQLite。备份并停服后，选择链接已修复 SQLite 的 Python 构建，使用原锁文件重建应用环境；不要只检查 Python 主次版本号。仓库 Dockerfile 单独构建并校验固定版本 SQLite，仅为 Python 的 SQLite 扩展设置私有库路径，生产层不包含编译器，也不向下游 MCP 注入全局动态库环境变量。容器部署仍应在实际构建的镜像内检查版本。
+升级 uv 自身不会替换已有虚拟环境中的 Python 或 SQLite。备份并停服后，选择链接已修复 SQLite 的 Python 构建，使用原锁文件重建应用环境；不要只检查 Python 主次版本号。可使用 `uv python install --upgrade 3.13` 更新 uv 管理的 Python，再重建或更新应用环境并检查实际 SQLite 版本；Python 主次版本号本身不能保证 SQLite 版本。仓库生产 Dockerfile 使用自带新 SQLite 的 `python:3.13-alpine3.23` 基础镜像，不编译 SQLite、不改 RPATH。浏览器测试使用独立 Debian 测试镜像。容器部署仍应在实际构建的镜像内检查版本。
 
 派生 SQLite 使用同主机文件锁与 WAL，不应放到网络共享目录供不同节点共同写入。存储层支持同节点多连接/worker 的预约、发布与回收互斥；当前网关下游运行时仍由一个实例拥有，同目录不能启动多个独立网关运行时。未来多节点需要独立的运行时协调和共享持久对象方案，不能仅共享一个 MySQL 主库就视为完成多节点部署。
+
+## 锁与审计写入诊断
+
+日常 SQLite 统计查询依靠 SQLite 自身的读写协调，不申请全局维护入口锁。目录发布、CAS 回收、JSONL 改写与物理整理保留各自必要的互斥；维护发现活动请求时立即返回 busy 并释放入口。取消请求必须等待正在进行的文件变更结束后释放锁。不要在运行期间删除 locks 目录：删除仍被持有的锁路径会破坏不同进程间的协调，无法作为常规恢复方式。
+
+审计页显示的写入/索引失败次数是当前进程累计值，不表示此刻仍在连续失败。状态同时提供连续写入失败数、最后成功写入时间，以及最近失败的原因、阶段、errno 和处理建议。后续写入成功会标明已恢复；历史累计值仍保留。磁盘已满、权限问题、容量限制、锁超时和索引错误分别诊断。写入失败表示该次审计原文未确认保存；索引失败表示原文已保存，可由后续索引同步恢复。不会重放业务操作来补写审计。

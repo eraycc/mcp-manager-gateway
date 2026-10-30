@@ -134,7 +134,7 @@ async def test_tokens_use_own_oauth_and_one_user_failure_preserves_other(tmp_pat
             assert alice_cache["cache_error_code"]
             assert alice_cache["cache_error"]
             assert alice_cache["last_refresh_error"]
-            assert alice_cache["startup_failure_count"] == 1
+            assert alice_cache["startup_failure_count"] == (0 if failure == "expired" else 1)
         assert catalog.cached(current, bob["id"])["cache_status"] == "ready"
         assert not (await invoke(bob)).is_error
         assert calls[-1] == (bob["id"], "Bearer oauth-bob")

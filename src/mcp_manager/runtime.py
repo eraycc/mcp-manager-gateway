@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from weakref import WeakValueDictionary
 
-from .protocol_errors import is_request_error
+from .protocol_errors import is_connection_failure, is_request_error
 
 LOGGER = logging.getLogger(__name__)
 
@@ -678,6 +678,11 @@ class Runtime:
                 raise
             if is_request_error(exc):
                 raise GatewayError("downstream_error", str(exc)) from exc
+            # Invalid response schemas do not imply a dead transport. Preserve
+            # outcome_unknown/no-replay while leaving the healthy instance usable.
+            from pydantic import ValidationError as ResponseValidationError
+            if isinstance(exc, ResponseValidationError):
+                raise GatewayError("outcome_unknown", str(exc), {"connection_failed": False}) from exc
             lock = self._locks.setdefault(instance.key, asyncio.Lock())
             async with lock:
                 instance.phase = "draining"
@@ -685,7 +690,8 @@ class Runtime:
                     instance.stop_context = {"reason_code": "connection_error", "error_type": type(exc).__name__}
                 instance.refs.clear()
             code = "outcome_unknown" if business else "connection_error"
-            raise GatewayError(code, str(exc) or "Downstream did not return a result") from exc
+            raise GatewayError(code, str(exc) or "Downstream did not return a result",
+                               {"connection_failed": is_connection_failure(exc)}) from exc
         finally:
             if business:
                 lease.pending -= 1

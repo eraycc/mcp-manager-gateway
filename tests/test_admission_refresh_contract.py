@@ -3,12 +3,12 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
 from starlette.requests import Request
 from test_bug1_catalog import console
 from test_discovery_failure_policy import Upstream
 
-from mcp_manager.catalog_models import CatalogGeneration
+from mcp_manager.catalog_control import CatalogControl
+from mcp_manager.catalog_store import scope_key
 from mcp_manager.runtime import GatewayError
 
 
@@ -75,11 +75,13 @@ async def test_failed_refresh_retains_views_until_threshold_without_disabling(
         assert (await web.get(f"/api/v1/mcps/{row.id}/capabilities/tools/first")).status_code == 404
         scope = await catalog.index_scope(row, actor["id"])
         assert (await catalog.index.get_summaries([scope]))[row.id]["cache_error"]
+        # Failed generations are disposable and the governor may already
+        # reclaim them. The primary control owns durable failure diagnostics.
         async with app.state.db.session() as session:
-            failures = (await session.scalars(select(CatalogGeneration).where(
-                CatalogGeneration.server_id == row.id, CatalogGeneration.status == "failed",
-            ))).all()
-            assert any(reason in generation.details.get("cache_error", "") for generation in failures)
+            control = await session.get(CatalogControl, scope_key(scope))
+            assert control.health["startup_failure_count"] == 3
+            assert control.health["invalidated"]
+            assert reason in control.health["last_startup_error"]
         call = await agent(app, web)
         starts = peer.starts
         result = await call("gateway_search_mcps", {"query": "*"})
