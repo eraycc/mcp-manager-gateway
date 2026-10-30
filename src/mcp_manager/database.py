@@ -143,9 +143,9 @@ class Database:
 
     async def initialize(self, *, allow_storage_migration=None, runtime_guard=None):
         from .storage_migration import initialize_storage
-        from .storage_runtime import require_safe_sqlite
+        from .storage_runtime import warn_sqlite_runtime
 
-        require_safe_sqlite()
+        warn_sqlite_runtime()
         await initialize_storage(self, allow_migration=allow_storage_migration, runtime_guard=runtime_guard)
 
     async def close(self):

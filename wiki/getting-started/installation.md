@@ -2,7 +2,7 @@
 
 ## 环境要求
 
-- Python 3.12 或更高版本；链接 SQLite 必须包含 WAL-reset 修复（3.51.3+，或修复分支 3.50.7/3.44.6），见[存储运行环境](../operations/storage-governance.md#运行环境)；
+- Python 3.12 或更高版本；建议链接包含 WAL-reset 修复的 SQLite（3.51.3+，或修复分支 3.50.7/3.44.6）；旧引擎仅提示升级，不阻止启动，见[存储运行环境](../operations/storage-governance.md#运行环境)；
 - 可运行下游 MCP 所需的 Node.js、Python 或其他运行时；
 - 默认监听地址 `127.0.0.1:8765`；
 - 默认数据库为 SQLite，也可以使用 MySQL。

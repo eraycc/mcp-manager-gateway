@@ -1127,12 +1127,8 @@ class Catalog:
             finally:
                 tool_context.reset(binding)
             event.update(status="tool_error" if result.get("isError") else "success", result=result)
-            if result.get("isError"):
-                outcome = current_operation.get()
-                if outcome is not None:
-                    reason = next((block.get("text", "") for block in result.get("content", [])
-                                   if block.get("type") == "text"), "Downstream tool reported an error")
-                    outcome.error = GatewayError("tool_error", str(reason)[:500])
+            # A tool-level failure is a valid response from a live MCP.
+            # Keep it in call logs, never in startup/catalog failure diagnostics.
             response = result
         except asyncio.CancelledError:
             event.update(status="cancelled", error="Caller cancelled; dispatched side effects may have occurred")

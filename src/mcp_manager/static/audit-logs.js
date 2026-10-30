@@ -54,17 +54,28 @@ export async function auditLogs(main,signal){
    el('div',{class:'audit-retention'},el('span',{},value.retention_days?'保留最近 '+value.retention_days+' 天':'无限保留'),
     button('保留策略',()=>navigate('settings'))));
   if(value.write_failures||value.index_failures||value.skipped_records||value.pending_deletions)
-   status.append(el('p',{class:'notice',role:'status'},'日志状态需关注：写入失败 '+value.write_failures+' 次，索引失败 '+value.index_failures+' 次，跳过异常记录 '+value.skipped_records+' 条，待恢复清理 '+value.pending_deletions+' 项。可在更多操作中查看诊断。'));
+   status.append(el('p',{class:'notice',role:'status'},'日志诊断（本进程累计）：写入失败 '+value.write_failures+' 次，索引失败 '+value.index_failures+' 次，跳过异常记录 '+value.skipped_records+' 条，待恢复清理 '+value.pending_deletions+' 项。'+(value.consecutive_write_failures?'当前连续写入失败 '+value.consecutive_write_failures+' 次。':value.write_failures&&value.last_write_success_at?'后续写入已恢复。':'')+(value.last_error?'最近原因：'+value.last_error.reason+'，阶段：'+value.last_error.phase+'。':'')+'可在更多操作中查看诊断。'));
  };
  renderStatus(initial);
  const updateStatus=async()=>renderStatus(await api('/audit-logs/status',{signal}));
  let reload=async()=>{},matching=0;
  const execute=async(path,options)=>{const result=await jobDialog(await api(path,options),{autoCloseOnSuccess:true});await updateStatus();await reload();return result?.status==='completed'};
  const filteredDelete=()=>confirm('永久删除当前筛选匹配的 '+matching+' 条审计记录？本次清理留痕及提交后新增的记录会保留。',()=>execute('/audit-logs/delete',{method:'POST',body:{ids:null,filters:Object.fromEntries(query),confirm:true}}));
- const more=el('details',{class:'action-menu audit-more'},el('summary',{},'更多操作'),el('div',{class:'action-menu-panel'},
-  button('查看日志状态',async()=>dialog('审计日志状态',el('pre',{},pretty(await api('/audit-logs/status'))))),
-  button('重建审计索引',()=>confirm('从审计原文重建查询索引？日志记录会保留。',()=>execute('/audit-logs/rebuild',{method:'POST'}))),
-  button('清空审计记录',()=>confirm('永久清空当前全部审计记录？本次清空的操作留痕会保留。',()=>execute('/audit-logs?confirm=true',{method:'DELETE'})),'danger')));
+ const more=button('更多操作',()=>{
+  const actions=el('div',{class:'stack'}),popup=dialog('审计日志操作',actions);
+  // Scope light-dismiss to this action chooser; editing/confirmation forms keep
+  // their existing explicit close and save behavior.
+  popup.addEventListener('click',event=>{
+   if(event.target!==popup)return;
+   const box=popup.getBoundingClientRect();
+   if(event.clientX<box.left||event.clientX>box.right||event.clientY<box.top||event.clientY>box.bottom)popup.close();
+  });
+  const choose=action=>()=>{popup.close();return action()};
+  actions.append(
+   button('查看日志状态',choose(async()=>dialog('审计日志状态',el('pre',{},pretty(await api('/audit-logs/status')))))),
+   button('重建审计索引',choose(()=>confirm('从审计原文重建查询索引？日志记录会保留。',()=>execute('/audit-logs/rebuild',{method:'POST'})))),
+   button('清空审计记录',choose(()=>confirm('永久清空当前全部审计记录？本次清空的操作留痕会保留。',()=>execute('/audit-logs?confirm=true',{method:'DELETE'}))),'danger'));
+ });
  main.append(title('审计日志','追溯用户与系统对服务、令牌、权限和配置的关键操作。',[
   button('导出 JSON',()=>directDownload('/audit-logs/export?'+new URLSearchParams({...Object.fromEntries(query),format:'json'}),'audit-logs.json')),
   button('导出 CSV',()=>directDownload('/audit-logs/export?'+new URLSearchParams({...Object.fromEntries(query),format:'csv'}),'audit-logs.csv')),more]),status);

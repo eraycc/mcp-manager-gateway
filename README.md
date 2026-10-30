@@ -106,7 +106,7 @@ mmg
 
 Press Ctrl+C to stop the server. HTTP connections and request tasks have a 10-second grace period before cancellation, followed by application resource cleanup.
 
-The linked SQLite library must include the WAL-reset fix: 3.51.3+, or the fixed 3.50.7/3.44.6 branches. Check with `uv run python -c "import sqlite3; print(sqlite3.sqlite_version)"`; upgrading uv alone does not replace an existing Python environment. See [runtime requirements](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/storage-governance.md#运行环境)。
+We recommend a Python build linked to SQLite with the WAL-reset fix: 3.51.3+, or the fixed 3.50.7/3.44.6 branches. Older engines remain usable and produce an upgrade warning. Check with `uv run python -c "import sqlite3; print(sqlite3.sqlite_version)"`; upgrading uv alone does not replace an existing Python environment. See [runtime requirements](https://github.com/eraycc/mcp-manager-gateway/blob/master/wiki/operations/storage-governance.md#运行环境)。
 
 On first start, MMG creates its configuration, SQLite database, and runtime data under:
 

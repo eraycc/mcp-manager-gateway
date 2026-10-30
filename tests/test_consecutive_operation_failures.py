@@ -1,4 +1,4 @@
-"""A single consecutive-failure budget covers calls and catalog refreshes."""
+"""Only MCP availability failures consume the owner-scoped health budget."""
 import time
 from contextlib import asynccontextmanager
 
@@ -11,7 +11,7 @@ from mcp_manager.runtime import GatewayError
 
 async def healthy_service(h, kind="oauth", isolation="service"):
     catalog = h.app.state.catalog
-    faults = {"connect": False, "discovery": False, "call": False, "calls": 0}
+    faults = {"connect": False, "discovery": False, "call": False, "calls": 0, "disconnect": False}
     transport = {"stdio": "stdio", "rest": "rest"}.get(kind, "streamable-http")
     config = {"command": "fixture"} if kind == "stdio" else {"url": "https://mcp.test/mcp"}
     if kind == "rest":
@@ -39,6 +39,12 @@ async def healthy_service(h, kind="oauth", isolation="service"):
 
         async def call(self, name, arguments):
             faults["calls"] += 1
+            if faults.get("validation"):
+                from mcp.types import CallToolResult
+                CallToolResult.model_validate({"content": [{"type": "text"}]})
+            if faults["disconnect"]:
+                import anyio
+                raise anyio.EndOfStream
             return {"isError": faults["call"], "content": [{
                 "type": "text", "text": "fixture business error" if faults["call"] else "ok"}]}
 
@@ -100,22 +106,19 @@ async def test_mixed_call_and_refresh_results_share_one_failure_budget(db_app, k
     await refresh(db_app, row, fail=True)
     await assert_state(db_app, row, 2)
     assert db_app.app.state.catalog.cached(row, db_app.actor["id"])["cache_at"] == original_time
-    await call(db_app, row, context)
-    await assert_state(db_app, row, 0)
+    # A valid response proves the MCP is alive, even when the tool rejects the work.
     faults["call"] = True
     await call(db_app, row, context, fail=True)
-    await assert_state(db_app, row, 1)
-    faults["discovery"] = False
-    await refresh(db_app, row)
     await assert_state(db_app, row, 0)
     await call(db_app, row, context, fail=True)
-    faults["discovery"] = True
-    await refresh(db_app, row, scheduled=True, fail=True)
-    await assert_state(db_app, row, 2)
-    await call(db_app, row, context, fail=True)
-    await assert_state(db_app, row, 3, retained=False)
-    assert faults["calls"] == 4
-
+    await assert_state(db_app, row, 0)
+    faults["discovery"] = False
+    await refresh(db_app, row)
+    faults["disconnect"] = True
+    for expected in (1, 2, 3):
+        await call(db_app, row, context, fail=True)
+        await assert_state(db_app, row, expected, retained=expected < 3)
+    assert faults["calls"] == 5
 
 @pytest.mark.parametrize("fault", ["connect", "discovery"])
 async def test_connecting_alone_does_not_reset_counter_or_double_count(db_app, fault):
@@ -126,19 +129,22 @@ async def test_connecting_alone_does_not_reset_counter_or_double_count(db_app, f
         await assert_state(db_app, row, expected, retained=expected < 3)
 
 
-async def test_configured_threshold_is_used_for_business_errors(db_app):
+async def test_configured_threshold_counts_disconnects_not_business_errors(db_app):
     row, faults, context = await healthy_service(db_app, "http")
     response = await db_app.web.patch("/api/v1/settings", json={"startup_failure_threshold": 2})
     assert response.status_code == 200
     faults["call"] = True
+    for _ in range(3):
+        await call(db_app, row, context, fail=True)
+        await assert_state(db_app, row, 0)
+    faults["disconnect"] = True
     await call(db_app, row, context, fail=True)
     await assert_state(db_app, row, 1)
     await call(db_app, row, context, fail=True)
     await assert_state(db_app, row, 2, retained=False)
 
-
 @pytest.mark.parametrize("isolation", ["service", "user"])
-async def test_oauth_reauth_blocks_execution_but_retains_directory_until_threshold(db_app, monkeypatch, isolation):
+async def test_oauth_reauth_blocks_execution_without_counting_mcp_unavailability(db_app, monkeypatch, isolation):
     from mcp_manager import oauth as oauth_module
 
     row, _faults, context = await healthy_service(db_app, isolation=isolation)
@@ -152,11 +158,11 @@ async def test_oauth_reauth_blocks_execution_but_retains_directory_until_thresho
     monkeypatch.setattr(db_app.app.state.oauth, "exchange", failed_exchange)
     monkeypatch.setattr(oauth_module, "token_expiry", lambda token: 0)
     await call(db_app, row, context, fail=True)
-    await assert_state(db_app, row, 1)
+    await assert_state(db_app, row, 0)
     await refresh(db_app, row, scheduled=True, fail=True)
-    await assert_state(db_app, row, 2)
+    await assert_state(db_app, row, 0)
     await call(db_app, row, context, fail=True)
-    await assert_state(db_app, row, 3, retained=False)
+    await assert_state(db_app, row, 0)
     assert exchanges == 1
 
 
@@ -216,11 +222,11 @@ async def test_other_user_success_resets_only_the_correct_owner(db_app, isolatio
     row, faults, context = await healthy_service(db_app, "http", isolation)
     async with actor(db_app, "other-budget-owner") as (_web, identity):
         await db_app.app.state.catalog.refresh_index(row.id, identity)
-        faults["call"] = True
+        faults["disconnect"] = True
         await call(db_app, row, context, fail=True)
         await call(db_app, row, context, fail=True)
         assert db_app.app.state.catalog.cached(row, db_app.actor["id"])["startup_failure_count"] == 2
-        faults["call"] = False
+        faults["disconnect"] = False
         async with db_app.db.session() as session:
             user = await session.get(User, identity)
         lease = db_app.app.state.runtime.create_lease(identity, "test")
@@ -242,7 +248,7 @@ async def test_warning_and_counter_survive_restart(tmp_path):
     async with console(tmp_path) as (app, web, actor):
         harness = SimpleNamespace(app=app, web=web, actor=actor, db=app.state.db)
         row, faults, context = await healthy_service(harness)
-        faults["call"] = True
+        faults["disconnect"] = True
         await call(harness, row, context, fail=True)
         await call(harness, row, context, fail=True)
         connector = app.state.runtime.connector
@@ -251,7 +257,7 @@ async def test_warning_and_counter_survive_restart(tmp_path):
         row = await app.state.catalog.get(row.id)
         await assert_state(harness, row, 2)
         app.state.runtime.connector = connector
-        faults["call"] = False
+        faults["disconnect"] = False
         context, _ = await gateway_context(harness)
         await call(harness, row, context)
         await assert_state(harness, row, 0)
@@ -325,24 +331,24 @@ async def test_resource_and_prompt_calls_share_the_same_budget(db_app, monkeypat
 
     faults["call"] = True
     await call(db_app, row, context, fail=True)
-    await assert_state(db_app, row, 1)
+    await assert_state(db_app, row, 0)
     faults["call"] = False
     await read()
     await assert_state(db_app, row, 0)
     faults["call"] = True
     with pytest.raises(GatewayError):
         await read()
-    await assert_state(db_app, row, 1)
+    await assert_state(db_app, row, 0)
 
 
 async def test_stdio_session_instances_share_the_service_catalog_budget(db_app):
     row, faults, first = await healthy_service(db_app, "stdio", "session")
     second, _token = await gateway_context(db_app)
-    faults["call"] = True
+    faults["disconnect"] = True
     await call(db_app, row, first, fail=True)
     await call(db_app, row, second, fail=True)
     await assert_state(db_app, row, 2)
-    faults["call"] = False
+    faults["disconnect"] = False
     await call(db_app, row, second)
     await assert_state(db_app, row, 0)
 

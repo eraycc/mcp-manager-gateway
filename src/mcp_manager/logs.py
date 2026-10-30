@@ -63,8 +63,8 @@ def log_summary_and_ref(event, max_preview_bytes=65536):
 
 class LogStore:
     def __init__(self, data_dir: Path, timezone_name="Asia/Shanghai"):
-        from .storage_runtime import require_safe_sqlite
-        require_safe_sqlite()
+        from .storage_runtime import warn_sqlite_runtime
+        warn_sqlite_runtime()
         self.root = Path(data_dir) / "logs"
         self.root.mkdir(parents=True, exist_ok=True)
         self.calls_root = self.root / "calls"
@@ -764,7 +764,7 @@ class LogStore:
     def _stats(self, user_id, token_id):
         cache_key = (user_id, token_id)
         current = time.monotonic()
-        with self.lock, self.gate.operation(), self.sources.lock:
+        with self.lock:
             version = (self._stats_epoch, self.conn.execute("PRAGMA data_version").fetchone()[0])
             cached = self._stats_cache.get(cache_key)
             if cached and cached[0] > current and cached[1] == version:
@@ -792,7 +792,7 @@ class LogStore:
         def query():
             if not ids:
                 return {}
-            with self.lock, self.gate.operation(), self.sources.lock:
+            with self.lock:
                 rows = self.conn.execute(
                     "SELECT token_id,count(*) call_count,sum(status='success') success_count,"
                     "sum(status IN ('tool_error','gateway_error','auth_rejected')) failed_count FROM calls "
