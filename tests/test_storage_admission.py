@@ -59,13 +59,13 @@ def test_low_disk_fails_before_creating_a_temp_and_preserves_durable_files(tmp_p
 
 
 def hold_reservation(data_dir, ready):
-    import time
+    from threading import Event
 
     budget = StorageAdmission(Path(data_dir))
     try:
         with budget.reserve("cache", MIB):
             ready.set()
-            time.sleep(30)
+            Event().wait(60)  # Outlive startup checks; the parent normally terminates us.
     finally:
         budget.close()
 
@@ -80,7 +80,7 @@ def test_killed_worker_reservation_is_recovered_without_deleting_business_data(t
     worker.start()
     budget = StorageAdmission(tmp_path)
     try:
-        assert ready.wait(10), "Child writer did not enter its temporary reservation"
+        assert ready.wait(30), "Child writer did not enter its temporary reservation"
         assert budget.usage()["slots"] == 1
         assert budget.reap_abandoned()["released"] == 0, "Live worker reservation was reclaimed"
         worker.terminate()

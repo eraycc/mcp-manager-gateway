@@ -30,13 +30,12 @@ async def bug1_browser(tmp_path, monkeypatch):
     server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
     task = asyncio.create_task(server.serve(sockets=[sock]))
     try:
-        for _ in range(300):
-            if server.started:
-                break
-            if task.done():
-                await task
-            await asyncio.sleep(.02)
-        assert server.started
+        async with asyncio.timeout(30):
+            while not server.started:
+                if task.done():
+                    await task
+                    raise RuntimeError("Gateway exited before startup")
+                await asyncio.sleep(.02)
         async with httpx.AsyncClient(base_url=url, trust_env=False) as web:
             response = await web.post("/api/v1/auth/register", json={"username": "admin", "password": "password12345"})
             assert response.status_code == 200

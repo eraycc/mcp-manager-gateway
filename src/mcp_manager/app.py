@@ -225,6 +225,8 @@ async def _scheduled_refresh_target(state, target):
         if row is not None:
             # Cache inspection is best effort; an observer must not replace the refresh error.
             with contextlib.suppress(Exception):
+                # Refresh the owner health view from primary authority before auditing.
+                await state.catalog.index_scope(row, target["user_id"])
                 cache = state.catalog.cached(row, target["user_id"])
                 details.update(cache_status=cache["cache_status"], cache_stale=cache.get("cache_stale", False))
         raise
