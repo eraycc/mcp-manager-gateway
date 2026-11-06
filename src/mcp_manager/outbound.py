@@ -133,7 +133,7 @@ def client_options(config, url, *, include_tls=True):
     return options
 
 
-def build_client(config, url, module=httpx, **kwargs):
+def build_client(config, url, module=httpx, *, sni_hostname=None, **kwargs):
     options = client_options(config, url)
     options = kwargs | options
     # HTTPS proxies have a TLS connection of their own in addition to the target.
@@ -147,7 +147,15 @@ def build_client(config, url, module=httpx, **kwargs):
         else:
             context = verify
         options["proxy"] = module.Proxy(proxy, ssl_context=context)
-    # No transport/mounts in the env path; httpx handles the explicit env proxy.
+    if sni_hostname and proxy and urlsplit(proxy).scheme in {"http", "https"}:
+        from .oauth_proxy import PinnedProxyTransport
+
+        transport_options = {key: options.pop(key) for key in
+                             ("proxy", "verify", "cert", "trust_env", "http1", "http2", "limits") if key in options}
+        options["transport"] = PinnedProxyTransport(
+            module, sni_hostname, proxy_tls=urlsplit(proxy).scheme == "https", **transport_options)
+        # The explicit transport owns proxy selection, including env-mode proxies.
+        options["trust_env"] = False
     return module.AsyncClient(**options)
 
 
@@ -193,10 +201,12 @@ class OutboundTransport(httpx.AsyncBaseTransport):
                 pool.retired = True
             self.pools = {}
             self.config = deepcopy(config)
-        key = (options.get("proxy"), options["trust_env"])
+        hostname = request.extensions.get("sni_hostname") if "outbound_original_url" in request.extensions else None
+        key = (options.get("proxy"), options["trust_env"], hostname)
         if key not in self.pools:
             try:
-                client = (self.builder or build_client)(config, route_url, self.module, **self.kwargs)
+                kwargs = self.kwargs | ({"sni_hostname": hostname} if hostname else {})
+                client = (self.builder or build_client)(config, route_url, self.module, **kwargs)
             except BaseException:
                 with anyio.CancelScope(shield=True):
                     for old in retiring:

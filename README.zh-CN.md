@@ -315,7 +315,7 @@ CIMD 支持两种元数据托管方式。本机／内网 MMG 可选 **外部静�
 
 ## 出站网络与代理
 
-管理员可在**系统设置 → 网络与代理**配置服务端 MCP、OAuth、嵌入与版本检查请求。默认关闭并忽略环境变量代理；保存只检查格式，连接测试仅作建议。新请求动态生效，进行中的响应流继续完成。Windows、Linux、macOS 共用手动 HTTP/SOCKS、黑白名单、TLS 与环境变量模式，详见[出站代理指南](wiki/operations/outbound-proxy.md)。 自定义 CA 通过控制台上传并校验，名单支持精确 hostname/IP、仅 IP 字面量的 CIDR 及子域名通配。
+管理员可在**系统设置 → 网络与代理**配置服务端 MCP、OAuth、嵌入与版本检查请求。默认关闭并忽略环境变量代理；保存只检查格式，连接测试仅作建议。新请求动态生效，进行中的响应流继续完成。Windows、Linux、macOS 共用手动 HTTP/SOCKS、黑白名单、TLS 与环境变量模式，详见[出站代理指南](wiki/operations/outbound-proxy.md)。 自定义 CA 通过控制台上传并校验，名单支持精确 hostname/IP、仅 IP 字面量的 CIDR 及子域名通配。OAuth 发现及令牌请求通过 HTTP/HTTPS 代理时仍连接已校验 IP，并使用原域名验证 TLS。
 
 ## 配置与数据
 

@@ -56,6 +56,7 @@ UNIT_FILES = frozenset([
 LIVE_FILES = frozenset(["test_codex_discovery_smoke.py", "test_live_semantic_discovery.py"])
 PERFORMANCE_FILES = frozenset(["performance/test_catalog_capacity.py", "performance/test_audit_capacity.py"])
 DOMAINS = {
+    "test_oauth_proxy.py": ["oauth","auth","runtime"],
     "test_outbound_proxy.py": ["auth","oauth","runtime","deployment"],
     "test_outbound_ca.py": ["auth","runtime","deployment"],
     "test_outbound_rules.py": ["runtime"],
