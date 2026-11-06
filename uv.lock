@@ -711,7 +711,7 @@ wheels = [
 
 [[package]]
 name = "mcp-manager-gateway"
-version = "1.6.2"
+version = "1.6.3"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
