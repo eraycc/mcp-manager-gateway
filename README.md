@@ -267,6 +267,10 @@ CIMD supports two metadata hosting options. For a local/private MMG, choose **Ex
 
 All registration policies expose Token endpoint authentication: automatic, none, client_secret_basic, or client_secret_post. Automatic DCR negotiates server-supported methods and securely stores a generated Secret for token exchange and refresh. CIMD currently uses none; an explicit Secret method triggers DCR fallback in preferred mode or a configuration error in CIMD-only mode. A fallback starts a fresh state/PKCE authorization flow once; user denial, invalid state/issuer, and uncertain token requests never trigger it. If the provider shows an error page without returning to MMG, select DCR only and retry. See the OAuth guide above for the bounded Figma compatibility behavior. OAuth forms expose a Callback path selector: `/api/v1/oauth/callback` by default, or `/callback` for services such as Figma. Both manual and automatic registration use the selected path on `PUBLIC_URL`; changing it invalidates the related registration and tokens and requires reauthorization. No provider URL matching selects the callback path. DCR failures include recognized server error codes without echoing response bodies or secrets.
 
+## Outbound network proxy
+
+Administrators can configure **Settings → Network & proxy** for server-side MCP, OAuth, embedding, and update requests. Proxying is off by default and ignores environment proxies unless explicitly enabled. Saving checks format only; optional connectivity tests are advisory. Changes apply to new requests without interrupting active streams. See the [proxy guide](wiki/operations/outbound-proxy.md) for manual HTTP/SOCKS, routing lists, TLS, and environment mode on Windows, Linux, and macOS.
+
 ## Configuration and deployment
 
 Environment variables override the user-home `.env`. MMG does not automatically load `.env` from the source tree or current working directory. Start from [.env.example](https://github.com/eraycc/mcp-manager-gateway/blob/master/.env.example).

@@ -18,6 +18,7 @@ from .database import McpServer
 from .derived_cache import DerivedCache
 from .derived_models import CatalogServer
 from .embedding_models import EmbeddingVector
+from .outbound import get_outbound_client
 from .runtime import GatewayError
 from .storage_async import run_blocking
 
@@ -162,7 +163,7 @@ class EmbeddingIndex:
             headers["Authorization"] = "Bearer " + api_key
         try:
             async with (
-                httpx.AsyncClient(
+                get_outbound_client(
                     transport=self._transport,
                     trust_env=False,
                     follow_redirects=False,

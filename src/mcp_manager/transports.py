@@ -22,6 +22,7 @@ from mcp.client.stdio import StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
 
 from .environment import connection_config, environment_value, stdio_environment
+from .outbound import get_outbound_client
 from .runtime import GatewayError, ServerSpec
 
 BUILTIN_TRANSPORTS = {"stdio", "streamable-http", "sse", "rest"}
@@ -617,7 +618,7 @@ async def connect(spec: ServerSpec):
             yield PluginConnection(connection, config)
         return
     if spec.transport == "rest":
-        async with httpx.AsyncClient(timeout=float(config.get("call_timeout", 60)),
+        async with get_outbound_client(timeout=float(config.get("call_timeout", 60)),
                                      verify=config.get("verify_tls", True),
                                      follow_redirects=False, trust_env=False,
                                      proxy=config.get("proxy")) as http:
@@ -652,12 +653,12 @@ async def connect(spec: ServerSpec):
         hooks = {"request": [mirror_tool_headers]}
         if config.get("auth", {}).get("type") == "oauth":
             hooks["response"] = [oauth_response]
-        async with httpx2.AsyncClient(headers=auth_headers(config), event_hooks=hooks,
+        async with get_outbound_client(module=httpx2, headers=auth_headers(config), event_hooks=hooks,
                                       timeout=float(config.get("call_timeout", 60)),
                                       verify=config.get("verify_tls", True),
                                       follow_redirects=False, trust_env=False) as http:
             def sse_http_factory(headers=None, timeout=None, auth=None):
-                return httpx2.AsyncClient(headers=headers, timeout=timeout, auth=auth, event_hooks=hooks,
+                return get_outbound_client(module=httpx2, headers=headers, timeout=timeout, auth=auth, event_hooks=hooks,
                     verify=config.get("verify_tls", True), follow_redirects=False, trust_env=False)
             source = (sse_client(config["url"], headers=auth_headers(config),
                                  timeout=timeout, sse_read_timeout=float(config.get("call_timeout", 60)),

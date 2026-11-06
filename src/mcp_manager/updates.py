@@ -6,6 +6,7 @@ import httpx
 
 from .about import VERSION
 from .database import SystemSetting, get_setting
+from .outbound import get_outbound_client
 
 PYPI_JSON_URL = "https://pypi.org/pypi/mcp-manager-gateway/json"
 PYPI_PROJECT_URL = "https://pypi.org/project/mcp-manager-gateway/"
@@ -32,7 +33,7 @@ def is_newer(candidate, current):
 
 
 async def fetch_latest_release():
-    async with httpx.AsyncClient(timeout=8, follow_redirects=True, trust_env=False) as client:
+    async with get_outbound_client(timeout=8, follow_redirects=True, trust_env=False) as client:
         response = await client.get(PYPI_JSON_URL, headers={"User-Agent": f"mcp-manager-gateway/{VERSION}"})
         response.raise_for_status()
         payload = response.json()

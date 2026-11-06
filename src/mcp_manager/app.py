@@ -22,6 +22,7 @@ from . import (
     leases_api,
     oauth_metadata,
     operations_api,
+    outbound_api,
     proposals,
     storage_api,
 )
@@ -361,9 +362,22 @@ def create_app(config=None):
             state.identity_rates = identity.IdentityRateLimiter(
                 max_entries=config.identity_rate_limit_entries,
             )
+            from .outbound import _current_loader, load_config
+
+            outbound_token = _current_loader.set(lambda: load_config(state))
+            base.callback(_current_loader.reset, outbound_token)
             load_transport_plugins()
+            @asynccontextmanager
+            async def outbound_connect(spec):
+                token = _current_loader.set(lambda: load_config(state))
+                try:
+                    async with connect(spec) as connection:
+                        yield connection
+                finally:
+                    _current_loader.reset(token)
+
             state.runtime = Runtime(
-                connect,
+                outbound_connect,
                 capacity=RuntimeCapacity(
                     global_calls=config.runtime_global_calls,
                     user_calls=config.runtime_user_calls,
@@ -497,6 +511,7 @@ def create_app(config=None):
         oauth_metadata.router,
         oauth_public_router,
         embedding_api.router,
+        outbound_api.router,
         proposals.router,
     ):
         app.include_router(router)
@@ -509,6 +524,8 @@ def create_app(config=None):
     from .cors import GatewayCORSMiddleware
     app.add_middleware(GatewayCORSMiddleware, root_app=app)
     app.add_middleware(AuditContextMiddleware)
+    from .outbound import OutboundContextMiddleware
+    app.add_middleware(OutboundContextMiddleware, root_app=app)
     frontend = PACKAGE_ROOT / "static"
     if frontend.exists():
         app.mount("/", StaticFiles(directory=frontend, html=True), name="console")

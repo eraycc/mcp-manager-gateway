@@ -18,6 +18,7 @@
 - [连接管理与租期断开](guides/manage-connections.md)
 - [审计日志查询、保留与清理](guides/audit-logs.md)
 - [配置与数据目录](operations/configuration.md)
+- [出站网络与代理](operations/outbound-proxy.md)
 - [控制台外观、翻译与版本提醒](guides/interface-translation-and-updates.md)
 - [SQLite 与 MySQL 部署、迁移和备份](database-deployment.md)
 - [存储架构、预算与回收](operations/storage-governance.md)

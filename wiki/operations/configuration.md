@@ -95,3 +95,7 @@ COOKIE_SECURE=true
 - embedding 检索连接。
 
 这些设置和管理 API 的 Cookie、CSRF、同源校验是不同边界。
+
+## 出站代理
+
+系统设置中的“网络与代理”管理服务端 HTTP 出站策略，默认直连且忽略环境变量代理。保存仅检查格式；可单独测试连接获取参考建议。配置变更无需重启，已有请求继续完成。手动 HTTP/SOCKS、黑白名单、TLS 与环境模式详见[出站代理指南](outbound-proxy.md)。

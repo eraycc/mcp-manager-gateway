@@ -5,6 +5,7 @@ import socket
 
 import httpx
 
+from .outbound import OutboundTransport
 from .runtime import GatewayError
 
 
@@ -27,9 +28,7 @@ class OAuthHTTPTransport(httpx.AsyncBaseTransport):
 
     def __init__(self):
         # Pinned IPs can belong to multiple TLS hosts: never reuse across identities.
-        self.inner = httpx.AsyncHTTPTransport(
-            trust_env=False, limits=httpx.Limits(max_keepalive_connections=0),
-        )
+        self.inner = OutboundTransport(limits=httpx.Limits(max_keepalive_connections=0))
 
     async def handle_async_request(self, request):
         if request.extensions.get("oauth_public_only"):
@@ -40,7 +39,7 @@ class OAuthHTTPTransport(httpx.AsyncBaseTransport):
                 pinned = httpx.Request(
                     request.method, request.url.copy_with(host=address),
                     headers=request.headers, stream=request.stream,
-                    extensions=request.extensions | {"sni_hostname": host},
+                    extensions=request.extensions | {"sni_hostname": host, "outbound_original_url": str(request.url)},
                 )
                 try:
                     return await self.inner.handle_async_request(pinned)

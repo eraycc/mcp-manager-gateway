@@ -313,6 +313,10 @@ CIMD 支持两种元数据托管方式。本机／内网 MMG 可选 **外部静�
 
 四种注册方式均可设置 Token 端点认证方式：自动选择、none、client_secret_basic 或 client_secret_post。自动 DCR 按服务器能力协商，并加密保存注册返回的 Secret，供交换和刷新使用。CIMD 当前使用 none；显式选择 Secret 方式时，优先模式回退 DCR，仅 CIMD 模式提示不兼容。回退最多启动一次新的 state/PKCE 授权流程；用户拒绝、state/issuer 校验失败及结果不明的 Token 请求不会触发回退。若服务商停留在错误页且未回调 MMG，请切换“仅 DCR”重试。Figma 已知注册响应的限定兼容行为见上述 OAuth 指南。OAuth 表单支持选择回调路径：默认 `/api/v1/oauth/callback`，Figma 等服务可选 `/callback`。预注册和自动模式均使用 `PUBLIC_URL` 拼接所选路径；更改后会清除相关旧注册与 Token，并要求重新授权，不再按服务 URL 自动选择回调路径。DCR 失败会显示已知服务端错误码，不回显响应正文或密钥。
 
+## 出站网络与代理
+
+管理员可在**系统设置 → 网络与代理**配置服务端 MCP、OAuth、嵌入与版本检查请求。默认关闭并忽略环境变量代理；保存只检查格式，连接测试仅作建议。新请求动态生效，进行中的响应流继续完成。Windows、Linux、macOS 共用手动 HTTP/SOCKS、黑白名单、TLS 与环境变量模式，详见[出站代理指南](wiki/operations/outbound-proxy.md)。
+
 ## 配置与数据
 
 环境变量优先于用户目录中的 `.env`。源码目录和当前工作目录下的 `.env` 不会被自动读取。完整示例见 [.env.example](https://github.com/eraycc/mcp-manager-gateway/blob/master/.env.example)。

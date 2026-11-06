@@ -32,6 +32,7 @@ POLICIES = {
     "mcp.proposal.submit": {"count", "ids"}, "mcp.proposal.configure": {"changed_fields"},
     "mcp.proposal.approve": set(), "mcp.proposal.reject": set(), "mcp.proposal.delete": set(),
     "settings.update": {"changes"}, "storage.settings.update": {"changes"},
+    "settings.outbound_proxy.update": {"mode", "version", "changed_fields"},
     "storage.vacuum": {"database", "status", "reclaimed_bytes"},
     "storage.startup": {"database", "status", "reclaimed_bytes"}, "storage.startup.error": {"database"},
     "lease.disconnect": {"count", "disconnected", "released", "kind", "operation_id", "instance_ids",
