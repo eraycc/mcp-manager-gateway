@@ -21,6 +21,8 @@ docker compose up --build -d
 
 默认端口映射为 `127.0.0.1:8765:8765`，数据卷为 `mcp-manager-data`。容器内 stdio 命令必须安装在容器中；Node.js 等额外依赖应放进派生镜像。
 
+上传的代理 CA 保存为 `<MCP_MANAGER_HOME>/credentials/proxy-ca.pem`（默认 home 为 `~/.mcp-manager`）。默认 Compose 使用 `MCP_MANAGER_HOME=/data` 并持久化 `/data`，会一并保留 CA。自定义部署也必须将整个 home 挂载到持久卷；否则容器重建后 CA 文件会丢失，需重新上传。备份时应包含 `credentials/`。详见[出站网络与代理](outbound-proxy.md)。
+
 升级源码构建：
 
 ~~~console

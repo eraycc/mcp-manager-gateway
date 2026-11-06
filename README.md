@@ -269,7 +269,7 @@ All registration policies expose Token endpoint authentication: automatic, none,
 
 ## Outbound network proxy
 
-Administrators can configure **Settings → Network & proxy** for server-side MCP, OAuth, embedding, and update requests. Proxying is off by default and ignores environment proxies unless explicitly enabled. Saving checks format only; optional connectivity tests are advisory. Changes apply to new requests without interrupting active streams. See the [proxy guide](wiki/operations/outbound-proxy.md) for manual HTTP/SOCKS, routing lists, TLS, and environment mode on Windows, Linux, and macOS.
+Administrators can configure **Settings → Network & proxy** for server-side MCP, OAuth, embedding, and update requests. Proxying is off by default and ignores environment proxies unless explicitly enabled. Saving checks format only; optional connectivity tests are advisory. Changes apply to new requests without interrupting active streams. See the [proxy guide](wiki/operations/outbound-proxy.md) for manual HTTP/SOCKS, routing lists, TLS, and environment mode on Windows, Linux, and macOS. Custom CA bundles are uploaded and validated in the console; target lists support exact host/IP, IP-only CIDR, and subdomain wildcards.
 
 ## Configuration and deployment
 

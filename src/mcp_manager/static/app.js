@@ -340,9 +340,9 @@ async function settings(main,signal){
  settingPanels.push(['storage','存储治理',storageSettings(signal)]);
  settingPanels.push(['embedding','工具检索',await embeddingSettings(signal)]);
  const aboutLabel=el('span',{class:'tab-label'},'关于',updateState?.notification_count?notificationDot(updateState.notification_count):null);settingPanels.push(['about',aboutLabel,about]);
- form.append(tabPanels(settingPanels,{key:'settings_tab',label:'系统设置分类'}));
  const err=el('div',{class:'error',hidden:true}),submit=el('button',{type:'submit',class:'primary'},'保存设置');
- form.append(err,el('div',{class:'actions settings-save'},submit));
+ const saveActions=el('div',{class:'actions settings-save'},submit);
+ form.append(tabPanels(settingPanels,{key:'settings_tab',label:'系统设置分类',onChange:id=>{saveActions.hidden=id==='network';err.hidden=true}}),err,saveActions);
  form.onsubmit=async e=>{e.preventDefault();submit.disabled=true;err.hidden=true;try{const payload={};for(const[k,[input,type]]of Object.entries(fields))payload[k]=type==='check'?input.checked:type==='inverse-check'?!input.checked:type==='number'?Number(input.value):['origins','hosts'].includes(type)?input.value.split(/[\n,]+/).map(x=>x.trim()).filter(Boolean):input.value;const s=scope.value();payload.anonymous_scope_mode=s.scope_mode;payload.anonymous_mcp_ids=s.mcp_ids;payload.translation_config=translation.value();payload.update_auto_check=updateCheck.value();payload.update_check_interval_seconds=updateCheck.intervalValue();await api('/settings',{method:'PATCH',body:payload});bootstrap.title=payload.title;const previousTranslation=translationConfig;translationConfig=normalizeTranslationConfig(payload.translation_config);if(!translationConfig.enabled&&previousTranslation.enabled)await disableTranslation(previousTranslation);await refresh();if(translationConfig.enabled){const applied=await applyTranslation(translationConfig,preferredTranslationTarget(translationConfig));applied.warnings.forEach(message=>toast(message,'warning'))}toast('设置已保存')}catch(x){err.textContent=x.message;err.hidden=false}finally{submit.disabled=false}};
  main.append(form);await loadAbout();
 }

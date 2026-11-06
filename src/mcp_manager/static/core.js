@@ -135,9 +135,9 @@ export function pagedList({items=[],key='list',label='记录',renderItem,searchT
  foot.replaceChildren(el('span',{class:'total','aria-live':'polite'},'共 '+matching.length+' 条'),size,prev,el('span',{},state.page+' / '+pages),next,jump,button('跳转',()=>{state.page=Math.min(pages,Math.max(1,Number(jump.value)||1));persist();draw()}));};
  form.onsubmit=e=>{e.preventDefault();state.q=search.value.trim();state.filter=filter.value;state.page=1;persist();draw()};filter.onchange=()=>form.requestSubmit();root.append(form,body,foot);draw();return root;
 }
-export function tabPanels(entries,{key='tab',label='选项卡'}={}){
+export function tabPanels(entries,{key='tab',label='选项卡',onChange=()=>{}}={}){
  const root=el('div'),tabs=el('div',{class:'tabs',role:'tablist','aria-label':label}),panels=el('div');let current=route().params.get(key)||entries[0][0];if(!entries.some(x=>x[0]===current))current=entries[0][0];
- const buttons=[];const activate=(id,focus=false)=>{current=id;entries.forEach(([k,,node],i)=>{node.hidden=k!==id;buttons[i].setAttribute('aria-selected',String(k===id));buttons[i].tabIndex=k===id?0:-1;buttons[i].classList.toggle('active',k===id);if(k===id&&focus)buttons[i].focus()});const r=route();r.params.set(key,id);history.replaceState(null,'','#/'+r.name+'?'+r.params)};
+ const buttons=[];const activate=(id,focus=false)=>{current=id;entries.forEach(([k,,node],i)=>{node.hidden=k!==id;buttons[i].setAttribute('aria-selected',String(k===id));buttons[i].tabIndex=k===id?0:-1;buttons[i].classList.toggle('active',k===id);if(k===id&&focus)buttons[i].focus()});const r=route();r.params.set(key,id);history.replaceState(null,'','#/'+r.name+'?'+r.params);onChange(id)};
  entries.forEach(([id,name,node],i)=>{const b=button(name,()=>activate(id));b.id=key+'-tab-'+id;b.setAttribute('role','tab');b.setAttribute('aria-controls',key+'-panel-'+id);node.id=key+'-panel-'+id;node.setAttribute('role','tabpanel');node.setAttribute('aria-labelledby',b.id);b.onkeydown=e=>{let next;if(e.key==='ArrowRight')next=(i+1)%entries.length;if(e.key==='ArrowLeft')next=(i-1+entries.length)%entries.length;if(e.key==='Home')next=0;if(e.key==='End')next=entries.length-1;if(next!==undefined){e.preventDefault();activate(entries[next][0],true)}};buttons.push(b);tabs.append(b);panels.append(node)});root.append(tabs,panels);activate(current);return root;
 }
 

@@ -37,6 +37,7 @@ BROWSER_FILES = frozenset([
     "test_browser.py"
 ])
 UNIT_FILES = frozenset([
+    "test_outbound_rules.py",
     "performance/test_browser_budget.py",
     "test_config.py",
     "test_user_home.py",
@@ -56,6 +57,8 @@ LIVE_FILES = frozenset(["test_codex_discovery_smoke.py", "test_live_semantic_dis
 PERFORMANCE_FILES = frozenset(["performance/test_catalog_capacity.py", "performance/test_audit_capacity.py"])
 DOMAINS = {
     "test_outbound_proxy.py": ["auth","oauth","runtime","deployment"],
+    "test_outbound_ca.py": ["auth","runtime","deployment"],
+    "test_outbound_rules.py": ["runtime"],
     "test_browser_outbound_proxy.py": ["auth","runtime","ui"],
     "performance/test_audit_capacity.py": ["storage"],
     "contracts/test_approval_contract.py": ["core"],
@@ -257,7 +260,7 @@ DOMAINS = {
     "test_suite_policy.py": ["core"],
 }
 TEST_IMPORTS = {
-    "test_browser_outbound_proxy.py": ["test_browser_profile_settings.py"],
+    "test_browser_outbound_proxy.py": ["test_browser_profile_settings.py","test_outbound_ca.py"],
     "test_admission_cache_persistence.py": ["test_bug1_catalog.py","test_discovery_failure_policy.py"],
     "test_admission_refresh_contract.py": ["test_bug1_catalog.py","test_discovery_failure_policy.py"],
     "test_auth_bug1.py": ["test_identity.py"],
