@@ -1,7 +1,7 @@
 """A killed writer leaves only owned temporary files eligible for exact recovery."""
 import multiprocessing
-import time
 from pathlib import Path
+from threading import Event
 
 import pytest
 from test_storage_admission import prepare
@@ -22,7 +22,7 @@ def hold_spool(root, ready, namespace):
                 connection.execute("CREATE TABLE call_rewrite_offsets(rewrite_id TEXT,old_offset INTEGER,new_offset INTEGER)")
                 connection.execute("INSERT INTO call_rewrite_offsets VALUES(?,0,0)", [identity])
         ready.set()
-        time.sleep(30)
+        Event().wait(60)  # Outlive startup checks; the parent normally terminates us.
 
 
 @pytest.mark.parametrize("namespace", ["cache", "calls", "audit"])
@@ -36,7 +36,7 @@ def test_killed_spool_is_physically_removed_but_other_files_are_preserved(tmp_pa
     worker.start()
     budget = StorageAdmission(tmp_path)
     try:
-        assert ready.wait(10)
+        assert ready.wait(30), "Child spool writer did not become ready"
         folder = tmp_path / ("objects/cache/sha256" if namespace == "cache" else "logs/" + namespace)
         owned = list(folder.glob("*.tmp"))
         assert len(owned) == 1

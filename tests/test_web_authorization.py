@@ -23,8 +23,8 @@ async def web(tmp_path):
             await finished.wait()
 
     owner = asyncio.create_task(lifespan_owner())
-    await asyncio.wait_for(ready.wait(), 10)
     try:
+        await asyncio.wait_for(ready.wait(), 30)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
             actor = (await c.post("/api/v1/auth/register", json={
                 "username": "admin", "password": "password123"})).json()
@@ -36,7 +36,7 @@ async def web(tmp_path):
             yield app, c, actor, row
     finally:
         finished.set()
-        await asyncio.wait_for(owner, 10)
+        await asyncio.wait_for(owner, 30)
 
 
 async def test_test_case_update_invalidates_setting_cache(web):

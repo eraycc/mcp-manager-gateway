@@ -4,6 +4,7 @@ Layers describe dependencies, not how important a regression is. In particular,
 capacity/scale names alone never opt a test out of the daily suite.
 """
 BROWSER_FILES = frozenset([
+    "test_browser_outbound_proxy.py",
     "test_browser_audit_logs.py",
     "test_browser_bug1.py",
     "test_browser_capability_text_wrap.py",
@@ -54,6 +55,8 @@ UNIT_FILES = frozenset([
 LIVE_FILES = frozenset(["test_codex_discovery_smoke.py", "test_live_semantic_discovery.py"])
 PERFORMANCE_FILES = frozenset(["performance/test_catalog_capacity.py", "performance/test_audit_capacity.py"])
 DOMAINS = {
+    "test_outbound_proxy.py": ["auth","oauth","runtime","deployment"],
+    "test_browser_outbound_proxy.py": ["auth","runtime","ui"],
     "performance/test_audit_capacity.py": ["storage"],
     "contracts/test_approval_contract.py": ["core"],
     "contracts/test_catalog_contract.py": ["catalog","storage"],
@@ -254,6 +257,7 @@ DOMAINS = {
     "test_suite_policy.py": ["core"],
 }
 TEST_IMPORTS = {
+    "test_browser_outbound_proxy.py": ["test_browser_profile_settings.py"],
     "test_admission_cache_persistence.py": ["test_bug1_catalog.py","test_discovery_failure_policy.py"],
     "test_admission_refresh_contract.py": ["test_bug1_catalog.py","test_discovery_failure_policy.py"],
     "test_auth_bug1.py": ["test_identity.py"],

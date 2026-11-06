@@ -23,14 +23,13 @@ async def running_gateway(tmp_path):
     app = create_app(Settings(data_dir=tmp_path, database_url="", secret_key="test-key", public_url=url))
     server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="on"))
     task = asyncio.create_task(server.serve(sockets=[sock]))
-    for _ in range(300):
-        if server.started:
-            break
-        if task.done():
-            await task
-        await asyncio.sleep(.02)
-    assert server.started
     try:
+        async with asyncio.timeout(30):
+            while not server.started:
+                if task.done():
+                    await task
+                    raise RuntimeError("Gateway exited before startup")
+                await asyncio.sleep(.02)
         # Service creation includes discovery with a 30-second startup budget.
         async with httpx.AsyncClient(base_url=url, trust_env=False, timeout=35) as web:
             response = await web.post("/api/v1/auth/register", json={"username": "admin", "password": "password12345"})

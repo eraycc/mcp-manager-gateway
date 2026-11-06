@@ -51,9 +51,21 @@ async def test_scheduled_refresh_audits_object_owner_counts_and_system_actor(db_
 
 
 @pytest.mark.parametrize("isolation", ["service", "user"])
-async def test_scheduled_failure_is_audited_even_when_last_catalog_is_retained(db_app, isolation):
+async def test_scheduled_failure_is_audited_even_when_last_catalog_is_retained(db_app, isolation, monkeypatch):
     row, faults, _context = await healthy_service(db_app, "oauth" if isolation == "user" else "http", isolation)
     faults["discovery"] = True
+    catalog = db_app.app.state.catalog
+    refresh = catalog.refresh_target
+
+    async def stale_projection(target):
+        try:
+            return await refresh(target)
+        finally:
+            # Reproduce a reader publishing its pre-failure health snapshot.
+            scope = await catalog.index_scope(row, target["user_id"])
+            catalog._remember_health(scope, {})
+
+    monkeypatch.setattr(catalog, "refresh_target", stale_projection)
     job = await schedule(db_app)
     assert job["failed"] == 1 and job["succeeded"] == 0
     cache = db_app.app.state.catalog.cached(row, db_app.actor["id"])

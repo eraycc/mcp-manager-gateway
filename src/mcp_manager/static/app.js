@@ -6,6 +6,7 @@ import{auditLogs}from './audit-logs.js';
 import{leases as connectionLeases}from './leases.js';
 import{capabilityBrowser}from './capability-browser.js';
 import{translationSettings}from './translation-settings.js';
+import{outboundSettings}from './outbound-settings.js';
 import{DEFAULT_TRANSLATION_CONFIG,normalizeTranslationConfig,applyTranslation,disableTranslation,preferredTranslationTarget}from './translation.js';
 import{initializeTheme,toggleTheme as theme,topActions}from './shell-controls.js';
 import{cacheUpdateState,maybeNotifyUpdate,notificationDot,readCachedUpdateState,syncUpdateNotifications,updateAboutPanel,updateCheckSetting}from './update-ui.js';
@@ -333,6 +334,7 @@ async function settings(main,signal){
  allowAnonymous.input.addEventListener('change',syncAnonymousScope);syncAnonymousScope();
  settingPanels.push(['anonymous','匿名访问',el('section',{class:'card'},el('h2',{},'匿名访问'),el('div',{class:'stack'},allowAnonymous.node,allowAnonymousHint),el('h3',{},'匿名访问范围'),el('p',{class:'notice'},'此范围仅在允许匿名访问开启时生效'),scopePrompt,scope.node)]);
  settingPanels.push(['translation','翻译设置',translation.node]);
+ settingPanels.push(['network','网络与代理',await outboundSettings(signal)]);
  const about=el('div',{},el('h2',{},'关于'),loading());
  const loadAbout=async()=>{try{const content=aboutPanel(await api('/about',{signal}),updateCheck.node);about.replaceChildren(content);run(()=>refreshUpdateState())}catch(e){if(e.name==='AbortError')return;about.replaceChildren(el('h2',{},'关于'),el('p',{class:'error',role:'alert'},e.message),button('重试',loadAbout))}};
  settingPanels.push(['storage','存储治理',storageSettings(signal)]);

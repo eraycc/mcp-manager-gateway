@@ -77,7 +77,10 @@ async def test_stop_forces_active_connection_closed_and_next_call_succeeds(tmp_p
         })
         # Initial lazy discovery closes its connection before the business call.
         closed.clear()
-        lease = runtime.create_lease("system", "agent")
+        lease = runtime.create_lease("system", "test")
+        from mcp_manager.app import _revoke_leases
+        await _revoke_leases(app)
+        assert lease.id in runtime.leases
         active = asyncio.create_task(catalog.call(row, lease, "first", {"value": "active"}))
         try:
             await asyncio.wait_for(entered.wait(), 2)
