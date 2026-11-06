@@ -1,7 +1,7 @@
 """Administrator-only outbound settings; connectivity checks are advisory."""
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from . import outbound
+from . import outbound, outbound_ca
 from .catalog import web_authorizer
 from .database import SystemSetting, invalidate_setting_cache
 from .identity import admin_user
@@ -13,15 +13,22 @@ ADMIN = Depends(admin_user)
 def public(value):
     result = dict(value)
     result["password"] = outbound.REDACTED if value.get("password") else ""
+    result["custom_ca"] = outbound_ca.ca_metadata(result.pop("custom_ca_path", None))
     return result
 
 
 def candidate(previous, data):
     value = dict(previous)
+    if data.get("custom_ca_path") is not None:
+        raise HTTPException(422, "请通过文件上传配置自定义 CA")
     for key, item in data.items():
+        if key in {"custom_ca", "custom_ca_path"}:
+            continue
         if key == "password" and item == outbound.REDACTED:
             continue
         value[key] = item
+    if value["ssl_verify"] == "custom_ca" and not value.get("custom_ca_path"):
+        raise HTTPException(422, "请先上传有效的 PEM CA 文件")
     return outbound.normalize_config(value)
 
 
@@ -33,7 +40,7 @@ async def get_proxy_settings(request: Request, user=ADMIN):
 @router.patch("")
 async def update_proxy_settings(data: dict, request: Request, user=ADMIN):
     state = request.app.state
-    async with state.db.locked() as session:
+    async with outbound_ca.settings_lock(state), state.db.locked() as session:
         actor = await web_authorizer(request)(session)
         row = await session.get(SystemSetting, "outbound_proxy")
         previous = dict(outbound.DEFAULTS) if row is None else state.catalog.unseal(row.value)
@@ -68,3 +75,20 @@ async def test_proxy_connection(data: dict, request: Request, user=ADMIN):
         result = {"ok": False, "detail": f"连接测试未完成（{type(exc).__name__}）；仅供参考，不影响保存"}
     await web_authorizer(request)()
     return result
+
+
+@router.post("/ca")
+async def upload_proxy_ca(data: dict, request: Request, user=ADMIN):
+    if set(data) != {"pem"}:
+        raise HTTPException(422, "CA 上传只接受单个 PEM 文件")
+    await web_authorizer(request)()
+    staged = outbound_ca.stage_ca(request.app.state, data["pem"])
+    try:
+        return public(await outbound_ca.persist_ca(request, staged))
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+@router.delete("/ca")
+async def remove_proxy_ca(request: Request, user=ADMIN):
+    return public(await outbound_ca.persist_ca(request, None))

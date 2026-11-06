@@ -15,6 +15,8 @@ import anyio
 import httpx
 
 from .database import get_setting
+from .outbound_rules import matches
+from .outbound_rules import parse_rule as _entry
 
 DEFAULTS = {
     "enabled": False, "mode": "disabled", "scheme": "http", "host": "", "port": 8080,
@@ -31,18 +33,6 @@ def _endpoint(value):
     if (parsed.scheme not in {"http", "https"} or not parsed.hostname
             or parsed.username is not None or parsed.password is not None or parsed.fragment):
         raise ValueError("validation_url must be an HTTP(S) URL without credentials")
-    _ = parsed.port
-    return parsed
-
-
-def _entry(value):
-    if value == "*":
-        return None
-    parsed = urlsplit(value if "://" in value else "//" + value)
-    if (not parsed.hostname or parsed.username is not None or parsed.password is not None
-            or parsed.path or parsed.query or parsed.fragment
-            or (parsed.scheme and parsed.scheme not in {"http", "https"})):
-        raise ValueError("list_entries must contain hostnames, IPs or HTTP(S) origins")
     _ = parsed.port
     return parsed
 
@@ -118,29 +108,6 @@ def proxy_url(config):
     return f'{config["scheme"]}://{auth}{host}:{config["port"]}'
 
 
-def matches(url, entries):
-    target = urlsplit(str(url))
-    host = (target.hostname or "").lower().rstrip(".")
-    for entry in entries:
-        item = _entry(entry)
-        if item is None:
-            return True
-        if item.scheme and item.scheme != target.scheme:
-            continue
-        if item.port and item.port != (target.port or (443 if target.scheme == "https" else 80)):
-            continue
-        pattern = item.hostname.lower().rstrip(".")
-        try:
-            ipaddress.ip_address(pattern)
-            hit = host == pattern
-        except ValueError:
-            hit = (host.endswith(pattern) if pattern.startswith(".") else
-                   host == pattern or host.endswith("." + pattern))
-        if hit:
-            return True
-    return False
-
-
 def client_options(config, url, *, include_tls=True):
     options = {"trust_env": False}
     mode = config["mode"] if config["enabled"] else "disabled"
@@ -149,7 +116,7 @@ def client_options(config, url, *, include_tls=True):
     if mode == "env":
         # Read only process variables. urllib.getproxies() can fall back to OS settings.
         env = getproxies_environment()
-        bypass = matches(url, [x.strip() for x in env.get("no", "").split(",") if x.strip()])
+        bypass = matches(url, [x.strip() for x in env.get("no", "").split(",") if x.strip()], no_proxy=True)
         proxy = None if bypass else env.get(urlsplit(str(url)).scheme, env.get("all"))
         if proxy:
             options.update(proxy=proxy, trust_env=True)

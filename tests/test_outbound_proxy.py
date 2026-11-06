@@ -22,7 +22,7 @@ def test_defaults_ignore_environment_and_encode_credentials(monkeypatch):
 
 
 @pytest.mark.parametrize("entry,host,hit", [
-    ("example.com", "example.com", True), ("example.com", "a.example.com", True),
+    ("example.com", "example.com", True), ("example.com", "a.example.com", False),
     (".example.com", "example.com", False), (".example.com", "a.example.com", True),
     ("example.com", "badexample.com", False), ("127.0.0.1", "127.0.0.1", True),
     ("https://example.com:8443", "example.com:8443", True),
